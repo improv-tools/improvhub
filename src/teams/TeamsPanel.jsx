@@ -25,9 +25,14 @@ export default function TeamsPanel() {
       setTeams(list);
       setLoading(false);
       if (selected) {
-        const s = list.find(t => t.id === selected.id) || selected;
+      const s = list.find(t => t.id === selected.id);
+      if (s) {
         setSelected(s);
+      } else {
+        setSelected(null);    // <- unselect if it was deleted
+        setMembers([]);
       }
+    }
     } catch (e) {
       setErr(e.message || "Failed to load teams");
       setLoading(false);
