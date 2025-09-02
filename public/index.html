@@ -1,0 +1,181 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Supabase Auth — Minimal</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <style>
+    body { font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; margin: 32px; max-width: 560px; }
+    h1 { font-size: 1.25rem; }
+    fieldset { border: 1px solid #ddd; border-radius: 8px; padding: 16px; margin: 16px 0; }
+    label { display: block; margin-bottom: 8px; }
+    input { width: 100%; padding: 8px; margin: 4px 0 12px; border: 1px solid #ccc; border-radius: 6px; }
+    button { padding: 8px 12px; border: 0; border-radius: 6px; cursor: pointer; }
+    .row { display: flex; gap: 8px; flex-wrap: wrap; }
+    .muted { color: #666; font-size: 0.9rem; }
+    #log { white-space: pre-wrap; background: #fafafa; border: 1px dashed #ccc; padding: 12px; border-radius: 6px; min-height: 60px; }
+    .ok { color: #0a7; } .err { color: #c00; }
+  </style>
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+</head>
+<body>
+  <h1>Supabase Auth — Minimal Demo</h1>
+  <p class="muted">
+    Replace YOUR_SUPABASE_URL and YOUR_SUPABASE_ANON_KEY in the script. The anon key is safe to use in the browser.
+  </p>
+
+  <fieldset>
+    <legend>Project Keys</legend>
+    <label>Supabase URL <input id="url" placeholder="https://proj-ref.supabase.co" /></label>
+    <label>Anon Key <input id="key" placeholder="eyJhbGciOi..." /></label>
+    <div class="row">
+      <button id="init">Initialize</button>
+      <span class="muted" id="initStatus"></span>
+    </div>
+  </fieldset>
+
+  <fieldset>
+    <legend>Sign Up (email + password)</legend>
+    <label>Email <input id="su_email" type="email" placeholder="you@example.com" /></label>
+    <label>Password <input id="su_password" type="password" placeholder="Minimum 6 chars" /></label>
+    <div class="row">
+      <button id="signup">Sign Up</button>
+    </div>
+  </fieldset>
+
+  <fieldset>
+    <legend>Log In (email + password)</legend>
+    <label>Email <input id="li_email" type="email" placeholder="you@example.com" /></label>
+    <label>Password <input id="li_password" type="password" /></label>
+    <div class="row">
+      <button id="login">Log In</button>
+    </div>
+  </fieldset>
+
+  <fieldset>
+    <legend>Magic Link (email only)</legend>
+    <label>Email <input id="ml_email" type="email" placeholder="you@example.com" /></label>
+    <div class="row">
+      <button id="magic">Send Magic Link</button>
+      <span class="muted">Make sure “Allow new users to sign up” and “Confirm email” are enabled in Supabase Auth settings.</span>
+    </div>
+  </fieldset>
+
+  <fieldset>
+    <legend>Session</legend>
+    <div class="row">
+      <button id="getSession">Get Session</button>
+      <button id="logout">Log Out</button>
+    </div>
+    <div id="session"></div>
+  </fieldset>
+
+  <h3>Log</h3>
+  <div id="log"></div>
+
+  <script>
+    // --- Replace these with your project values (or type them in the fields above and click Initialize) ---
+    let SUPABASE_URL = "https://haredxxnxtexghcdpnub.supabase.co";
+    let SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImhhcmVkeHhueHRleGdoY2RwbnViIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NTU4NzYyNzksImV4cCI6MjA3MTQ1MjI3OX0.ZzEXhfOmiHWTIfNKpUy_Af94GEYsUP_UstfsfEBi4TI";
+    // ------------------------------------------------------------------------------------------------------
+
+    let supabase = null;
+
+    const $ = (id) => document.getElementById(id);
+    const log = (msg, cls) => {
+      const div = document.createElement('div');
+      div.textContent = typeof msg === 'string' ? msg : JSON.stringify(msg, null, 2);
+      if (cls) div.className = cls;
+      $('log').prepend(div);
+    };
+
+    const initClient = () => {
+      const url = $('url').value.trim() || SUPABASE_URL;
+      const key = $('key').value.trim() || SUPABASE_ANON_KEY;
+      if (!url || !key) {
+        $('initStatus').textContent = 'Missing URL or Key';
+        return;
+      }
+      supabase = window.supabase.createClient(url, key);
+      $('initStatus').textContent = 'Initialized ✓';
+      log('Supabase client initialized', 'ok');
+    };
+
+    // Pre-fill fields with constants
+    window.addEventListener('DOMContentLoaded', () => {
+      $('url').value = SUPABASE_URL;
+      $('key').value = SUPABASE_ANON_KEY;
+    });
+
+    $('init').addEventListener('click', initClient);
+
+    $('signup').addEventListener('click', async () => {
+      try {
+        if (!supabase) initClient();
+        const email = $('su_email').value.trim();
+        const password = $('su_password').value;
+        const { data, error } = await supabase.auth.signUp({ email, password });
+        if (error) throw error;
+        log(['SignUp OK', data], 'ok');
+      } catch (e) {
+        log(['SignUp ERROR', e.message || e], 'err');
+      }
+    });
+
+    $('login').addEventListener('click', async () => {
+      try {
+        if (!supabase) initClient();
+        const email = $('li_email').value.trim();
+        const password = $('li_password').value;
+        const { data, error } = await supabase.auth.signInWithPassword({ email, password });
+        if (error) throw error;
+        log(['Login OK', data], 'ok');
+        showSession();
+      } catch (e) {
+        log(['Login ERROR', e.message || e], 'err');
+      }
+    });
+
+    $('magic').addEventListener('click', async () => {
+      try {
+        if (!supabase) initClient();
+        const email = $('ml_email').value.trim();
+        const { data, error } = await supabase.auth.signInWithOtp({ email });
+        if (error) throw error;
+        log(['Magic link sent (check your email)', data], 'ok');
+      } catch (e) {
+        log(['Magic Link ERROR', e.message || e], 'err');
+      }
+    });
+
+    $('logout').addEventListener('click', async () => {
+      try {
+        if (!supabase) initClient();
+        const { error } = await supabase.auth.signOut();
+        if (error) throw error;
+        log('Logged out', 'ok');
+        $('session').textContent = '';
+      } catch (e) {
+        log(['Logout ERROR', e.message || e], 'err');
+      }
+    });
+
+    async function showSession() {
+      if (!supabase) initClient();
+      const { data: { session } } = await supabase.auth.getSession();
+      $('session').textContent = session ? JSON.stringify(session, null, 2) : 'No session';
+    }
+
+    $('getSession').addEventListener('click', showSession);
+
+    // Keep session state updated (optional)
+    document.addEventListener('DOMContentLoaded', () => {
+      if (!supabase) initClient();
+      supabase?.auth.onAuthStateChange((_event, session) => {
+        $('session').textContent = session ? JSON.stringify(session, null, 2) : 'No session';
+        log(['Auth state:', _event], 'muted');
+      });
+    });
+  </script>
+</body>
+</html>
