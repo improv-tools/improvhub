@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { useAuth } from "auth/AuthContext";
-import { listMyTeams, createTeamWithAdmin, listTeamMembersRPC, setMemberRoleRPC } from "teams/teams.api";
+import { listMyTeams, createTeam, listTeamMembersRPC, setMemberRoleRPC } from "teams/teams.api";
 import { H1, Tabs, Tab, Row, Button, Input, Label, InfoText, ErrorText } from "components/ui";
 
 export default function TeamsPanel() {
@@ -48,7 +48,7 @@ export default function TeamsPanel() {
     if (!newName.trim()) return;
     setCreating(true); setErr("");
     try {
-      const team = await createTeamWithAdmin(newName.trim(), user.id);
+      const team = await createTeam(newName.trim());       // creator becomes admin inside RPC
       setNewName("");
       await refreshTeams();
       await openTeam({ ...team, role: "admin" });
