@@ -1,7 +1,8 @@
 import { useEffect, useState } from "react";
 import { useAuth } from "auth/AuthContext";
 import { listMyTeams, createTeam, listTeamMembersRPC, setMemberRoleRPC } from "teams/teams.api";
-import { H1, Row, Button, GhostButton, Input, Label, InfoText, ErrorText } from "components/ui";
+import { H1, Row, Button, GhostButton, Input, Label, InfoText, ErrorText, DangerButton } from "components/ui";
+import { renameTeamRPC, deleteTeamRPC } from "teams/teams.api";
 
 export default function TeamsPanel() {
   const { session } = useAuth();
@@ -128,14 +129,80 @@ export default function TeamsPanel() {
   );
 }
 
-function TeamDetail({ team, members, currentUserId, onChangeRole }) {
+function TeamDetail({ team, members, currentUserId, onChangeRole, onRenamed, onDeleted }) {
   const isAdmin = team.role === "admin";
+  const [editing, setEditing] = useState(false);
+  const [name, setName] = useState(team.name);
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState("");
+  const [msg, setMsg] = useState("");
+
+  useEffect(() => setName(team.name), [team.id, team.name]);
+
+  const submitRename = async () => {
+    const next = name.trim();
+    if (!next || next === team.name) { setEditing(false); return; }
+    if (!window.confirm(`Rename team to “${next}”?`)) return;
+    setBusy(true); setErr(""); setMsg("");
+    try {
+      const updated = await renameTeamRPC(team.id, next);
+      setEditing(false);
+      setMsg("Team renamed ✓");
+      onRenamed?.(updated); // let parent refresh list/selection
+    } catch (e) {
+      setErr(e.message || "Rename failed");
+    } finally {
+      setBusy(false);
+      setTimeout(() => setMsg(""), 1500);
+    }
+  };
+
+  const deleteTeam = async () => {
+    if (!window.confirm(`Delete “${team.name}” permanently? This cannot be undone.`)) return;
+    setBusy(true); setErr(""); setMsg("");
+    try {
+      await deleteTeamRPC(team.id);
+      onDeleted?.(); // parent should go back to list & refresh
+    } catch (e) {
+      setErr(e.message || "Delete failed");
+    } finally {
+      setBusy(false);
+    }
+  };
 
   return (
     <>
+      {/* Header: click-to-rename */}
+      <div style={{ display:"flex", alignItems:"center", gap:8 }}>
+        {editing ? (
+          <>
+            <Input
+              value={name}
+              onChange={(e)=>setName(e.target.value)}
+              onKeyDown={(e)=> e.key === "Enter" && submitRename()}
+              autoFocus
+              style={{ minWidth: 220 }}
+            />
+            <Button onClick={submitRename} disabled={busy || !name.trim()}>Save</Button>
+            <GhostButton onClick={()=>{ setEditing(false); setName(team.name); }}>Cancel</GhostButton>
+          </>
+        ) : (
+          <>
+            <H1 style={{ margin: 0, cursor: isAdmin ? "pointer" : "default" }}
+                onClick={() => isAdmin && setEditing(true)}>
+              {team.name}
+            </H1>
+            {isAdmin && <GhostButton onClick={()=>setEditing(true)}>Rename</GhostButton>}
+          </>
+        )}
+      </div>
+
       <p style={{ marginTop: 6, opacity: 0.8 }}>
         ID: <code>{team.display_id}</code> · Your role: <strong>{team.role}</strong>
       </p>
+
+      {err && <ErrorText>{err}</ErrorText>}
+      {msg && <InfoText>{msg}</InfoText>}
 
       <h3 style={{ margin: "16px 0 8px", fontSize: 16 }}>Members</h3>
       {members.length === 0 ? (
@@ -162,6 +229,12 @@ function TeamDetail({ team, members, currentUserId, onChangeRole }) {
             </li>
           ))}
         </ul>
+      )}
+
+      {isAdmin && (
+        <div style={{ marginTop: 18 }}>
+          <DangerButton onClick={deleteTeam} disabled={busy}>Delete team</DangerButton>
+        </div>
       )}
     </>
   );
