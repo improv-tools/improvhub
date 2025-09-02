@@ -1,4 +1,4 @@
-import { supabase } from "@/lib/supabaseClient";
+import { supabase } from "lib/supabaseClient";
 
 export const signIn = (email, password) =>
   supabase.auth.signInWithPassword({ email, password });
