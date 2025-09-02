@@ -1,8 +1,8 @@
 import { useState } from "react";
-import { useAuth } from "@/auth/AuthContext";
-import { useProfile } from "@/profiles/useProfile";
-import { upsertProfile } from "@/profiles/profiles.api";
-import { updateUserMetadata, signOut } from "@/auth/auth.api";
+import { useAuth } from "auth/AuthContext";
+import { useProfile } from "profiles/useProfile";
+import { upsertProfile } from "profiles/profiles.api";
+import { updateUserMetadata, signOut } from "auth/auth.api";
 
 export default function Dashboard() {
   const { session } = useAuth();
