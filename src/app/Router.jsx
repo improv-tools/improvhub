@@ -11,7 +11,7 @@ export default function AppRouter() {
   const { recovering } = useAuth();
 
   return (
-    <BrowserRouter basename="/">
+    <BrowserRouter basename="/improvhub">
       <Routes>
         {/* Auth flows */}
         <Route path="/auth/signin" element={<SignIn />} />
