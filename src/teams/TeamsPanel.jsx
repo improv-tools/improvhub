@@ -136,63 +136,66 @@ export default function TeamsPanel() {
   return (
     <>
       {/* Header: back + centered title (+ rename icon) OR just "Teams" */}
-      <div style={styles.header}>
-        <div style={styles.headerLeft}>
-          {selected && (
-            <GhostButton onClick={backToList}>← All teams</GhostButton>
-          )}
+<div style={styles.header}>
+  <div style={styles.headerLeft}>
+    {selected && (
+      <GhostButton style={styles.backBtn} onClick={backToList}>
+        ← All teams
+      </GhostButton>
+    )}
 
-          {!selected && <H1 style={{ margin: 0 }}>Teams</H1>}
+    {!selected && <H1 style={{ margin: 0 }}>Teams</H1>}
 
-          {selected && !editingName && (
-            <div style={styles.titleWrap}>
-              <H1 style={styles.titleH1}>{selected.name}</H1>
-              {selected.role === "admin" && (
-                <button
-                  aria-label="Rename team"
-                  title="Rename team"
-                  onClick={() => {
-                    setEditingName(true);
-                    setNameDraft(selected.name || "");
-                  }}
-                  style={styles.renameIcon}
-                >
-                  ✏️
-                </button>
-              )}
-            </div>
-          )}
-
-          {selected && editingName && (
-            <>
-              <Input
-                value={nameDraft}
-                onChange={(e) => setNameDraft(e.target.value)}
-                onKeyDown={async (e) => {
-                  if (e.key === "Enter") await doRename();
-                  if (e.key === "Escape") setEditingName(false);
-                }}
-                autoFocus
-                style={{ minWidth: 220 }}
-              />
-              <Button
-                onClick={doRename}
-                disabled={!nameDraft.trim() || nameDraft.trim() === selected.name}
-              >
-                Save
-              </Button>
-              <GhostButton
-                onClick={() => {
-                  setEditingName(false);
-                  setNameDraft(selected.name || "");
-                }}
-              >
-                Cancel
-              </GhostButton>
-            </>
-          )}
-        </div>
+    {selected && !editingName && (
+      <div style={styles.titleWrap}>
+        <H1 style={styles.titleH1}>{selected.name}</H1>
+        {selected.role === "admin" && (
+          <button
+            aria-label="Rename team"
+            title="Rename team"
+            onClick={() => {
+              setEditingName(true);
+              setNameDraft(selected.name || "");
+            }}
+            style={styles.renameIcon}
+          >
+            ✏️
+          </button>
+        )}
       </div>
+    )}
+
+    {selected && editingName && (
+      <>
+        <Input
+          value={nameDraft}
+          onChange={(e) => setNameDraft(e.target.value)}
+          onKeyDown={async (e) => {
+            if (e.key === "Enter") await doRename();
+            if (e.key === "Escape") setEditingName(false);
+          }}
+          autoFocus
+          style={{ minWidth: 220 }}
+        />
+        <Button
+          onClick={doRename}
+          disabled={!nameDraft.trim() || nameDraft.trim() === selected.name}
+        >
+          Save
+        </Button>
+        <GhostButton
+          onClick={() => {
+            setEditingName(false);
+            setNameDraft(selected.name || "");
+          }}
+        >
+          Cancel
+        </GhostButton>
+      </>
+    )}
+  </div>
+</div>
+
 
       {err && <ErrorText>{err}</ErrorText>}
 
@@ -453,27 +456,36 @@ const styles = {
   },
   headerLeft: {
     display: "flex",
-    alignItems: "center", // keeps Back button and title vertically aligned
+    alignItems: "center", // vertical centering for back + title group
     gap: 8,
   },
   titleWrap: {
-    display: "flex",
-    alignItems: "center", // centers title with the button
+    display: "inline-flex",
+    alignItems: "center",
     gap: 8,
+    height: 36,
   },
   titleH1: {
     margin: 0,
-    lineHeight: 1.1,
-    display: "flex",
+    lineHeight: "36px",
+    display: "inline-flex",
     alignItems: "center",
   },
-  renameIcon: {
+    backBtn: {
+    height: 36,
+    display: "inline-flex",
+    alignItems: "center",
+  },
+ renameIcon: {
     background: "transparent",
     border: "1px solid rgba(255,255,255,0.2)",
     borderRadius: 8,
     padding: "6px 8px",
     cursor: "pointer",
     color: "white",
+    height: 36,
+    display: "inline-flex",
+    alignItems: "center",
   },
   inlineInvite: {
     display: "flex",
