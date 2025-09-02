@@ -1,5 +1,5 @@
 import { createContext, useContext, useEffect, useState } from "react";
-import { getSession, onAuthChange } from "@/auth/auth.api";
+import { getSession, onAuthChange } from "auth/auth.api";
 
 const AuthCtx = createContext({ session: null, loading: true });
 
