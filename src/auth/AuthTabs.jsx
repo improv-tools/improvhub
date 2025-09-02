@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { useAuth } from "auth/AuthContext";
 import { signIn, signUp, resetPassword, updateUserPassword } from "auth/auth.api";
+import { CenterWrap, Card, H1, Tabs, Tab, Label, Input, Button, GhostButton, ErrorText, InfoText, Row } from "components/ui";
 
 const DEFAULT_REDIRECT =
   process.env.REACT_APP_REDIRECT_URL ||
@@ -8,36 +9,24 @@ const DEFAULT_REDIRECT =
 
 export default function AuthTabs() {
   const { recovering, setRecovering } = useAuth();
-  const [tab, setTab] = useState("signin"); // 'signin' | 'signup' | 'forgot' | 'newpass'
-
-  // if Supabase sent PASSWORD_RECOVERY, jump to new password tab
-  useEffect(() => {
-    if (recovering) setTab("newpass");
-  }, [recovering]);
+  const [tab, setTab] = useState("signin");
+  useEffect(() => { if (recovering) setTab("newpass"); }, [recovering]);
 
   return (
-    <div style={styles.centerWrap}>
-      <div style={styles.card}>
-        <div style={styles.tabs}>
-          <Tab label="Sign in" active={tab==="signin"} onClick={()=>setTab("signin")} />
-          <Tab label="Create account" active={tab==="signup"} onClick={()=>setTab("signup")} />
-          <Tab label="Forgot password" active={tab==="forgot"} onClick={()=>setTab("forgot")} />
-        </div>
+    <CenterWrap>
+      <Card>
+        <Tabs>
+          <Tab active={tab==="signin"} onClick={()=>setTab("signin")}>Sign in</Tab>
+          <Tab active={tab==="signup"} onClick={()=>setTab("signup")}>Create account</Tab>
+          <Tab active={tab==="forgot"} onClick={()=>setTab("forgot")}>Forgot password</Tab>
+        </Tabs>
 
         {tab==="signin" && <SignIn />}
         {tab==="signup" && <SignUp />}
         {tab==="forgot" && <Forgot />}
         {tab==="newpass" && <NewPass onDone={()=>{ setRecovering(false); setTab("signin"); }} />}
-      </div>
-    </div>
-  );
-}
-
-function Tab({ label, active, onClick }) {
-  return (
-    <button onClick={onClick} style={{ ...styles.tab, ...(active ? styles.tabActive : {}) }}>
-      {label}
-    </button>
+      </Card>
+    </CenterWrap>
   );
 }
 
@@ -54,12 +43,12 @@ function SignIn() {
 
   return (
     <>
-      <h1 style={styles.h1}>Sign in</h1>
-      {err && <p style={styles.error}>{err}</p>}
+      <H1>Sign in</H1>
+      {err && <ErrorText>{err}</ErrorText>}
       <form onSubmit={submit} style={{ display:"grid", gap:12 }}>
-        <label style={styles.label}>Email <input style={styles.input} type="email" value={email} onChange={e=>setEmail(e.target.value)} required/></label>
-        <label style={styles.label}>Password <input style={styles.input} type="password" value={password} onChange={e=>setPassword(e.target.value)} required/></label>
-        <button style={styles.button} disabled={submitting} type="submit">{submitting?"Signing in…":"Sign in"}</button>
+        <Label> Email <Input type="email" value={email} onChange={e=>setEmail(e.target.value)} required/> </Label>
+        <Label> Password <Input type="password" value={password} onChange={e=>setPassword(e.target.value)} required/> </Label>
+        <Button disabled={submitting} type="submit">{submitting?"Signing in…":"Sign in"}</Button>
       </form>
     </>
   );
@@ -82,14 +71,14 @@ function SignUp() {
 
   return (
     <>
-      <h1 style={styles.h1}>Create account</h1>
-      {err && <p style={styles.error}>{err}</p>}
-      {msg && <p style={styles.info}>{msg}</p>}
+      <H1>Create account</H1>
+      {err && <ErrorText>{err}</ErrorText>}
+      {msg && <InfoText>{msg}</InfoText>}
       <form onSubmit={submit} style={{ display:"grid", gap:12 }}>
-        <label style={styles.label}>Name <input style={styles.input} value={name} onChange={e=>setName(e.target.value)} required/></label>
-        <label style={styles.label}>Email <input style={styles.input} type="email" value={email} onChange={e=>setEmail(e.target.value)} required/></label>
-        <label style={styles.label}>Password <input style={styles.input} type="password" value={password} onChange={e=>setPassword(e.target.value)} required minLength={6}/></label>
-        <button style={styles.button} disabled={submitting} type="submit">{submitting?"Creating…":"Create account"}</button>
+        <Label> Name <Input value={name} onChange={e=>setName(e.target.value)} required/> </Label>
+        <Label> Email <Input type="email" value={email} onChange={e=>setEmail(e.target.value)} required/> </Label>
+        <Label> Password <Input type="password" value={password} onChange={e=>setPassword(e.target.value)} required minLength={6}/> </Label>
+        <Button disabled={submitting} type="submit">{submitting?"Creating…":"Create account"}</Button>
       </form>
     </>
   );
@@ -101,20 +90,19 @@ function Forgot() {
 
   const submit = async (e) => {
     e.preventDefault(); setMsg(""); setErr(""); setSubmitting(true);
-    try { const { error } = await resetPassword(email, DEFAULT_REDIRECT); if (error) throw error;
-      setMsg("Password reset email sent. Click the link to continue here."); }
+    try { const { error } = await resetPassword(email, DEFAULT_REDIRECT); if (error) throw error; setMsg("Password reset email sent. Click the link to continue here."); }
     catch (e2) { setErr(e2.message || "Could not send reset email"); }
     finally { setSubmitting(false); }
   };
 
   return (
     <>
-      <h1 style={styles.h1}>Forgot password</h1>
-      {err && <p style={styles.error}>{err}</p>}
-      {msg && <p style={styles.info}>{msg}</p>}
+      <H1>Forgot password</H1>
+      {err && <ErrorText>{err}</ErrorText>}
+      {msg && <InfoText>{msg}</InfoText>}
       <form onSubmit={submit} style={{ display:"grid", gap:12 }}>
-        <label style={styles.label}>Email <input style={styles.input} type="email" value={email} onChange={e=>setEmail(e.target.value)} required/></label>
-        <button style={styles.button} disabled={submitting} type="submit">{submitting?"Sending…":"Send reset email"}</button>
+        <Label> Email <Input type="email" value={email} onChange={e=>setEmail(e.target.value)} required/> </Label>
+        <Button disabled={submitting} type="submit">{submitting?"Sending…":"Send reset email"}</Button>
       </form>
     </>
   );
@@ -126,35 +114,20 @@ function NewPass({ onDone }) {
 
   const submit = async (e) => {
     e.preventDefault(); setMsg(""); setErr(""); setSubmitting(true);
-    try { const { error } = await updateUserPassword(password); if (error) throw error;
-      setMsg("Password updated. You can now sign in."); onDone?.(); }
+    try { const { error } = await updateUserPassword(password); if (error) throw error; setMsg("Password updated. You can now sign in."); onDone?.(); }
     catch (e2) { setErr(e2.message || "Could not update password"); }
     finally { setSubmitting(false); }
   };
 
   return (
     <>
-      <h1 style={styles.h1}>Set a new password</h1>
-      {err && <p style={styles.error}>{err}</p>}
-      {msg && <p style={styles.info}>{msg}</p>}
+      <H1>Set a new password</H1>
+      {err && <ErrorText>{err}</ErrorText>}
+      {msg && <InfoText>{msg}</InfoText>}
       <form onSubmit={submit} style={{ display:"grid", gap:12 }}>
-        <label style={styles.label}>New password <input style={styles.input} type="password" value={password} onChange={e=>setPassword(e.target.value)} required minLength={6}/></label>
-        <button style={styles.button} disabled={submitting} type="submit">{submitting?"Updating…":"Update password"}</button>
+        <Label> New password <Input type="password" value={password} onChange={e=>setPassword(e.target.value)} required minLength={6}/> </Label>
+        <Button disabled={submitting} type="submit">{submitting?"Updating…":"Update password"}</Button>
       </form>
     </>
   );
 }
-
-const styles = {
-  centerWrap: { minHeight:"100vh", display:"grid", placeItems:"center", padding:16 },
-  card: { width:"100%", maxWidth:560, background:"#14141a", color:"#fff", borderRadius:16, padding:20, boxShadow:"0 10px 30px rgba(0,0,0,0.35)", border:"1px solid rgba(255,255,255,0.06)" },
-  tabs: { display:"flex", gap:6, marginBottom:14, background:"#0f0f14", padding:6, borderRadius:10, flexWrap:"wrap" },
-  tab: { border:"1px solid rgba(255,255,255,0.2)", padding:"8px 10px", borderRadius:8, background:"transparent", color:"white", cursor:"pointer" },
-  tabActive: { background:"white", color:"black", borderColor:"white" },
-  h1: { fontSize:20, margin:0, marginBottom:16, letterSpacing:0.3 },
-  label: { display:"grid", gap:6, fontSize:14 },
-  input: { background:"#0f0f14", color:"white", border:"1px solid rgba(255,255,255,0.1)", borderRadius:10, padding:"10px 12px", outline:"none" },
-  button: { background:"white", color:"black", border:"none", padding:"10px 14px", borderRadius:10, cursor:"pointer", fontWeight:600 },
-  error: { color:"#ff6b6b", margin:"0 0 12px" },
-  info: { color:"#a0e7ff", margin:"0 0 12px" },
-};
