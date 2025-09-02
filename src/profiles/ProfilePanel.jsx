@@ -1,46 +1,76 @@
+// src/profile/ProfilePanel.jsx
 import { useEffect, useState } from "react";
 import { useAuth } from "auth/AuthContext";
-import { useProfile } from "profiles/useProfile";
-import { upsertProfile } from "profiles/profiles.api";
-import { updateUserMetadata } from "auth/auth.api";
-import { Label, Input, Button, InfoText, Row } from "components/ui";
+import { supabase } from "lib/supabaseClient";
+import { H1, Label, Input, Button, ErrorText, InfoText } from "components/ui";
 
 export default function ProfilePanel() {
   const { session } = useAuth();
   const user = session?.user;
-  const { name, setName, loading } = useProfile(user);
+
+  // Source of truth = Auth display name (raw_user_meta_data.display_name)
+  const currentDisplayName =
+    user?.user_metadata?.display_name ||
+    (user?.email ? user.email.split("@")[0] : "");
+
+  const [name, setName] = useState(currentDisplayName);
   const [saving, setSaving] = useState(false);
-  const [info, setInfo] = useState("");
+  const [err, setErr] = useState("");
+  const [msg, setMsg] = useState("");
 
   useEffect(() => {
-    if (info) {
-      const t = setTimeout(() => setInfo(""), 2000);
-      return () => clearTimeout(t);
-    }
-  }, [info]);
+    setName(currentDisplayName);
+  }, [currentDisplayName]);
 
-  const saveName = async () => {
+  const save = async () => {
+    const next = (name || "").trim();
+    if (!next) return;
+    setSaving(true);
+    setErr("");
+    setMsg("");
     try {
-      setSaving(true);
-      await upsertProfile(user.id, name);
-      await updateUserMetadata({ full_name: name });
-      setInfo("Saved ✓");
+      // ✅ Update Auth display name (NOT profiles)
+      const { error } = await supabase.auth.updateUser({
+        data: { display_name: next },
+      });
+      if (error) throw error;
+
+      // Nudge session to refresh so other screens see the new name
+      await supabase.auth.getUser();
+
+      setMsg("Saved ✓");
+      setTimeout(() => setMsg(""), 1500);
     } catch (e) {
-      alert(e.message || "Save failed");
+      setErr(e.message || "Save failed");
     } finally {
       setSaving(false);
     }
   };
 
-  if (loading) return <p>Loading profile…</p>;
-
   return (
-    <>
-      <Label> Name <Input value={name} onChange={(e)=>setName(e.target.value)} /> </Label>
-      <Row>
-        <Button onClick={saveName} disabled={saving}>{saving ? "Saving…" : "Save"}</Button>
-      </Row>
-      {info && <InfoText aria-live="polite">{info}</InfoText>}
-    </>
+    <div>
+      <H1>Profile</H1>
+
+      <Label>
+        Display name
+        <Input
+          value={name}
+          onChange={(e) => setName(e.target.value)}
+          placeholder="Your name"
+          onKeyDown={(e) => e.key === "Enter" && save()}
+        />
+      </Label>
+
+      <Button onClick={save} disabled={saving || !name.trim()}>
+        {saving ? "Saving…" : "Save"}
+      </Button>
+
+      {err && <ErrorText style={{ marginTop: 8 }}>{err}</ErrorText>}
+      {msg && <InfoText style={{ marginTop: 8 }}>{msg}</InfoText>}
+
+      <p style={{ opacity: 0.7, marginTop: 12, fontSize: 12 }}>
+        This updates your Auth display name. We no longer use <code>profiles.full_name</code>.
+      </p>
+    </div>
   );
 }
