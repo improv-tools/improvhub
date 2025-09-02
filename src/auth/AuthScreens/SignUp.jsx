@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { signUp } from "@/auth/auth.api";
+import { signUp } from "auth/auth.api";
 
 const DEFAULT_REDIRECT =
   process.env.REACT_APP_REDIRECT_URL ||
