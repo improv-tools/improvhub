@@ -16,7 +16,6 @@ import {
   Button,
   GhostButton,
   Input,
-  Label,
   InfoText,
   ErrorText,
   DangerButton,
@@ -30,9 +29,10 @@ export default function TeamsPanel() {
   const [loading, setLoading] = useState(true);
   const [err, setErr] = useState("");
 
-  // create (only shown in list view)
+  // create (only shown in list view; hidden until toggled)
   const [newName, setNewName] = useState("");
   const [creating, setCreating] = useState(false);
+  const [showCreate, setShowCreate] = useState(false);
 
   // selection + members
   const [selected, setSelected] = useState(null); // { id, name, display_id, role }
@@ -103,6 +103,7 @@ export default function TeamsPanel() {
     try {
       const team = await createTeam(value); // RPC: creator becomes admin
       setNewName("");
+      setShowCreate(false); // hide the form after success
       await refreshTeams();
       await openTeam({ ...team, role: "admin" }); // jump into the new team
     } catch (e) {
@@ -234,25 +235,37 @@ export default function TeamsPanel() {
             </ul>
           )}
 
-          {/* Create team (only in list view, at the bottom) */}
-          <div style={{ marginTop: 16 }} />
-          <Label>
-            Team name
-            <Input
-              value={newName}
-              onChange={(e) => setNewName(e.target.value)}
-              placeholder="e.g. Writers Room"
-              onKeyDown={(e) => e.key === "Enter" && createNewTeam()}
-            />
-          </Label>
-          <Row>
-            <Button onClick={createNewTeam} disabled={creating || !newName.trim()}>
-              {creating ? "Creating…" : "Create Team"}
-            </Button>
-          </Row>
-          <InfoText>
-            Duplicates allowed. A unique id like <code>Name#1</code> is generated.
-          </InfoText>
+          {/* Create team (only in list view) — hidden until toggled, single-line UI */}
+          <div style={{ marginTop: 12 }} />
+          {!showCreate ? (
+            <GhostButton onClick={() => setShowCreate(true)}>+ Create team</GhostButton>
+          ) : (
+            <>
+              <div style={styles.inlineInvite}>
+                <Input
+                  value={newName}
+                  onChange={(e) => setNewName(e.target.value)}
+                  placeholder="e.g. Writers Room"
+                  onKeyDown={(e) => e.key === "Enter" && createNewTeam()}
+                  style={{ minWidth: 220 }}
+                />
+                <Button onClick={createNewTeam} disabled={creating || !newName.trim()}>
+                  {creating ? "Creating…" : "Create"}
+                </Button>
+                <GhostButton
+                  onClick={() => {
+                    setShowCreate(false);
+                    setNewName("");
+                  }}
+                >
+                  Cancel
+                </GhostButton>
+              </div>
+              <InfoText style={{ marginTop: 6 }}>
+                Duplicates allowed. A unique id like <code>Name#1</code> is generated.
+              </InfoText>
+            </>
+          )}
         </>
       ) : (
         <TeamDetail
@@ -454,19 +467,20 @@ const styles = {
     gap: 8,
   },
   backBtn: {
-    height: 36,
+    height: 40,
     display: "inline-flex",
     alignItems: "center",
   },
   titleWrap: {
     display: "inline-flex",
     alignItems: "center", // centers title with the button
+    height: 40,
     gap: 8,
-    height: 36, // match backBtn for perfect vertical alignment
   },
   titleH1: {
     margin: 0,
-    lineHeight: "36px",
+    height: 40,
+    lineHeight: "40px",
     display: "inline-flex",
     alignItems: "center",
   },
@@ -477,7 +491,7 @@ const styles = {
     padding: "6px 8px",
     cursor: "pointer",
     color: "white",
-    height: 36,
+    height: 40,
     display: "inline-flex",
     alignItems: "center",
   },
