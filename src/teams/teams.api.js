@@ -33,3 +33,17 @@ export async function setMemberRoleRPC(teamId, userId, role) {
   });
   if (error) throw error;
 }
+
+export async function renameTeamRPC(teamId, newName) {
+  const { data, error } = await supabase.rpc("admin_rename_team", {
+    p_team_id: teamId,
+    p_name: newName,
+  });
+  if (error) throw error;
+  return Array.isArray(data) ? data[0] : data; // { id, name, display_id }
+}
+
+export async function deleteTeamRPC(teamId) {
+  const { error } = await supabase.rpc("admin_delete_team", { p_team_id: teamId });
+  if (error) throw error;
+}
