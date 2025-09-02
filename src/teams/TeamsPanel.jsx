@@ -135,7 +135,7 @@ export default function TeamsPanel() {
 
   return (
     <>
-      {/* Header: back + team title (+ rename icon) OR just "Teams" */}
+      {/* Header: back + centered title (+ rename icon) OR just "Teams" */}
       <div style={styles.header}>
         <div style={styles.headerLeft}>
           {selected && (
@@ -145,8 +145,8 @@ export default function TeamsPanel() {
           {!selected && <H1 style={{ margin: 0 }}>Teams</H1>}
 
           {selected && !editingName && (
-            <>
-              <H1 style={{ margin: 0 }}>{selected.name}</H1>
+            <div style={styles.titleWrap}>
+              <H1 style={styles.titleH1}>{selected.name}</H1>
               {selected.role === "admin" && (
                 <button
                   aria-label="Rename team"
@@ -160,7 +160,7 @@ export default function TeamsPanel() {
                   ✏️
                 </button>
               )}
-            </>
+            </div>
           )}
 
           {selected && editingName && (
@@ -268,9 +268,9 @@ export default function TeamsPanel() {
             }
           }}
           onAdded={async () => {
-              const mem = await listTeamMembersRPC(selected.id);
-              setMembers(mem);
-              await refreshTeams();
+            const mem = await listTeamMembersRPC(selected.id);
+            setMembers(mem);
+            await refreshTeams();
           }}
           onDeleted={() => {
             // back to list after deletion
@@ -290,7 +290,8 @@ function TeamDetail({ team, members, currentUserId, onChangeRole, onAdded, onDel
   const [err, setErr] = useState("");
   const [msg, setMsg] = useState("");
 
-  // NEW: invite by email
+  // Invite (hidden until clicked)
+  const [showInvite, setShowInvite] = useState(false);
   const [inviteEmail, setInviteEmail] = useState("");
   const [inviteRole, setInviteRole] = useState("member");
   const [inviting, setInviting] = useState(false);
@@ -305,6 +306,7 @@ function TeamDetail({ team, members, currentUserId, onChangeRole, onAdded, onDel
       await addMemberByEmailRPC(team.id, email, inviteRole);
       setInviteEmail("");
       setInviteRole("member");
+      setShowInvite(false); // hide after success
       setMsg("Member added ✓");
       onAdded?.(); // refresh roster in parent
       setTimeout(() => setMsg(""), 1500);
@@ -316,11 +318,18 @@ function TeamDetail({ team, members, currentUserId, onChangeRole, onAdded, onDel
   };
 
   const deleteTeam = async () => {
-    if (!window.confirm(`Delete “${team.name}” permanently? This cannot be undone.`)) return;
-    setBusy(true); setErr(""); setMsg("");
+    if (
+      !window.confirm(
+        `Delete “${team.name}” permanently? This cannot be undone.`
+      )
+    )
+      return;
+    setBusy(true);
+    setErr("");
+    setMsg("");
     try {
       await deleteTeamRPC(team.id);
-      onDeleted?.(); // parent: back to list & refresh
+      onDeleted?.(); // parent: go back to list & refresh
     } catch (e) {
       setErr(e.message || "Delete failed");
     } finally {
@@ -336,44 +345,6 @@ function TeamDetail({ team, members, currentUserId, onChangeRole, onAdded, onDel
 
       {err && <ErrorText>{err}</ErrorText>}
       {msg && <InfoText>{msg}</InfoText>}
-
-      {/* NEW: Invite by email (admins only) */}
-      {isAdmin && (
-        <>
-          <h3 style={{ margin: "16px 0 8px", fontSize: 16 }}>Add member</h3>
-          <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
-            <Input
-              placeholder="user@example.com"
-              type="email"
-              value={inviteEmail}
-              onChange={(e) => setInviteEmail(e.target.value)}
-              onKeyDown={(e) => e.key === "Enter" && invite()}
-              style={{ minWidth: 220 }}
-            />
-            <select
-              value={inviteRole}
-              onChange={(e) => setInviteRole(e.target.value)}
-              style={{
-                background: "#0f0f14",
-                color: "white",
-                border: "1px solid rgba(255,255,255,0.2)",
-                borderRadius: 10,
-                padding: "10px 12px",
-                outline: "none",
-              }}
-            >
-              <option value="member">Member</option>
-              <option value="admin">Admin</option>
-            </select>
-            <Button onClick={invite} disabled={inviting || !inviteEmail.trim()}>
-              {inviting ? "Adding…" : "Add"}
-            </Button>
-          </div>
-          <p style={{ opacity: 0.7, fontSize: 12, marginTop: 6 }}>
-            Only existing accounts can be added.
-          </p>
-        </>
-      )}
 
       <h3 style={{ margin: "16px 0 8px", fontSize: 16 }}>Members</h3>
       {members.length === 0 ? (
@@ -404,27 +375,60 @@ function TeamDetail({ team, members, currentUserId, onChangeRole, onAdded, onDel
                 </div>
                 <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
                   <span style={{ opacity: 0.8 }}>{m.role}</span>
+
+                  {/* SINGLE toggle action, not both */}
                   {isAdmin && m.user_id !== currentUserId && (
-                    <>
-                      <Button
-                        style={{ padding: "6px 10px" }}
-                        onClick={() => onChangeRole(m.user_id, "admin")}
-                      >
-                        Make admin
-                      </Button>
-                      <Button
-                        style={{ padding: "6px 10px" }}
-                        onClick={() => onChangeRole(m.user_id, "member")}
-                      >
-                        Make member
-                      </Button>
-                    </>
+                    <Button
+                      style={{ padding: "6px 10px" }}
+                      onClick={() =>
+                        onChangeRole(
+                          m.user_id,
+                          m.role === "admin" ? "member" : "admin"
+                        )
+                      }
+                    >
+                      {m.role === "admin" ? "Make member" : "Make admin"}
+                    </Button>
                   )}
                 </div>
               </div>
             </li>
           ))}
         </ul>
+      )}
+
+      {/* Add member row appears only when clicked */}
+      {isAdmin && (
+        <div style={{ marginTop: 12 }}>
+          {!showInvite ? (
+            <GhostButton onClick={() => setShowInvite(true)}>+ Add member</GhostButton>
+          ) : (
+            <div style={styles.inlineInvite}>
+              <Input
+                placeholder="user@example.com"
+                type="email"
+                value={inviteEmail}
+                onChange={(e) => setInviteEmail(e.target.value)}
+                onKeyDown={(e) => e.key === "Enter" && invite()}
+                style={{ minWidth: 220 }}
+              />
+              <select
+                value={inviteRole}
+                onChange={(e) => setInviteRole(e.target.value)}
+                style={styles.select}
+              >
+                <option value="member">Member</option>
+                <option value="admin">Admin</option>
+              </select>
+              <Button onClick={invite} disabled={inviting || !inviteEmail.trim()}>
+                {inviting ? "Adding…" : "Add"}
+              </Button>
+              <GhostButton onClick={() => { setShowInvite(false); setInviteEmail(""); setInviteRole("member"); }}>
+                Cancel
+              </GhostButton>
+            </div>
+          )}
+        </div>
       )}
 
       {isAdmin && (
@@ -449,8 +453,19 @@ const styles = {
   },
   headerLeft: {
     display: "flex",
-    alignItems: "center",
+    alignItems: "center", // keeps Back button and title vertically aligned
     gap: 8,
+  },
+  titleWrap: {
+    display: "flex",
+    alignItems: "center", // centers title with the button
+    gap: 8,
+  },
+  titleH1: {
+    margin: 0,
+    lineHeight: 1.1,
+    display: "flex",
+    alignItems: "center",
   },
   renameIcon: {
     background: "transparent",
@@ -459,5 +474,19 @@ const styles = {
     padding: "6px 8px",
     cursor: "pointer",
     color: "white",
+  },
+  inlineInvite: {
+    display: "flex",
+    alignItems: "center",
+    gap: 8,
+    flexWrap: "wrap",
+  },
+  select: {
+    background: "#0f0f14",
+    color: "white",
+    border: "1px solid rgba(255,255,255,0.2)",
+    borderRadius: 10,
+    padding: "10px 12px",
+    outline: "none",
   },
 };
