@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { updateUserPassword } from "@/auth/auth.api";
+import { updateUserPassword } from "auth/auth.api";
 import { useAuth } from "../AuthContext";
 
 export default function NewPassword() {
