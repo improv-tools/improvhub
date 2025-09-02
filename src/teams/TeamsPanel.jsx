@@ -110,20 +110,31 @@ export default function TeamsPanel() {
         </>
       ) : (
         <TeamDetail
-          team={selected}
-          members={members}
-          currentUserId={user.id}
-          onChangeRole={async (uId, role) => {
-            try {
-              await setMemberRoleRPC(selected.id, uId, role);
-              const mem = await listTeamMembersRPC(selected.id);
-              setMembers(mem);
-              await refreshTeams();
-            } catch (e) {
-              setErr(e.message || "Failed to update role");
-            }
-          }}
-        />
+  team={selected}
+  members={members}
+  currentUserId={user.id}
+  onChangeRole={async (uId, role) => {
+    try {
+      await setMemberRoleRPC(selected.id, uId, role);
+      const mem = await listTeamMembersRPC(selected.id);
+      setMembers(mem);
+      await refreshTeams();
+    } catch (e) {
+      setErr(e.message || "Failed to update role");
+    }
+  }}
+  onRenamed={(updated) => {
+    // update selection title immediately, refresh list to sync roles
+    setSelected(prev => prev && prev.id === updated.id ? { ...prev, name: updated.name } : prev);
+    refreshTeams();
+  }}
+  onDeleted={() => {
+    // back to list after deletion
+    setSelected(null);
+    setMembers([]);
+    refreshTeams();
+  }}
+   />
       )}
     </>
   );
