@@ -1,17 +1,20 @@
 import { useEffect, useState } from "react";
 import { useAuth } from "auth/AuthContext";
 import { listMyTeams, createTeam, listTeamMembersRPC, setMemberRoleRPC } from "teams/teams.api";
-import { H1, Tabs, Tab, Row, Button, Input, Label, InfoText, ErrorText } from "components/ui";
+import { H1, Row, Button, GhostButton, Input, Label, InfoText, ErrorText } from "components/ui";
 
 export default function TeamsPanel() {
   const { session } = useAuth();
   const user = session?.user;
+
   const [teams, setTeams] = useState([]);
   const [loading, setLoading] = useState(true);
   const [err, setErr] = useState("");
-  const [creating, setCreating] = useState(false);
+
   const [newName, setNewName] = useState("");
-  const [selected, setSelected] = useState(null); // {id,name,display_id,role}
+  const [creating, setCreating] = useState(false);
+
+  const [selected, setSelected] = useState(null); // { id, name, display_id, role }
   const [members, setMembers] = useState([]);
 
   const refreshTeams = async () => {
@@ -20,7 +23,6 @@ export default function TeamsPanel() {
       const list = await listMyTeams(user.id);
       setTeams(list);
       setLoading(false);
-      // keep selected in sync
       if (selected) {
         const s = list.find(t => t.id === selected.id) || selected;
         setSelected(s);
@@ -44,14 +46,19 @@ export default function TeamsPanel() {
     }
   };
 
-  const createTeam = async () => {
+  const backToList = () => {
+    setSelected(null);
+    setMembers([]);
+  };
+
+  const createNewTeam = async () => {
     if (!newName.trim()) return;
     setCreating(true); setErr("");
     try {
-      const team = await createTeam(newName.trim());       // creator becomes admin inside RPC
+      const team = await createTeam(newName.trim()); // RPC: also adds you as admin
       setNewName("");
       await refreshTeams();
-      await openTeam({ ...team, role: "admin" });
+      await openTeam({ ...team, role: "admin" });   // jump into the new team
     } catch (e) {
       setErr(e.message || "Create failed");
     } finally {
@@ -61,15 +68,12 @@ export default function TeamsPanel() {
 
   return (
     <>
-      <H1>Teams</H1>
-      {err && <ErrorText>{err}</ErrorText>}
+      <div style={{ display:"flex", alignItems:"center", gap:8 }}>
+        {selected && <GhostButton onClick={backToList}>← All teams</GhostButton>}
+        <H1 style={{ marginBottom: 0 }}>{selected ? selected.name : "Teams"}</H1>
+      </div>
 
-      <Tabs>
-        <Tab active={!selected} onClick={() => setSelected(null)}>My teams</Tab>
-        <Tab active={!!selected} onClick={() => selected && openTeam(selected)}>
-          {selected ? `${selected.name}` : "Details"}
-        </Tab>
-      </Tabs>
+      {err && <ErrorText>{err}</ErrorText>}
 
       {!selected ? (
         <>
@@ -78,7 +82,7 @@ export default function TeamsPanel() {
           ) : teams.length === 0 ? (
             <p style={{ opacity: 0.8 }}>You don’t belong to any teams yet.</p>
           ) : (
-            <ul style={{ listStyle: "none", padding: 0, margin: 0 }}>
+            <ul style={{ listStyle: "none", padding: 0, margin: "12px 0 0" }}>
               {teams.map(t => (
                 <li key={t.id}
                     style={{ padding: "10px 0", borderBottom: "1px solid rgba(255,255,255,0.06)", cursor: "pointer" }}
@@ -97,7 +101,7 @@ export default function TeamsPanel() {
             <Input value={newName} onChange={(e)=>setNewName(e.target.value)} placeholder="e.g. Writers Room" />
           </Label>
           <Row>
-            <Button onClick={createTeam} disabled={creating || !newName.trim()}>
+            <Button onClick={createNewTeam} disabled={creating || !newName.trim()}>
               {creating ? "Creating…" : "Create Team"}
             </Button>
           </Row>
@@ -113,7 +117,7 @@ export default function TeamsPanel() {
               await setMemberRoleRPC(selected.id, uId, role);
               const mem = await listTeamMembersRPC(selected.id);
               setMembers(mem);
-              await refreshTeams(); // refresh roles in list
+              await refreshTeams();
             } catch (e) {
               setErr(e.message || "Failed to update role");
             }
@@ -129,11 +133,9 @@ function TeamDetail({ team, members, currentUserId, onChangeRole }) {
 
   return (
     <>
-      <p style={{ marginTop: 4 }}>
-        <strong>{team.name}</strong>{" "}
-        <span style={{ opacity:0.7 }}>({team.display_id})</span>
+      <p style={{ marginTop: 6, opacity: 0.8 }}>
+        ID: <code>{team.display_id}</code> · Your role: <strong>{team.role}</strong>
       </p>
-      <p style={{ opacity: 0.8 }}>Your role: <strong>{team.role}</strong></p>
 
       <h3 style={{ margin: "16px 0 8px", fontSize: 16 }}>Members</h3>
       {members.length === 0 ? (
@@ -161,9 +163,6 @@ function TeamDetail({ team, members, currentUserId, onChangeRole }) {
           ))}
         </ul>
       )}
-      <p style={{ opacity: 0.7, marginTop: 12 }}>
-        (Invites / add-by-email can be added next.)
-      </p>
     </>
   );
 }
