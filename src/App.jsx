@@ -1,293 +1,284 @@
-import React, { useState, useEffect, useRef } from "react";
-import LISTS from "./lists";
+import React, { useEffect, useMemo, useState } from "react";
+import { createClient } from "@supabase/supabase-js";
 
-const TITLE_KEY = "__TITLE__";
-const LIST_KEYS = [...Object.keys(LISTS), TITLE_KEY];
+const supabaseUrl = process.env.REACT_APP_SUPABASE_URL;
+const supabaseAnonKey = process.env.REACT_APP_SUPABASE_ANON_KEY;
 
-const TITLE_PATTERNS = [
-  // Single noun
-  ({ noun }) => `The ${noun}`,
-
-  // Adjective + noun
-  ({ adj, noun }) => `The ${adj} ${noun}`,
-
-  // Two nouns
-  ({ noun1, noun2 }) => `The ${noun1} of the ${noun2}`,
-
-  // Adjective + noun of noun
-  ({ adj, noun1, noun2 }) => `The ${adj} ${noun1} of the ${noun2}`,
-
-  // Noun of adjective noun
-  ({ noun1, adj, noun2 }) => `The ${noun1} of the ${adj} ${noun2}`,
-
-  // Adjective noun in/of location
-  ({ adj, noun, location }) => `The ${adj} ${noun} in the ${location}`,
-  ({ adj, noun, location }) => `The ${adj} ${noun} of ${location}`,
-
-  // Two adjectives
-  ({ adj1, adj2, noun }) => `The ${adj1} and ${adj2} ${noun}`,
-  ({ adj1, adj2, noun1, noun2 }) => `The ${adj1} ${noun1} of the ${adj2} ${noun2}`,
-  ({ adj1, adj2, noun, location }) => `The ${adj1} and ${adj2} ${noun} of ${location}`,
-
-  // Genre or location focused
-  ({ genre, location }) => `A ${genre} in ${location}`,
-  ({ noun, location }) => `The ${noun} in the ${location}`,
-  ({ noun, location }) => `The ${noun} of ${location}`,
-
-  // Plural pairings
-  ({ noun1, noun2 }) => `${noun1}s and ${noun2}s`,
-  ({ adj, noun1, noun2 }) => `The ${adj} ${noun1}s and ${noun2}s`,
-  ({ adj, noun1, noun2 }) => `${noun1}s and the ${adj} ${noun2}`,
-];
-
-function generateStoryTitle() {
-  const adjectiveList = LISTS["Adjectives"] || [];
-  const nounList = [
-    ...(LISTS["More Nouns"] || []),
-    ...(LISTS["Polysenous"] || []),
-  ];
-  const locationList = LISTS["Locations"] || [];
-  const genreList = LISTS["Genres"] || [];
-
-  const adj = adjectiveList.length > 0 ? randomText(adjectiveList) : "";
-  const adj1 = adjectiveList.length > 0 ? randomText(adjectiveList) : "";
-  const adj2 = adjectiveList.length > 0 ? randomText(adjectiveList) : "";
-
-  const noun = nounList.length > 0 ? randomText(nounList) : "";
-  const noun1 = nounList.length > 0 ? randomText(nounList) : "";
-  const noun2 = nounList.length > 0 ? randomText(nounList) : "";
-
-  const location = locationList.length > 0 ? randomText(locationList) : "";
-  const genre = genreList.length > 0 ? randomText(genreList) : "";
-
-  const pattern = TITLE_PATTERNS[Math.floor(Math.random() * TITLE_PATTERNS.length)];
-  return { text: pattern({ adj, adj1, adj2, noun, noun1, noun2, location, genre }) };
+if (!supabaseUrl || !supabaseAnonKey) {
+  // Helpful dev-time guard so you don't silently get undefined errors
+  // eslint-disable-next-line no-console
+  console.warn(
+    "Missing REACT_APP_SUPABASE_URL or REACT_APP_SUPABASE_ANON_KEY. " +
+      "Set them in a .env file and restart the dev server."
+  );
 }
 
-function randomText(list) {
-  return list[Math.floor(Math.random() * list.length)].text;
-}
+function App() {
+  // createClient is cheap but keep a single instance per app render tree
+  const supabase = useMemo(
+    () => createClient(supabaseUrl, supabaseAnonKey, { auth: { persistSession: true, autoRefreshToken: true } }),
+    []
+  );
 
-export default function App() {
-  const [activeKey, setActiveKey] = useState(LIST_KEYS[0]);
-  const [currentPrompt, setCurrentPrompt] = useState(null);
-  const [showDefinition, setShowDefinition] = useState(false);
-
-  const containerRef = useRef(null);
-
-  useEffect(() => {
-    if (containerRef.current) containerRef.current.focus();
-  }, []);
-
-  const getRandomPrompt = () => {
-    if (activeKey === TITLE_KEY) {
-      return generateStoryTitle();
-    }
-    const list = LISTS[activeKey];
-    if (!list || list.length === 0) return null;
-    return list[Math.floor(Math.random() * list.length)];
-  };
+  const [session, setSession] = useState(null);
+  const [loadingSession, setLoadingSession] = useState(true);
+  const [authError, setAuthError] = useState("");
 
   useEffect(() => {
-    setCurrentPrompt(getRandomPrompt());
-    setShowDefinition(false);
-  }, [activeKey]);
+    let isMounted = true;
 
-  const handleClick = () => {
-    setCurrentPrompt(getRandomPrompt());
-    setShowDefinition(false);
-  };
+    // Get initial session on mount
+    (async () => {
+      const { data, error } = await supabase.auth.getSession();
+      if (!isMounted) return;
+      if (error) {
+        setAuthError(error.message);
+      } else {
+        setSession(data.session ?? null);
+      }
+      setLoadingSession(false);
+    })();
+
+    // Listen for auth changes (login / logout / token refresh)
+    const { data: sub } = supabase.auth.onAuthStateChange((_event, newSession) => {
+      setSession(newSession);
+    });
+
+    return () => {
+      isMounted = false;
+      sub.subscription.unsubscribe();
+    };
+  }, [supabase]);
+
+  if (loadingSession) {
+    return (
+      <div style={styles.centerWrap}>
+        <div style={styles.card}>
+          <p style={{ margin: 0 }}>Checking session…</p>
+        </div>
+      </div>
+    );
+  }
 
   return (
-    <div
-      ref={containerRef}
-      tabIndex={0}
-      role="button"
-      onClick={handleClick}
-      onKeyDown={(e) => {
-        if (e.key === "Enter" || e.key === " ") handleClick();
-      }}
-      style={{
-        height: "100dvh",
-        minHeight: "100svh",
-        display: "flex",
-        flexDirection: "column",
-        backgroundColor: "#000000",
-        color: "#ffffff",
-        fontFamily:
-          "-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif",
-        boxSizing: "border-box",
-        outline: "none",
-      }}
-    >
-      <div
-        style={{
-          backgroundColor: "#111",
-          padding: "0.75rem 1rem",
-          position: "sticky",
-          top: 0,
-          zIndex: 10,
-          display: "flex",
-          flexWrap: "wrap",
-          gap: "0.5rem",
-          justifyContent: "center",
-          width: "100%",
-          boxSizing: "border-box",
-        }}
-      >
-        {LIST_KEYS.map((key) => (
-          <button
-            key={key}
-            style={{
-              padding: "0.45rem 1rem",
-              borderRadius: "0.25rem",
-              border: "1px solid #fff",
-              backgroundColor: activeKey === key ? "#fff" : "#000",
-              color: activeKey === key ? "#000" : "#fff",
-              cursor: "pointer",
-              fontWeight: 600,
-              fontSize: "0.95rem",
-              userSelect: "none",
-              transition: "background-color 0.2s, color 0.2s",
-              fontFamily: "inherit",
-            }}
-            aria-pressed={activeKey === key}
-            onClick={(e) => {
-              e.stopPropagation();
-              setActiveKey(key);
-            }}
-          >
-            {key === TITLE_KEY ? "Title" : key}
-          </button>
-        ))}
-      </div>
-
-      <main
-        style={{
-          flexGrow: 1,
-          display: "flex",
-          flexDirection: "column",
-          justifyContent: "center",
-          alignItems: "center",
-          padding: "0.5rem",
-          textAlign: "center",
-          position: "relative",
-        }}
-      >
-        {currentPrompt ? (
-          <>
-            <div>
-              <h1
-                style={{
-                  fontSize: "2rem",
-                  fontWeight: "600",
-                  color: "#ffffff",
-                  maxWidth: "40rem",
-                  marginBottom: "0",
-                }}
-              >
-                {currentPrompt.text}
-                {(currentPrompt.definition || currentPrompt.definitions) && (
-                  <span
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      setShowDefinition(!showDefinition);
-                    }}
-                    style={{
-                      fontSize: "1rem",
-                      color: "#cccccc",
-                      cursor: "pointer",
-                      marginLeft: "0.5rem",
-                    }}
-                    title="Show definition"
-                  >
-                    ⓘ
-                  </span>
-                )}
-              </h1>
-
-              <div style={{ minHeight: "1.25rem", marginTop: "0.1rem" }}>
-                {showDefinition && (
-                  <p
-                    style={{
-                      fontSize: "0.85rem",
-                      color: "#cccccc",
-                      maxWidth: "32rem",
-                      margin: 0,
-                    }}
-                  >
-                    {currentPrompt.definition ||
-                      (currentPrompt.definitions &&
-                        currentPrompt.definitions.join("; "))}
-                  </p>
-                )}
-              </div>
-
-              {currentPrompt.description && (
-                <p
-                  style={{
-                    marginTop: "0.5rem",
-                    fontSize: "1rem",
-                    fontStyle: "italic",
-                    color: "#aaaaaa",
-                    maxWidth: "34rem",
-                  }}
-                >
-                  {currentPrompt.description}
-                </p>
-              )}
-
-              {currentPrompt.labels && currentPrompt.labels.length > 0 && (
-                <div
-                  style={{
-                    display: "flex",
-                    gap: "0.5rem",
-                    flexWrap: "wrap",
-                    justifyContent: "center",
-                    marginTop: "0.5rem",
-                    marginBottom: "0.25rem",
-                  }}
-                >
-                  {currentPrompt.labels.map((label) => (
-                    <span
-                      key={label}
-                      style={{
-                        background: "#333",
-                        color: "#fff",
-                        borderRadius: "999px",
-                        padding: "0.2em 0.9em",
-                        fontSize: "0.85em",
-                        fontWeight: 600,
-                        letterSpacing: "0.04em",
-                        userSelect: "text",
-                        boxShadow: "0 1px 2px rgba(255,255,255,0.1)",
-                        fontFamily: "inherit",
-                      }}
-                    >
-                      {label}
-                    </span>
-                  ))}
-                </div>
-              )}
-            </div>
-
-            <p
-              style={{
-                position: "absolute",
-                bottom: "1rem",
-                fontSize: "0.75rem",
-                color: "#888888",
-              }}
-            >
-              (Click anywhere or press Enter/Space to see another prompt)
-            </p>
-          </>
-        ) : (
-          <p style={{ color: "#bbbbbb", marginTop: "1.5rem" }}>
-            No prompts available for this category.
-          </p>
-        )}
-      </main>
+    <div style={styles.app}>
+      {!session ? (
+        <AuthPanel supabase={supabase} authError={authError} />
+      ) : (
+        <Dashboard supabase={supabase} session={session} />
+      )}
     </div>
   );
 }
+
+function AuthPanel({ supabase, authError }) {
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+  const [submitting, setSubmitting] = useState(false);
+  const [message, setMessage] = useState("");
+
+  const signInWithPassword = async (e) => {
+    e.preventDefault();
+    setSubmitting(true);
+    setMessage("");
+    try {
+      const { error } = await supabase.auth.signInWithPassword({ email, password });
+      if (error) throw error;
+    } catch (err) {
+      setMessage(err.message || "Login failed");
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  const signUp = async (e) => {
+    e.preventDefault();
+    setSubmitting(true);
+    setMessage("");
+    try {
+      const { error } = await supabase.auth.signUp({ email, password });
+      if (error) throw error;
+      setMessage("Check your inbox to confirm your account.");
+    } catch (err) {
+      setMessage(err.message || "Sign-up failed");
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  const signInWithGithub = async () => {
+    setSubmitting(true);
+    setMessage("");
+    try {
+      const { error } = await supabase.auth.signInWithOAuth({
+        provider: "github",
+        options: {
+          // For GitHub Pages, use redirect-based OAuth
+          redirectTo: window.location.origin + window.location.pathname,
+        },
+      });
+      if (error) throw error;
+    } catch (err) {
+      setMessage(err.message || "GitHub sign-in failed");
+      setSubmitting(false);
+    }
+  };
+
+  return (
+    <div style={styles.centerWrap}>
+      <div style={styles.card}>
+        <h1 style={styles.h1}>improvhub — sign in</h1>
+        {authError && <p style={styles.error}>{authError}</p>}
+        {message && <p style={styles.info}>{message}</p>}
+
+        <form onSubmit={signInWithPassword} style={{ display: "grid", gap: 12 }}>
+          <label style={styles.label}>
+            <span>Email</span>
+            <input
+              style={styles.input}
+              type="email"
+              autoComplete="email"
+              value={email}
+              onChange={(e) => setEmail(e.target.value)}
+              required
+            />
+          </label>
+
+          <label style={styles.label}>
+            <span>Password</span>
+            <input
+              style={styles.input}
+              type="password"
+              autoComplete="current-password"
+              value={password}
+              onChange={(e) => setPassword(e.target.value)}
+              required
+            />
+          </label>
+
+          <button style={styles.button} disabled={submitting} type="submit">
+            {submitting ? "Signing in…" : "Sign in"}
+          </button>
+        </form>
+
+        <div style={styles.row}>
+          <button style={styles.linkButton} disabled={submitting} onClick={signUp}>
+            Create account
+          </button>
+          <button style={styles.linkButton} disabled={submitting} onClick={signInWithGithub}>
+            Continue with GitHub
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function Dashboard({ supabase, session }) {
+  const [profile, setProfile] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const user = session?.user;
+
+  useEffect(() => {
+    let isMounted = true;
+    (async () => {
+      // Example: fetch a profile row; replace with your own table or remove this block
+      try {
+        // const { data, error } = await supabase.from("profiles").select("*").eq("id", user.id).single();
+        // if (error) throw error;
+        // if (isMounted) setProfile(data);
+        if (isMounted) setProfile({ id: user.id, email: user.email });
+      } catch (err) {
+        // eslint-disable-next-line no-console
+        console.error(err);
+      } finally {
+        if (isMounted) setLoading(false);
+      }
+    })();
+    return () => {
+      isMounted = false;
+    };
+  }, [supabase, user]);
+
+  const signOut = async () => {
+    await supabase.auth.signOut();
+  };
+
+  return (
+    <div style={styles.centerWrap}>
+      <div style={styles.card}>
+        <h1 style={styles.h1}>improvhub</h1>
+        <p style={{ marginTop: 4, opacity: 0.8 }}>Signed in as <strong>{user?.email}</strong></p>
+
+        {loading ? (
+          <p>Loading…</p>
+        ) : (
+          <pre style={styles.pre}>{JSON.stringify(profile, null, 2)}</pre>
+        )}
+
+        <div style={styles.row}>
+          <button style={styles.button} onClick={signOut}>Sign out</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+const styles = {
+  app: { minHeight: "100vh", background: "#0b0b0e", color: "white" },
+  centerWrap: {
+    minHeight: "100vh",
+    display: "grid",
+    placeItems: "center",
+    padding: 16,
+  },
+  card: {
+    width: "100%",
+    maxWidth: 520,
+    background: "#14141a",
+    borderRadius: 16,
+    padding: 20,
+    boxShadow: "0 10px 30px rgba(0,0,0,0.35)",
+    border: "1px solid rgba(255,255,255,0.06)",
+  },
+  h1: { fontSize: 20, margin: 0, marginBottom: 16, letterSpacing: 0.3 },
+  label: { display: "grid", gap: 6, fontSize: 14 },
+  input: {
+    background: "#0f0f14",
+    color: "white",
+    border: "1px solid rgba(255,255,255,0.1)",
+    borderRadius: 10,
+    padding: "10px 12px",
+    outline: "none",
+  },
+  button: {
+    background: "white",
+    color: "black",
+    border: "none",
+    padding: "10px 14px",
+    borderRadius: 10,
+    cursor: "pointer",
+    fontWeight: 600,
+  },
+  linkButton: {
+    background: "transparent",
+    color: "white",
+    border: "1px solid rgba(255,255,255,0.2)",
+    padding: "10px 14px",
+    borderRadius: 10,
+    cursor: "pointer",
+  },
+  row: { display: "flex", gap: 10, marginTop: 12, flexWrap: "wrap" },
+  error: { color: "#ff6b6b", margin: "0 0 12px" },
+  info: { color: "#a0e7ff", margin: "0 0 12px" },
+  pre: {
+    background: "#0f0f14",
+    border: "1px solid rgba(255,255,255,0.1)",
+    padding: 12,
+    borderRadius: 10,
+    overflowX: "auto",
+    marginTop: 12,
+  },
+};
+
+export default App;
