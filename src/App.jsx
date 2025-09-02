@@ -3,6 +3,9 @@ import { createClient } from "@supabase/supabase-js";
 
 const supabaseUrl = process.env.REACT_APP_SUPABASE_URL;
 const supabaseAnonKey = process.env.REACT_APP_SUPABASE_ANON_KEY;
+const DEFAULT_REDIRECT =
+  process.env.REACT_APP_REDIRECT_URL ||
+  (window.location.origin + window.location.pathname);
 
 function App() {
   const supabase = useMemo(
@@ -12,8 +15,17 @@ function App() {
 
   const [session, setSession] = useState(null);
   const [loadingSession, setLoadingSession] = useState(true);
-  const [recovering, setRecovering] = useState(false); // true when PASSWORD_RECOVERY event fires
+  const [recovering, setRecovering] = useState(false);
 
+  // keep URL clean if we arrive with #access_token
+  useEffect(() => {
+    if (window.location.hash.includes("access_token")) {
+      const url = new URL(window.location.href);
+      window.history.replaceState({}, document.title, url.origin + url.pathname);
+    }
+  }, []);
+
+  // initial session + auth listener (also handles profile upsert after sign-in)
   useEffect(() => {
     let mounted = true;
 
@@ -24,11 +36,24 @@ function App() {
       setLoadingSession(false);
     })();
 
-    const { data: sub } = supabase.auth.onAuthStateChange((event, newSession) => {
-      if (event === "PASSWORD_RECOVERY") {
-        setRecovering(true);
-      }
+    const { data: sub } = supabase.auth.onAuthStateChange(async (event, newSession) => {
+      if (event === "PASSWORD_RECOVERY") setRecovering(true);
       setSession(newSession);
+
+      // On first SIGNED_IN after signup/confirm, upsert profile using stored/passed name
+      if (event === "SIGNED_IN" && newSession?.user) {
+        try {
+          const metaName = newSession.user.user_metadata?.full_name || "";
+          const pending = localStorage.getItem("pending_full_name") || "";
+          const fullName = metaName || pending;
+          if (fullName) {
+            await upsertProfile(supabase, newSession.user.id, fullName);
+            localStorage.removeItem("pending_full_name");
+          }
+        } catch (err) {
+          console.error("Profile upsert failed:", err);
+        }
+      }
     });
 
     return () => {
@@ -60,7 +85,15 @@ function App() {
   );
 }
 
+async function upsertProfile(supabase, userId, fullName) {
+  const { error } = await supabase
+    .from("profiles")
+    .upsert({ id: userId, full_name: fullName }, { onConflict: "id" });
+  if (error) throw error;
+}
+
 function AuthPanel({ supabase }) {
+  const [name, setName] = useState("");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [submitting, setSubmitting] = useState(false);
@@ -76,7 +109,7 @@ function AuthPanel({ supabase }) {
     try {
       const { error } = await supabase.auth.signInWithPassword({ email, password });
       if (error) throw error;
-      // success → onAuthStateChange will switch to Dashboard
+      // onAuthStateChange will show Dashboard
     } catch (e) {
       setErr(e.message || "Sign in failed");
     } finally {
@@ -89,26 +122,25 @@ function AuthPanel({ supabase }) {
     clear();
     setSubmitting(true);
     try {
+      // Save name so we can upsert after confirm redirect too
+      localStorage.setItem("pending_full_name", name);
+
       const { data, error } = await supabase.auth.signUp({
         email,
         password,
         options: {
-          // When email confirmation is ON, this is where Supabase will redirect back after the user clicks the email link.
-          redirectTo: window.location.origin + window.location.pathname,
+          data: { full_name: name },   // also store in auth user_metadata
+          redirectTo: DEFAULT_REDIRECT // works for dev and prod
         },
       });
       if (error) throw error;
 
-      // Two possibilities:
-      // 1) If "Confirm email" is ON → no session yet; user must click email link → show helpful message.
-      // 2) If "Confirm email" is OFF → Supabase may return a session immediately; the onAuthStateChange handler will log them in.
       if (!data.session) {
-        setMsg("Check your email to confirm your account, then return here. (If you disable email confirmations in Supabase, you’ll be signed in immediately.)");
+        setMsg("Check your email to confirm your account, then return here.");
       } else {
         setMsg("Account created and signed in.");
       }
     } catch (e) {
-      // Handle common messages (already registered, weak password, etc.)
       setErr(e.message || "Sign up failed");
     } finally {
       setSubmitting(false);
@@ -121,7 +153,7 @@ function AuthPanel({ supabase }) {
     setSubmitting(true);
     try {
       const { error } = await supabase.auth.resetPasswordForEmail(email, {
-        redirectTo: window.location.origin + window.location.pathname,
+        redirectTo: DEFAULT_REDIRECT,
       });
       if (error) throw error;
       setMsg("Password reset email sent. Click the link in your inbox to continue here.");
@@ -140,6 +172,17 @@ function AuthPanel({ supabase }) {
         {msg && <p style={styles.info}>{msg}</p>}
 
         <form onSubmit={signInWithPassword} style={{ display: "grid", gap: 12 }}>
+          <label style={styles.label}>
+            <span>Name</span>
+            <input
+              style={styles.input}
+              type="text"
+              value={name}
+              onChange={(e) => setName(e.target.value)}
+              required
+            />
+          </label>
+
           <label style={styles.label}>
             <span>Email</span>
             <input
@@ -161,6 +204,7 @@ function AuthPanel({ supabase }) {
               value={password}
               onChange={(e) => setPassword(e.target.value)}
               required
+              minLength={6}
             />
           </label>
 
@@ -229,6 +273,43 @@ function NewPasswordForm({ supabase, onDone }) {
 
 function Dashboard({ supabase, session }) {
   const user = session?.user;
+  const [profile, setProfile] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [fullName, setFullName] = useState("");
+
+  useEffect(() => {
+    let mounted = true;
+    (async () => {
+      try {
+        const { data, error } = await supabase
+          .from("profiles")
+          .select("full_name")
+          .eq("id", user.id)
+          .single();
+        if (error && error.code !== "PGRST116") throw error; // ignore "not found"
+        if (mounted) {
+          setProfile(data || null);
+          setFullName((data && data.full_name) || user.user_metadata?.full_name || "");
+        }
+      } catch (e) {
+        console.error(e);
+      } finally {
+        if (mounted) setLoading(false);
+      }
+    })();
+    return () => { mounted = false; };
+  }, [supabase, user]);
+
+  const saveName = async () => {
+    try {
+      await upsertProfile(supabase, user.id, fullName);
+      // (optional) also keep auth metadata in sync:
+      await supabase.auth.updateUser({ data: { full_name: fullName } });
+      alert("Saved.");
+    } catch (e) {
+      alert(e.message || "Save failed");
+    }
+  };
 
   const signOut = async () => {
     await supabase.auth.signOut();
@@ -239,10 +320,29 @@ function Dashboard({ supabase, session }) {
       <div style={styles.card}>
         <h1 style={styles.h1}>improvhub</h1>
         <p style={{ marginTop: 4, opacity: 0.8 }}>Signed in as <strong>{user?.email}</strong></p>
-        <pre style={styles.pre}>{JSON.stringify({ id: user?.id, email: user?.email }, null, 2)}</pre>
-        <div style={styles.row}>
-          <button style={styles.button} onClick={signOut}>Sign out</button>
-        </div>
+
+        {loading ? (
+          <p>Loading profile…</p>
+        ) : (
+          <>
+            <label style={{ ...styles.label, marginTop: 12 }}>
+              <span>Name</span>
+              <input
+                style={styles.input}
+                value={fullName}
+                onChange={(e) => setFullName(e.target.value)}
+              />
+            </label>
+            <div style={styles.row}>
+              <button style={styles.button} onClick={saveName}>Save</button>
+              <button style={styles.linkButton} onClick={signOut}>Sign out</button>
+            </div>
+
+            <pre style={styles.pre}>
+{JSON.stringify({ profile, user_metadata_name: user?.user_metadata?.full_name }, null, 2)}
+            </pre>
+          </>
+        )}
       </div>
     </div>
   );
