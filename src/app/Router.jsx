@@ -1,11 +1,11 @@
 import { BrowserRouter, Routes, Route, Navigate } from "react-router-dom";
-import { useAuth } from "@/auth/AuthContext";
-import ProtectedRoute from "@/auth/ProtectedRoute";
-import SignIn from "@/auth/AuthScreens/SignIn";
-import SignUp from "@/auth/AuthScreens/SignUp";
-import ForgotPassword from "@/auth/AuthScreens/ForgotPassword";
-import NewPassword from "@/auth/AuthScreens/NewPassword";
-import Dashboard from "@/pages/Dashboard";
+import { useAuth } from "auth/AuthContext";
+import ProtectedRoute from "auth/ProtectedRoute";
+import SignIn from "auth/AuthScreens/SignIn";
+import SignUp from "auth/AuthScreens/SignUp";
+import ForgotPassword from "auth/AuthScreens/ForgotPassword";
+import NewPassword from "auth/AuthScreens/NewPassword";
+import Dashboard from "pages/Dashboard";
 
 export default function AppRouter() {
   const { recovering } = useAuth();
