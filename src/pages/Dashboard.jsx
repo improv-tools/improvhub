@@ -11,7 +11,7 @@ export default function Dashboard() {
   const [tab, setTab] = useState("home"); // 'home' | 'profile' | 'teams'
 
   const displayName =
-    user?.user_metadata?.full_name || user?.email?.split("@")[0] || user?.email;
+    user?.user_metadata?.display_name || user?.email?.split("@")[0] || user?.email;
 
   return (
     <CenterWrap>
