@@ -15,6 +15,7 @@ import {
   Button,
   GhostButton,
   Input,
+  Label,
   InfoText,
   ErrorText,
   DangerButton,
@@ -28,15 +29,15 @@ export default function TeamsPanel() {
   const [loading, setLoading] = useState(true);
   const [err, setErr] = useState("");
 
-  // header: create team
+  // create (only shown in list view)
   const [newName, setNewName] = useState("");
   const [creating, setCreating] = useState(false);
 
-  // selection
+  // selection + members
   const [selected, setSelected] = useState(null); // { id, name, display_id, role }
   const [members, setMembers] = useState([]);
 
-  // header: rename
+  // rename (header, admins only)
   const [editingName, setEditingName] = useState(false);
   const [nameDraft, setNameDraft] = useState("");
 
@@ -51,7 +52,7 @@ export default function TeamsPanel() {
         if (s) {
           setSelected(s);
         } else {
-          setSelected(null); // unselect if it was deleted
+          setSelected(null); // unselect if deleted
           setMembers([]);
         }
       }
@@ -99,7 +100,7 @@ export default function TeamsPanel() {
     setCreating(true);
     setErr("");
     try {
-      const team = await createTeam(value); // RPC: also adds you as admin
+      const team = await createTeam(value); // RPC: creator becomes admin
       setNewName("");
       await refreshTeams();
       await openTeam({ ...team, role: "admin" }); // jump into the new team
@@ -133,7 +134,7 @@ export default function TeamsPanel() {
 
   return (
     <>
-      {/* Header bar */}
+      {/* Header: back + team title (+ rename icon) OR just "Teams" */}
       <div style={styles.header}>
         <div style={styles.headerLeft}>
           {selected && (
@@ -190,19 +191,6 @@ export default function TeamsPanel() {
             </>
           )}
         </div>
-
-        <div style={styles.headerRight}>
-          <Input
-            placeholder="New team name"
-            value={newName}
-            onChange={(e) => setNewName(e.target.value)}
-            onKeyDown={(e) => e.key === "Enter" && createNewTeam()}
-            style={{ minWidth: 180 }}
-          />
-          <Button onClick={createNewTeam} disabled={creating || !newName.trim()}>
-            {creating ? "Creating…" : "Create"}
-          </Button>
-        </div>
       </div>
 
       {err && <ErrorText>{err}</ErrorText>}
@@ -243,9 +231,24 @@ export default function TeamsPanel() {
             </ul>
           )}
 
+          {/* Create team (only in list view, at the bottom) */}
+          <div style={{ marginTop: 16 }} />
+          <Label>
+            Team name
+            <Input
+              value={newName}
+              onChange={(e) => setNewName(e.target.value)}
+              placeholder="e.g. Writers Room"
+              onKeyDown={(e) => e.key === "Enter" && createNewTeam()}
+            />
+          </Label>
+          <Row>
+            <Button onClick={createNewTeam} disabled={creating || !newName.trim()}>
+              {creating ? "Creating…" : "Create Team"}
+            </Button>
+          </Row>
           <InfoText>
-            Duplicates allowed. A unique id like <code>Name#1</code> is
-            generated.
+            Duplicates allowed. A unique id like <code>Name#1</code> is generated.
           </InfoText>
         </>
       ) : (
@@ -282,7 +285,12 @@ function TeamDetail({ team, members, currentUserId, onChangeRole, onDeleted }) {
   const [msg, setMsg] = useState("");
 
   const deleteTeam = async () => {
-    if (!window.confirm(`Delete “${team.name}” permanently? This cannot be undone.`)) return;
+    if (
+      !window.confirm(
+        `Delete “${team.name}” permanently? This cannot be undone.`
+      )
+    )
+      return;
     setBusy(true);
     setErr("");
     setMsg("");
@@ -381,12 +389,6 @@ const styles = {
     display: "flex",
     alignItems: "center",
     gap: 8,
-  },
-  headerRight: {
-    display: "flex",
-    alignItems: "center",
-    gap: 8,
-    flexWrap: "wrap",
   },
   renameIcon: {
     background: "transparent",
