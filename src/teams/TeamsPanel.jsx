@@ -135,67 +135,66 @@ export default function TeamsPanel() {
 
   return (
     <>
-      {/* Header: back + centered title (+ rename icon) OR just "Teams" */}
-<div style={styles.header}>
-  <div style={styles.headerLeft}>
-    {selected && (
-      <GhostButton style={styles.backBtn} onClick={backToList}>
-        ← All teams
-      </GhostButton>
-    )}
+      {/* Header: back + title (+ rename icon) OR just "Teams" */}
+      <div style={styles.header}>
+        <div style={styles.headerLeft}>
+          {selected && (
+            <GhostButton style={styles.backBtn} onClick={backToList}>
+              ← All teams
+            </GhostButton>
+          )}
 
-    {!selected && <H1 style={{ margin: 0 }}>Teams</H1>}
+          {!selected && <H1 style={{ margin: 0 }}>Teams</H1>}
 
-    {selected && !editingName && (
-      <div style={styles.titleWrap}>
-        <H1 style={styles.titleH1}>{selected.name}</H1>
-        {selected.role === "admin" && (
-          <button
-            aria-label="Rename team"
-            title="Rename team"
-            onClick={() => {
-              setEditingName(true);
-              setNameDraft(selected.name || "");
-            }}
-            style={styles.renameIcon}
-          >
-            ✏️
-          </button>
-        )}
+          {selected && !editingName && (
+            <div style={styles.titleWrap}>
+              <H1 style={styles.titleH1}>{selected.name}</H1>
+              {selected.role === "admin" && (
+                <button
+                  aria-label="Rename team"
+                  title="Rename team"
+                  onClick={() => {
+                    setEditingName(true);
+                    setNameDraft(selected.name || "");
+                  }}
+                  style={styles.renameIcon}
+                >
+                  ✏️
+                </button>
+              )}
+            </div>
+          )}
+
+          {selected && editingName && (
+            <>
+              <Input
+                value={nameDraft}
+                onChange={(e) => setNameDraft(e.target.value)}
+                onKeyDown={async (e) => {
+                  if (e.key === "Enter") await doRename();
+                  if (e.key === "Escape") setEditingName(false);
+                }}
+                autoFocus
+                style={{ minWidth: 220 }}
+              />
+              <Button
+                onClick={doRename}
+                disabled={!nameDraft.trim() || nameDraft.trim() === selected.name}
+              >
+                Save
+              </Button>
+              <GhostButton
+                onClick={() => {
+                  setEditingName(false);
+                  setNameDraft(selected.name || "");
+                }}
+              >
+                Cancel
+              </GhostButton>
+            </>
+          )}
+        </div>
       </div>
-    )}
-
-    {selected && editingName && (
-      <>
-        <Input
-          value={nameDraft}
-          onChange={(e) => setNameDraft(e.target.value)}
-          onKeyDown={async (e) => {
-            if (e.key === "Enter") await doRename();
-            if (e.key === "Escape") setEditingName(false);
-          }}
-          autoFocus
-          style={{ minWidth: 220 }}
-        />
-        <Button
-          onClick={doRename}
-          disabled={!nameDraft.trim() || nameDraft.trim() === selected.name}
-        >
-          Save
-        </Button>
-        <GhostButton
-          onClick={() => {
-            setEditingName(false);
-            setNameDraft(selected.name || "");
-          }}
-        >
-          Cancel
-        </GhostButton>
-      </>
-    )}
-  </div>
-</div>
-
 
       {err && <ErrorText>{err}</ErrorText>}
 
@@ -321,12 +320,7 @@ function TeamDetail({ team, members, currentUserId, onChangeRole, onAdded, onDel
   };
 
   const deleteTeam = async () => {
-    if (
-      !window.confirm(
-        `Delete “${team.name}” permanently? This cannot be undone.`
-      )
-    )
-      return;
+    if (!window.confirm(`Delete “${team.name}” permanently? This cannot be undone.`)) return;
     setBusy(true);
     setErr("");
     setMsg("");
@@ -371,7 +365,7 @@ function TeamDetail({ team, members, currentUserId, onChangeRole, onAdded, onDel
                 }}
               >
                 <div style={{ display: "grid" }}>
-                  <strong>{m.full_name || m.email || m.user_id}</strong>
+                  <strong>{m.display_name || m.email || m.user_id}</strong>
                   <span style={{ opacity: 0.7, fontSize: 12 }}>
                     {m.email || m.user_id}
                   </span>
@@ -459,11 +453,16 @@ const styles = {
     alignItems: "center", // vertical centering for back + title group
     gap: 8,
   },
-  titleWrap: {
+  backBtn: {
+    height: 36,
     display: "inline-flex",
     alignItems: "center",
+  },
+  titleWrap: {
+    display: "inline-flex",
+    alignItems: "center", // centers title with the button
     gap: 8,
-    height: 36,
+    height: 36, // match backBtn for perfect vertical alignment
   },
   titleH1: {
     margin: 0,
@@ -471,12 +470,7 @@ const styles = {
     display: "inline-flex",
     alignItems: "center",
   },
-    backBtn: {
-    height: 36,
-    display: "inline-flex",
-    alignItems: "center",
-  },
- renameIcon: {
+  renameIcon: {
     background: "transparent",
     border: "1px solid rgba(255,255,255,0.2)",
     borderRadius: 8,
