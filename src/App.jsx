@@ -206,3 +206,98 @@ function NewPasswordForm({ supabase, onDone }) {
         <h1 style={styles.h1}>Set a new password</h1>
         {err && <p style={styles.error}>{err}</p>}
         {msg && <p style={styles.info}>{msg}</p>}
+        <form onSubmit={submit} style={{ display: "grid", gap: 12 }}>
+          <label style={styles.label}>
+            <span>New password</span>
+            <input
+              style={styles.input}
+              type="password"
+              value={password}
+              onChange={(e) => setPassword(e.target.value)}
+              required
+              minLength={6}
+            />
+          </label>
+          <button style={styles.button} disabled={submitting} type="submit">
+            {submitting ? "Updating…" : "Update password"}
+          </button>
+        </form>
+      </div>
+    </div>
+  );
+}
+
+function Dashboard({ supabase, session }) {
+  const user = session?.user;
+
+  const signOut = async () => {
+    await supabase.auth.signOut();
+  };
+
+  return (
+    <div style={styles.centerWrap}>
+      <div style={styles.card}>
+        <h1 style={styles.h1}>improvhub</h1>
+        <p style={{ marginTop: 4, opacity: 0.8 }}>Signed in as <strong>{user?.email}</strong></p>
+        <pre style={styles.pre}>{JSON.stringify({ id: user?.id, email: user?.email }, null, 2)}</pre>
+        <div style={styles.row}>
+          <button style={styles.button} onClick={signOut}>Sign out</button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+const styles = {
+  app: { minHeight: "100vh", background: "#0b0b0e", color: "white" },
+  centerWrap: { minHeight: "100vh", display: "grid", placeItems: "center", padding: 16 },
+  card: {
+    width: "100%",
+    maxWidth: 520,
+    background: "#14141a",
+    borderRadius: 16,
+    padding: 20,
+    boxShadow: "0 10px 30px rgba(0,0,0,0.35)",
+    border: "1px solid rgba(255,255,255,0.06)",
+  },
+  h1: { fontSize: 20, margin: 0, marginBottom: 16, letterSpacing: 0.3 },
+  label: { display: "grid", gap: 6, fontSize: 14 },
+  input: {
+    background: "#0f0f14",
+    color: "white",
+    border: "1px solid rgba(255,255,255,0.1)",
+    borderRadius: 10,
+    padding: "10px 12px",
+    outline: "none",
+  },
+  button: {
+    background: "white",
+    color: "black",
+    border: "none",
+    padding: "10px 14px",
+    borderRadius: 10,
+    cursor: "pointer",
+    fontWeight: 600,
+  },
+  linkButton: {
+    background: "transparent",
+    color: "white",
+    border: "1px solid rgba(255,255,255,0.2)",
+    padding: "10px 14px",
+    borderRadius: 10,
+    cursor: "pointer",
+  },
+  row: { display: "flex", gap: 10, marginTop: 12, flexWrap: "wrap" },
+  error: { color: "#ff6b6b", margin: "0 0 12px" },
+  info: { color: "#a0e7ff", margin: "0 0 12px" },
+  pre: {
+    background: "#0f0f14",
+    border: "1px solid rgba(255,255,255,0.1)",
+    padding: 12,
+    borderRadius: 10,
+    overflowX: "auto",
+    marginTop: 12,
+  },
+};
+
+export default App;
