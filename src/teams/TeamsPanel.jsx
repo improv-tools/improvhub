@@ -8,6 +8,7 @@ import {
   setMemberRoleRPC,
   renameTeamRPC,
   deleteTeamRPC,
+  addMemberByEmailRPC,
 } from "teams/teams.api";
 import {
   H1,
@@ -266,6 +267,11 @@ export default function TeamsPanel() {
               setErr(e.message || "Failed to update role");
             }
           }}
+          onAdded={async () => {
+              const mem = await listTeamMembersRPC(selected.id);
+              setMembers(mem);
+              await refreshTeams();
+          }}
           onDeleted={() => {
             // back to list after deletion
             setSelected(null);
@@ -278,25 +284,43 @@ export default function TeamsPanel() {
   );
 }
 
-function TeamDetail({ team, members, currentUserId, onChangeRole, onDeleted }) {
+function TeamDetail({ team, members, currentUserId, onChangeRole, onAdded, onDeleted }) {
   const isAdmin = team.role === "admin";
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
   const [msg, setMsg] = useState("");
 
-  const deleteTeam = async () => {
-    if (
-      !window.confirm(
-        `Delete “${team.name}” permanently? This cannot be undone.`
-      )
-    )
-      return;
-    setBusy(true);
+  // NEW: invite by email
+  const [inviteEmail, setInviteEmail] = useState("");
+  const [inviteRole, setInviteRole] = useState("member");
+  const [inviting, setInviting] = useState(false);
+
+  const invite = async () => {
+    const email = inviteEmail.trim();
+    if (!email) return;
+    setInviting(true);
     setErr("");
     setMsg("");
     try {
+      await addMemberByEmailRPC(team.id, email, inviteRole);
+      setInviteEmail("");
+      setInviteRole("member");
+      setMsg("Member added ✓");
+      onAdded?.(); // refresh roster in parent
+      setTimeout(() => setMsg(""), 1500);
+    } catch (e) {
+      setErr(e.message || "Add member failed");
+    } finally {
+      setInviting(false);
+    }
+  };
+
+  const deleteTeam = async () => {
+    if (!window.confirm(`Delete “${team.name}” permanently? This cannot be undone.`)) return;
+    setBusy(true); setErr(""); setMsg("");
+    try {
       await deleteTeamRPC(team.id);
-      onDeleted?.(); // parent: go back to list & refresh
+      onDeleted?.(); // parent: back to list & refresh
     } catch (e) {
       setErr(e.message || "Delete failed");
     } finally {
@@ -312,6 +336,44 @@ function TeamDetail({ team, members, currentUserId, onChangeRole, onDeleted }) {
 
       {err && <ErrorText>{err}</ErrorText>}
       {msg && <InfoText>{msg}</InfoText>}
+
+      {/* NEW: Invite by email (admins only) */}
+      {isAdmin && (
+        <>
+          <h3 style={{ margin: "16px 0 8px", fontSize: 16 }}>Add member</h3>
+          <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+            <Input
+              placeholder="user@example.com"
+              type="email"
+              value={inviteEmail}
+              onChange={(e) => setInviteEmail(e.target.value)}
+              onKeyDown={(e) => e.key === "Enter" && invite()}
+              style={{ minWidth: 220 }}
+            />
+            <select
+              value={inviteRole}
+              onChange={(e) => setInviteRole(e.target.value)}
+              style={{
+                background: "#0f0f14",
+                color: "white",
+                border: "1px solid rgba(255,255,255,0.2)",
+                borderRadius: 10,
+                padding: "10px 12px",
+                outline: "none",
+              }}
+            >
+              <option value="member">Member</option>
+              <option value="admin">Admin</option>
+            </select>
+            <Button onClick={invite} disabled={inviting || !inviteEmail.trim()}>
+              {inviting ? "Adding…" : "Add"}
+            </Button>
+          </div>
+          <p style={{ opacity: 0.7, fontSize: 12, marginTop: 6 }}>
+            Only existing accounts can be added.
+          </p>
+        </>
+      )}
 
       <h3 style={{ margin: "16px 0 8px", fontSize: 16 }}>Members</h3>
       {members.length === 0 ? (
