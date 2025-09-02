@@ -1,5 +1,5 @@
-import { AuthProvider } from "@/auth/AuthContext";
-import AppRouter from "@/app/Router";
+import { AuthProvider } from "auth/AuthContext";
+import AppRouter from "app/Router";
 
 export default function App() {
   return (
