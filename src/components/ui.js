@@ -165,6 +165,27 @@ export function Tab({ active, children, style, ...props }) {
   );
 }
 
+export function DangerButton({ children, style, ...props }) {
+  return (
+    <button
+      style={{
+        background: tokens.color.danger,
+        color: "#000",
+        border: "none",
+        padding: "10px 14px",
+        borderRadius: tokens.radius.md,
+        cursor: "pointer",
+        fontWeight: 700,
+        ...style,
+      }}
+      {...props}
+    >
+      {children}
+    </button>
+  );
+}
+
+
 /* ---------- Small layout helpers ---------- */
 export function Row({ children, style }) {
   return <div style={merge({ display: "flex", gap: 10, marginTop: tokens.space.lg, flexWrap: "wrap" }, style)}>{children}</div>;
