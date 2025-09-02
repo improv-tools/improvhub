@@ -1,40 +1,71 @@
-import { createContext, useContext, useEffect, useState } from "react";
-import { getSession, onAuthChange } from "auth/auth.api";
+import { createContext, useContext, useEffect, useMemo, useState } from "react";
+import { supabase } from "lib/supabaseClient";
 
-const AuthCtx = createContext({ session: null, loading: true });
+const AuthCtx = createContext(null);
 
 export function AuthProvider({ children }) {
   const [session, setSession] = useState(null);
   const [loading, setLoading] = useState(true);
-  const [recovering, setRecovering] = useState(false);
 
+  // initial load + subscribe to changes
   useEffect(() => {
-    (async () => {
-      const { data } = await getSession();
-      setSession(data.session ?? null);
-      setLoading(false);
-    })();
+    let mounted = true;
 
-    const { data: sub } = onAuthChange((event, newSession) => {
-      if (event === "PASSWORD_RECOVERY") setRecovering(true);
-      setSession(newSession);
+    supabase.auth.getSession().then(({ data }) => {
+      if (mounted) {
+        setSession(data.session ?? null);
+        setLoading(false);
+      }
     });
-    return () => sub.subscription.unsubscribe();
+
+    const { data: sub } = supabase.auth.onAuthStateChange((_event, next) => {
+      setSession(next);
+    });
+
+    return () => {
+      mounted = false;
+      sub?.subscription?.unsubscribe?.();
+    };
   }, []);
 
-  // clean long hash if present
-  useEffect(() => {
-    if (window.location.hash.includes("access_token")) {
-      const url = new URL(window.location.href);
-      window.history.replaceState({}, document.title, url.origin + url.pathname);
+  // ✅ single source of truth for display name
+  const displayName = useMemo(() => {
+    const u = session?.user;
+    if (!u) return "";
+    return (
+      u.user_metadata?.display_name ||
+      u.user_metadata?.full_name ||
+      u.user_metadata?.name ||
+      (u.email ? u.email.split("@")[0] : "")
+    );
+  }, [session?.user]);
+
+  // expose a helper to refetch user after updates
+  const refreshUser = async () => {
+    const { data, error } = await supabase.auth.getUser();
+    if (!error) {
+      // Merge back into session snapshot so consumers update immediately
+      setSession((prev) =>
+        prev ? { ...prev, user: data.user } : { user: data.user }
+      );
     }
-  }, []);
+    return { data, error };
+  };
 
-  return (
-    <AuthCtx.Provider value={{ session, loading, recovering, setRecovering }}>
-      {children}
-    </AuthCtx.Provider>
+  const value = useMemo(
+    () => ({
+      session,
+      user: session?.user || null,
+      loading,
+      displayName, // 👈 use this everywhere for names
+      refreshUser,
+    }),
+    [session, loading, displayName]
   );
+
+  return <AuthCtx.Provider value={value}>{children}</AuthCtx.Provider>;
 }
 
-export const useAuth = () => useContext(AuthCtx);
+export function useAuth() {
+  return useContext(AuthCtx);
+}
