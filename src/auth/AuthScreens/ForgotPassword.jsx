@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { resetPassword } from "@/auth/auth.api";
+import { resetPassword } from "auth/auth.api";
 
 const DEFAULT_REDIRECT =
   process.env.REACT_APP_REDIRECT_URL ||
