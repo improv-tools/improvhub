@@ -15,7 +15,7 @@ begin
     raise exception 'team name required' using errcode = '22023';
   end if;
 
-  -- authorize: caller must be an admin of this team
+  -- caller must be admin
   if not exists (
     select 1 from public.team_members tm
     where tm.team_id = p_team_id
@@ -25,9 +25,10 @@ begin
     raise exception 'not authorized' using errcode = '42501';
   end if;
 
-  update public.teams
+  -- QUALIFY the column to avoid ambiguity with OUT param "id"
+  update public.teams as t
   set name = p_name, updated_at = now()
-  where id = p_team_id;
+  where t.id = p_team_id;
 
   return query
     select t.id, t.name, t.display_id
@@ -38,6 +39,7 @@ $$;
 
 revoke all on function public.admin_rename_team(uuid, text) from public;
 grant execute on function public.admin_rename_team(uuid, text) to authenticated;
+
 
 -- Delete a team (admin only). Cascades to team_members via FK.
 drop function if exists public.admin_delete_team(uuid);
