@@ -47,14 +47,13 @@ export async function deleteTeamRPC(teamId) {
   const { error } = await supabase.rpc("admin_delete_team", { p_team_id: teamId });
   if (error) throw error;
 }
-
 export async function addMemberByEmailRPC(teamId, email, role = "member") {
-  const { data, error } = await supabase.rpc("admin_add_member_by_email", {
+  const { error } = await supabase.rpc("admin_add_member_by_email", {
     p_team_id: teamId,
     p_email: email,
     p_role: role,
   });
   if (error) throw error;
-  return Array.isArray(data) ? data[0] : data; // { user_id, role, email, full_name }
+  // no return data
 }
 
