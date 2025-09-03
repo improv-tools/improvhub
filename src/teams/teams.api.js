@@ -152,3 +152,11 @@ export async function splitEventSeries(event, fromOccStartIso, patch) {
   if (error) throw error;
   return data;
 }
+
+export async function removeTeamMemberRPC(teamId, userId) {
+  const { error } = await supabase.rpc("remove_team_member", {
+    p_team_id: teamId,
+    p_user_id: userId,
+  });
+  if (error) throw error;
+}
