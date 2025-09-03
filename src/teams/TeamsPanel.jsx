@@ -2,6 +2,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { useAuth } from "auth/AuthContext";
 import {
+  // teams & members
   listMyTeams,
   createTeam,
   listTeamMembersRPC,
@@ -9,9 +10,11 @@ import {
   renameTeamRPC,
   deleteTeamRPC,
   addMemberByEmailRPC,
+  // events
   listTeamEvents,
   createTeamEvent,
   deleteTeamEvent,
+  // overrides / series
   listTeamEventOverrides,
   deleteEventOccurrence,
   upsertOccurrenceOverride,
@@ -28,18 +31,26 @@ import {
   DangerButton,
 } from "components/ui";
 
-/* ---------- helpers: time/recurrence on client ---------- */
+/* ===========================
+   Time & recurrence helpers
+   =========================== */
 const DOW = ["SU","MO","TU","WE","TH","FR","SA"];
-function toIsoLocal(date) { return new Date(date).toISOString(); }
-function fmtDT(d, tz, opts={}) {
+function fmtDT(d, tz, opts = {}) {
   return new Intl.DateTimeFormat(undefined, {
-    timeZone: tz, year: "numeric", month: "short", day: "2-digit",
-    hour: "2-digit", minute: "2-digit", ...opts
+    timeZone: tz,
+    year: "numeric",
+    month: "short",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    ...opts,
   }).format(new Date(d));
 }
 function fmtTime(d, tz) {
   return new Intl.DateTimeFormat(undefined, {
-    timeZone: tz, hour: "2-digit", minute: "2-digit"
+    timeZone: tz,
+    hour: "2-digit",
+    minute: "2-digit",
   }).format(new Date(d));
 }
 function minutesBetween(startIso, endIso) {
@@ -48,13 +59,13 @@ function minutesBetween(startIso, endIso) {
 }
 function nthWeekdayOfMonth(year, month /*0-11*/, weekday /*0-6*/, n /*1..5 or -1 last*/) {
   if (n === -1) {
-    const last = new Date(Date.UTC(year, month+1, 0));
+    const last = new Date(Date.UTC(year, month + 1, 0));
     const diff = (last.getUTCDay() - weekday + 7) % 7;
     return new Date(Date.UTC(year, month, last.getUTCDate() - diff));
   }
   const first = new Date(Date.UTC(year, month, 1));
   const offset = (weekday - first.getUTCDay() + 7) % 7;
-  const day = 1 + offset + (n-1)*7;
+  const day = 1 + offset + (n - 1) * 7;
   const dt = new Date(Date.UTC(year, month, day));
   if (dt.getUTCMonth() !== month) return null;
   return dt;
@@ -62,45 +73,56 @@ function nthWeekdayOfMonth(year, month /*0-11*/, weekday /*0-6*/, n /*1..5 or -1
 
 /** Expand base events into concrete occurrences inside [fromIso, toIso] */
 function expandOccurrences(events, fromIso, toIso) {
-  const from = new Date(fromIso), to = new Date(toIso);
+  const from = new Date(fromIso);
+  const to = new Date(toIso);
   const out = [];
+
   for (const e of events) {
     const start = new Date(e.starts_at);
     const end = new Date(e.ends_at);
     const durMs = end - start;
 
     if (e.recur_freq === "none") {
-      if (start >= from && start <= to) out.push({ ...e, occ_start: start, occ_end: new Date(start.getTime()+durMs) });
+      if (start >= from && start <= to) {
+        out.push({ ...e, occ_start: start, occ_end: new Date(start.getTime() + durMs) });
+      }
       continue;
     }
 
     let count = 0;
-    const maxCount = e.recur_count || 1000; // safety cap
+    const maxCount = e.recur_count || 1000;
     const until = e.recur_until ? new Date(`${e.recur_until}T23:59:59Z`) : null;
     const interval = Math.max(1, e.recur_interval || 1);
 
     if (e.recur_freq === "weekly") {
       const by = (e.recur_byday && e.recur_byday.length) ? e.recur_byday : [DOW[start.getUTCDay()]];
-      // find first week start on/after `from`
-      const weekMs = 7*24*3600*1000;
-      // align to the Monday of start's week (we'll still use DOW codes)
-      const anchorWeekStart = new Date(Date.UTC(start.getUTCFullYear(), start.getUTCMonth(), start.getUTCDate()));
-      const anchorDow = anchorWeekStart.getUTCDay();
-      const anchorMonday = new Date(anchorWeekStart.getTime() - ((anchorDow+6)%7)*24*3600*1000);
+      const weekMs = 7 * 24 * 3600 * 1000;
 
-      // find the first candidate week >= from
+      // anchor Monday of the week containing the original start
+      const anchorDate = new Date(Date.UTC(start.getUTCFullYear(), start.getUTCMonth(), start.getUTCDate()));
+      const anchorDow = anchorDate.getUTCDay();
+      const anchorMonday = new Date(anchorDate.getTime() - ((anchorDow + 6) % 7) * 24 * 3600 * 1000);
+
+      // find first candidate week >= from
       const weeksFromAnchor = Math.floor((from - anchorMonday) / weekMs);
       let k = Math.max(0, Math.floor(weeksFromAnchor / interval));
+
       while (true) {
-        const thisWeek = new Date(anchorMonday.getTime() + k*interval*weekMs);
+        const thisWeek = new Date(anchorMonday.getTime() + k * interval * weekMs);
         for (const code of by) {
           const wday = DOW.indexOf(code);
           if (wday < 0) continue;
-          const day = new Date(thisWeek.getTime() + ((wday+7)%7)*24*3600*1000);
-          // copy time from original start
-          const occStart = new Date(Date.UTC(day.getUTCFullYear(), day.getUTCMonth(), day.getUTCDate(),
-            start.getUTCHours(), start.getUTCMinutes(), start.getUTCSeconds()));
+          const day = new Date(thisWeek.getTime() + ((wday + 7) % 7) * 24 * 3600 * 1000);
+          const occStart = new Date(Date.UTC(
+            day.getUTCFullYear(),
+            day.getUTCMonth(),
+            day.getUTCDate(),
+            start.getUTCHours(),
+            start.getUTCMinutes(),
+            start.getUTCSeconds()
+          ));
           const occEnd = new Date(occStart.getTime() + durMs);
+
           if (occStart > to) break;
           if ((until && occStart > until) || count >= maxCount) break;
           if (occEnd >= from && occStart <= to) {
@@ -108,30 +130,37 @@ function expandOccurrences(events, fromIso, toIso) {
             count++;
           }
         }
-        // stop conditions
-        const nextWeekStart = new Date(thisWeek.getTime() + interval*weekMs);
+        const nextWeekStart = new Date(thisWeek.getTime() + interval * weekMs);
         if (nextWeekStart > to) break;
         if ((until && nextWeekStart > until) || count >= maxCount) break;
         k++;
       }
     } else if (e.recur_freq === "monthly") {
       const byMonthDay = e.recur_bymonthday && e.recur_bymonthday.length ? e.recur_bymonthday : [start.getUTCDate()];
-      const byNth = e.recur_week_of_month ? { n: e.recur_week_of_month, dow: e.recur_day_of_week || DOW[start.getUTCDay()] } : null;
-      // step month-by-month from the event's start
-      let y = start.getUTCFullYear(), m = start.getUTCMonth();
-      // fast-forward to first month where an occurrence could be >= from
+      const byNth = e.recur_week_of_month
+        ? { n: e.recur_week_of_month, dow: e.recur_day_of_week || DOW[start.getUTCDay()] }
+        : null;
+
+      let y = start.getUTCFullYear();
+      let m = start.getUTCMonth();
+
+      // fast-forward months to get to/near window start
       while (new Date(Date.UTC(y, m, 1)) < from) {
-        m += interval; if (m > 11) { y += Math.floor(m/12); m = m % 12; }
+        m += interval;
+        if (m > 11) { y += Math.floor(m / 12); m = m % 12; }
         if ((until && new Date(Date.UTC(y, m, 1)) > until) || count >= maxCount) break;
       }
+
       while (true) {
         if (byNth) {
           const weekday = DOW.indexOf(byNth.dow);
           const dt = nthWeekdayOfMonth(y, m, weekday, byNth.n);
           if (dt) {
-            const occStart = new Date(Date.UTC(dt.getUTCFullYear(), dt.getUTCMonth(), dt.getUTCDate(),
-              start.getUTCHours(), start.getUTCMinutes(), start.getUTCSeconds()));
-            const occEnd = new Date(occStart.getTime()+durMs);
+            const occStart = new Date(Date.UTC(
+              dt.getUTCFullYear(), dt.getUTCMonth(), dt.getUTCDate(),
+              start.getUTCHours(), start.getUTCMinutes(), start.getUTCSeconds()
+            ));
+            const occEnd = new Date(occStart.getTime() + durMs);
             if (occStart > to) break;
             if ((until && occStart > until) || count >= maxCount) break;
             if (occEnd >= from && occStart <= to) { out.push({ ...e, occ_start: occStart, occ_end: occEnd }); count++; }
@@ -139,34 +168,40 @@ function expandOccurrences(events, fromIso, toIso) {
         } else {
           for (const d of byMonthDay) {
             const dt = new Date(Date.UTC(y, m, d));
-            if (dt.getUTCMonth() !== m) continue; // invalid day (e.g., Feb 30)
-            const occStart = new Date(Date.UTC(dt.getUTCFullYear(), dt.getUTCMonth(), dt.getUTCDate(),
-              start.getUTCHours(), start.getUTCMinutes(), start.getUTCHours()));
-            occStart.setUTCHours(start.getUTCHours(), start.getUTCMinutes(), start.getUTCSeconds(), 0);
-            const occEnd = new Date(occStart.getTime()+durMs);
+            if (dt.getUTCMonth() !== m) continue; // invalid date for this month
+            const occStart = new Date(Date.UTC(
+              dt.getUTCFullYear(), dt.getUTCMonth(), dt.getUTCDate(),
+              start.getUTCHours(), start.getUTCMinutes(), start.getUTCSeconds()
+            ));
+            const occEnd = new Date(occStart.getTime() + durMs);
             if (occStart > to) break;
             if ((until && occStart > until) || count >= maxCount) break;
             if (occEnd >= from && occStart <= to) { out.push({ ...e, occ_start: occStart, occ_end: occEnd }); count++; }
           }
         }
+
         // next month block
-        m += interval; if (m > 11) { y += Math.floor(m/12); m = m % 12; }
+        m += interval;
+        if (m > 11) { y += Math.floor(m / 12); m = m % 12; }
         const nextMonthStart = new Date(Date.UTC(y, m, 1));
         if (nextMonthStart > to) break;
         if ((until && nextMonthStart > until) || count >= maxCount) break;
       }
     }
   }
-  // sort by occurrence start
-  out.sort((a,b) => a.occ_start - b.occ_start);
+
+  out.sort((a, b) => a.occ_start - b.occ_start);
   return out;
 }
-/* -------------------------------------------------------- */
 
+/* ===========================
+   Component
+   =========================== */
 export default function TeamsPanel() {
   const { session } = useAuth();
   const user = session?.user;
 
+  // teams list
   const [teams, setTeams] = useState([]);
   const [loading, setLoading] = useState(true);
   const [err, setErr] = useState("");
@@ -180,8 +215,8 @@ export default function TeamsPanel() {
   const [selected, setSelected] = useState(null); // { id, name, display_id, role }
   const [members, setMembers] = useState([]);
 
-  // subtab inside team: 'members' | 'calendar'
-  const [subTab, setSubTab] = useState("members");
+  // subtab inside team
+  const [subTab, setSubTab] = useState("members"); // 'members' | 'calendar'
 
   // rename (header)
   const [editingName, setEditingName] = useState(false);
@@ -189,11 +224,11 @@ export default function TeamsPanel() {
 
   // calendar state
   const [eventsBase, setEventsBase] = useState([]);
+  const [overrides, setOverrides] = useState([]);
   const [calErr, setCalErr] = useState("");
   const [showAddEvent, setShowAddEvent] = useState(false);
-  const [overrides, setOverrides] = useState([]);
 
-  // add event form fields
+  // add event form
   const defaultTZ = Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
   const [evTitle, setEvTitle] = useState("");
   const [evDesc, setEvDesc] = useState("");
@@ -202,17 +237,20 @@ export default function TeamsPanel() {
   const [evTZ, setEvTZ] = useState(defaultTZ);
   const [evStart, setEvStart] = useState(""); // "YYYY-MM-DDTHH:MM"
   const [evEnd, setEvEnd] = useState("");     // "YYYY-MM-DDTHH:MM"
-
-  const [evFreq, setEvFreq] = useState("none");              // none|weekly|monthly
-  const [evInterval, setEvInterval] = useState(1);           // 1,2,3...
-  const [evByDay, setEvByDay] = useState(["MO"]);            // for weekly
-  const [evMonthMode, setEvMonthMode] = useState("bymonthday"); // bymonthday|bynth
-  const [evByMonthDay, setEvByMonthDay] = useState([1]);     // e.g. [15]
-  const [evWeekOfMonth, setEvWeekOfMonth] = useState(1);     // 1..5 or -1
+  // recurrence
+  const [evFreq, setEvFreq] = useState("none"); // none | weekly | weekly-2 | monthly
+  const [evInterval, setEvInterval] = useState(1);
+  const [evByDay, setEvByDay] = useState(["MO"]);
+  const [evMonthMode, setEvMonthMode] = useState("bymonthday"); // bymonthday | bynth
+  const [evByMonthDay, setEvByMonthDay] = useState([1]);
+  const [evWeekOfMonth, setEvWeekOfMonth] = useState(1);
   const [evDayOfWeek, setEvDayOfWeek] = useState("MO");
-  const [evEndMode, setEvEndMode] = useState("never");       // never|until|count
-  const [evUntil, setEvUntil] = useState("");                // YYYY-MM-DD
+  const [evEndMode, setEvEndMode] = useState("never"); // never | until | count
+  const [evUntil, setEvUntil] = useState("");
   const [evCount, setEvCount] = useState(10);
+
+  // duration tracking for start/end sync
+  const [durMin, setDurMin] = useState(60);
 
   const refreshTeams = async () => {
     setErr("");
@@ -221,7 +259,7 @@ export default function TeamsPanel() {
       setTeams(list);
       setLoading(false);
       if (selected) {
-        const s = list.find(t => t.id === selected.id);
+        const s = list.find((t) => t.id === selected.id);
         if (s) setSelected(s);
         else { setSelected(null); setMembers([]); }
       }
@@ -238,7 +276,7 @@ export default function TeamsPanel() {
     if (selected) {
       setEditingName(false);
       setNameDraft(selected.name || "");
-      setSubTab("members"); // default when opening a team
+      setSubTab("members");
       setShowAddEvent(false);
     } else {
       setEditingName(false);
@@ -247,7 +285,8 @@ export default function TeamsPanel() {
   }, [selected?.id, selected?.name]);
 
   const openTeam = async (team) => {
-    setSelected(team); setErr("");
+    setSelected(team);
+    setErr("");
     try {
       const mem = await listTeamMembersRPC(team.id);
       setMembers(mem);
@@ -259,15 +298,21 @@ export default function TeamsPanel() {
   const backToList = () => { setSelected(null); setMembers([]); };
 
   const createNewTeam = async () => {
-    const value = newName.trim(); if (!value) return;
-    setCreating(true); setErr("");
+    const value = newName.trim();
+    if (!value) return;
+    setCreating(true);
+    setErr("");
     try {
-      const team = await createTeam(value);
-      setNewName(""); setShowCreate(false);
-      await refreshTeams(); await openTeam({ ...team, role: "admin" });
+      const team = await createTeam(value); // RPC: creator becomes admin
+      setNewName("");
+      setShowCreate(false);
+      await refreshTeams();
+      await openTeam({ ...team, role: "admin" }); // jump into the new team
     } catch (e) {
       setErr(e.message || "Create failed");
-    } finally { setCreating(false); }
+    } finally {
+      setCreating(false);
+    }
   };
 
   const doRename = async () => {
@@ -277,77 +322,99 @@ export default function TeamsPanel() {
     if (!window.confirm(`Rename team to “${next}”?`)) return;
     try {
       const updated = await renameTeamRPC(selected.id, next);
-      setSelected(prev => prev && prev.id === updated.id ? { ...prev, name: updated.name } : prev);
+      setSelected((prev) => (prev && prev.id === updated.id ? { ...prev, name: updated.name } : prev));
       setEditingName(false);
       await refreshTeams();
     } catch (e) { setErr(e.message || "Rename failed"); }
   };
 
-  // ---- Calendar: load base events and expand to occurrences (next 6 months)
+  // ---- Calendar: window & loading
   const windowFrom = useMemo(() => {
-    const now = new Date(); now.setHours(0,0,0,0); return now.toISOString();
+    const now = new Date(); now.setHours(0, 0, 0, 0); return now.toISOString();
   }, []);
   const windowTo = useMemo(() => {
-    const d = new Date(); d.setMonth(d.getMonth()+6); d.setHours(23,59,59,999); return d.toISOString();
+    const d = new Date(); d.setMonth(d.getMonth() + 6); d.setHours(23, 59, 59, 999); return d.toISOString();
   }, []);
 
-const refreshCalendar = async () => {
-  if (!selected) return;
-  setCalErr("");
-  try {
-    const evs = await listTeamEvents(selected.id, windowFrom, windowTo);
-    setEventsBase(evs);
+  const refreshCalendar = async () => {
+    if (!selected) return;
+    setCalErr("");
+    try {
+      const evs = await listTeamEvents(selected.id, windowFrom, windowTo);
+      setEventsBase(evs);
+      const ovs = await listTeamEventOverrides(selected.id, windowFrom, windowTo);
+      setOverrides(ovs);
+    } catch (e) {
+      setCalErr(e.message || "Failed to load events");
+    }
+  };
 
-    // NEW: load per-occurrence overrides/cancellations
-    const ovs = await listTeamEventOverrides(selected.id, windowFrom, windowTo);
-    setOverrides(ovs);
-  } catch (e) {
-    setCalErr(e.message || "Failed to load events");
-  }
-};
+  useEffect(() => { if (selected) refreshCalendar(); /* eslint-disable-next-line */ }, [selected?.id]);
 
+  const occurrences = useMemo(() => {
+    const occ = expandOccurrences(eventsBase, windowFrom, windowTo);
+    if (!overrides.length) return occ;
+
+    // merge per-occurrence overrides/cancellations
+    const map = new Map();
+    for (const o of overrides) {
+      map.set(`${o.event_id}|${new Date(o.occ_start).toISOString()}`, o);
+    }
+    const out = [];
+    for (const e of occ) {
+      const key = `${e.id}|${e.occ_start.toISOString()}`;
+      const o = map.get(key);
+      if (!o) { out.push(e); continue; }
+      if (o.canceled) continue;
+      out.push({
+        ...e,
+        title: o.title ?? e.title,
+        description: o.description ?? e.description,
+        location: o.location ?? e.location,
+        tz: o.tz ?? e.tz,
+        occ_start: o.starts_at ? new Date(o.starts_at) : e.occ_start,
+        occ_end: o.ends_at ? new Date(o.ends_at) : e.occ_end,
+        category: o.category ?? e.category,
+      });
+    }
+    out.sort((a, b) => a.occ_start - b.occ_start);
+    return out;
+  }, [eventsBase, overrides, windowFrom, windowTo]);
+
+  // Add event helpers
   useEffect(() => {
-    if (selected) refreshCalendar();
-    // eslint-disable-next-line
-  }, [selected?.id]);
+    if (evStart && evEnd) {
+      const d = (new Date(evEnd) - new Date(evStart)) / 60000;
+      if (d > 0) setDurMin(d);
+    }
+  }, [evStart, evEnd]);
 
-const occurrences = useMemo(() => {
-  const occ = expandOccurrences(eventsBase, windowFrom, windowTo);
-  if (!overrides.length) return occ;
+  const onChangeStart = (val) => {
+    setEvStart(val);
+    if (val) {
+      const nextEnd = new Date(new Date(val).getTime() + durMin * 60000);
+      setEvEnd(nextEnd.toISOString().slice(0, 16));
+    }
+  };
+  const onChangeEnd = (val) => {
+    setEvEnd(val);
+    if (evStart && val) {
+      const d = (new Date(val) - new Date(evStart)) / 60000;
+      if (d > 0) setDurMin(d);
+    }
+  };
 
-  // Index overrides by "eventId|occurrenceStartIso"
-  const map = new Map();
-  for (const o of overrides) {
-    map.set(`${o.event_id}|${new Date(o.occ_start).toISOString()}`, o);
-  }
-
-  const out = [];
-  for (const e of occ) {
-    const key = `${e.id}|${e.occ_start.toISOString()}`;
-    const o = map.get(key);
-    if (!o) { out.push(e); continue; }
-    if (o.canceled) continue; // skip this occurrence
-
-    // Apply per-occurrence overrides
-    out.push({
-      ...e,
-      title: o.title ?? e.title,
-      description: o.description ?? e.description,
-      location: o.location ?? e.location,
-      tz: o.tz ?? e.tz,
-      occ_start: o.starts_at ? new Date(o.starts_at) : e.occ_start,
-      occ_end:   o.ends_at   ? new Date(o.ends_at)   : e.occ_end,
-      category: o.category ?? e.category,
-    });
-  }
-
-  out.sort((a,b) => a.occ_start - b.occ_start);
-  return out;
-}, [eventsBase, overrides, windowFrom, windowTo]);
+  const [localErr, setLocalErr] = useState("");
+  const inlineError = useMemo(() => {
+    if (!evTitle.trim()) return "Title is required.";
+    if (!evStart || !evEnd) return "Start and end are required.";
+    if (new Date(evStart) < new Date()) return "Start time is in the past.";
+    if (new Date(evEnd) <= new Date(evStart)) return "End must be after start.";
+    return "";
+  }, [evTitle, evStart, evEnd]);
 
   const saveEvent = async () => {
     if (!selected) return;
-    // build payload
     const payload = {
       team_id: selected.id,
       title: evTitle.trim(),
@@ -357,9 +424,9 @@ const occurrences = useMemo(() => {
       tz: evTZ,
       starts_at: new Date(evStart).toISOString(),
       ends_at: new Date(evEnd).toISOString(),
-      recur_freq: evFreq,
-      recur_interval: evInterval,
-      recur_byday: evFreq === "weekly" ? evByDay : null,
+      recur_freq: evFreq === "weekly-2" ? "weekly" : evFreq,
+      recur_interval: evFreq === "weekly-2" ? 2 : evInterval,
+      recur_byday: evFreq.startsWith("weekly") ? evByDay : null,
       recur_bymonthday: (evFreq === "monthly" && evMonthMode === "bymonthday") ? evByMonthDay : null,
       recur_week_of_month: (evFreq === "monthly" && evMonthMode === "bynth") ? evWeekOfMonth : null,
       recur_day_of_week: (evFreq === "monthly" && evMonthMode === "bynth") ? evDayOfWeek : null,
@@ -367,6 +434,8 @@ const occurrences = useMemo(() => {
       recur_until: evEndMode === "until" ? evUntil : null,
     };
     if (!payload.title || !evStart || !evEnd) { setCalErr("Please fill title, start and end."); return; }
+    if (inlineError) { setLocalErr(inlineError); return; }
+
     try {
       await createTeamEvent(payload);
       setShowAddEvent(false);
@@ -376,20 +445,20 @@ const occurrences = useMemo(() => {
       setEvFreq("none"); setEvInterval(1); setEvByDay(["MO"]);
       setEvMonthMode("bymonthday"); setEvByMonthDay([1]); setEvWeekOfMonth(1); setEvDayOfWeek("MO");
       setEvEndMode("never"); setEvUntil(""); setEvCount(10);
+      setLocalErr("");
       await refreshCalendar();
     } catch (e) {
       setCalErr(e.message || "Failed to create event");
     }
   };
 
-  const removeEvent = async (evId) => {
-    if (!window.confirm("Delete this event?")) return;
-    try {
-      await deleteTeamEvent(evId);
-      await refreshCalendar();
-    } catch (e) {
-      setCalErr(e.message || "Failed to delete event");
-    }
+  const removeEventSeries = async (eventId) => {
+    await deleteTeamEvent(eventId);
+    await refreshCalendar();
+  };
+  const removeEventOccurrence = async (eventId, occStartIso) => {
+    await deleteEventOccurrence(eventId, occStartIso);
+    await refreshCalendar();
   };
 
   return (
@@ -414,11 +483,25 @@ const occurrences = useMemo(() => {
           )}
           {selected && editingName && (
             <>
-              <Input value={nameDraft} onChange={(e)=>setNameDraft(e.target.value)}
-                     onKeyDown={async (e)=>{ if (e.key==="Enter") await doRename(); if (e.key==="Escape") setEditingName(false); }}
-                     autoFocus style={{ minWidth: 220 }} />
-              <Button onClick={doRename} disabled={!nameDraft.trim() || nameDraft.trim()===selected.name}>Save</Button>
-              <GhostButton onClick={()=>{ setEditingName(false); setNameDraft(selected.name||""); }}>Cancel</GhostButton>
+              <Input
+                value={nameDraft}
+                onChange={(e) => setNameDraft(e.target.value)}
+                onKeyDown={async (e) => {
+                  if (e.key === "Enter") await doRename();
+                  if (e.key === "Escape") setEditingName(false);
+                }}
+                autoFocus
+                style={{ minWidth: 220 }}
+              />
+              <Button
+                onClick={doRename}
+                disabled={!nameDraft.trim() || nameDraft.trim() === selected.name}
+              >
+                Save
+              </Button>
+              <GhostButton onClick={() => { setEditingName(false); setNameDraft(selected.name || ""); }}>
+                Cancel
+              </GhostButton>
             </>
           )}
         </div>
@@ -428,17 +511,34 @@ const occurrences = useMemo(() => {
 
       {!selected ? (
         <>
-          {loading ? <p>Loading teams…</p> : teams.length === 0 ? (
+          {loading ? (
+            <p>Loading teams…</p>
+          ) : teams.length === 0 ? (
             <p style={{ opacity: 0.8 }}>You don’t belong to any teams yet.</p>
           ) : (
-            <ul style={{ listStyle:"none", padding:0, margin:"12px 0 0" }}>
-              {teams.map(t => (
-                <li key={t.id}
-                    style={{ padding:"10px 0", borderBottom:"1px solid rgba(255,255,255,0.06)", cursor:"pointer" }}
-                    onClick={()=>openTeam(t)}>
-                  <div style={{ display:"flex", justifyContent:"space-between", alignItems:"baseline" }}>
-                    <div><strong>{t.name}</strong> <span style={{ opacity:0.7 }}>({t.display_id})</span></div>
-                    <span style={{ opacity:0.7 }}>{t.role}</span>
+            <ul style={{ listStyle: "none", padding: 0, margin: "12px 0 0" }}>
+              {teams.map((t) => (
+                <li
+                  key={t.id}
+                  style={{
+                    padding: "10px 0",
+                    borderBottom: "1px solid rgba(255,255,255,0.06)",
+                    cursor: "pointer",
+                  }}
+                  onClick={() => openTeam(t)}
+                >
+                  <div
+                    style={{
+                      display: "flex",
+                      justifyContent: "space-between",
+                      alignItems: "baseline",
+                    }}
+                  >
+                    <div>
+                      <strong>{t.name}</strong>{" "}
+                      <span style={{ opacity: 0.7 }}>({t.display_id})</span>
+                    </div>
+                    <span style={{ opacity: 0.7 }}>{t.role}</span>
                   </div>
                 </li>
               ))}
@@ -448,20 +548,27 @@ const occurrences = useMemo(() => {
           {/* Create team (hidden until toggled) */}
           <div style={{ marginTop: 12 }} />
           {!showCreate ? (
-            <GhostButton onClick={()=>setShowCreate(true)}>+ Create team</GhostButton>
+            <GhostButton onClick={() => setShowCreate(true)}>+ Create team</GhostButton>
           ) : (
             <>
               <div style={styles.inlineInvite}>
-                <Input value={newName} onChange={(e)=>setNewName(e.target.value)}
-                       placeholder="e.g. Writers Room"
-                       onKeyDown={(e)=> e.key==="Enter" && createNewTeam()}
-                       style={{ minWidth: 220 }} />
+                <Input
+                  value={newName}
+                  onChange={(e) => setNewName(e.target.value)}
+                  placeholder="e.g. Writers Room"
+                  onKeyDown={(e) => e.key === "Enter" && createNewTeam()}
+                  style={{ minWidth: 220 }}
+                />
                 <Button onClick={createNewTeam} disabled={creating || !newName.trim()}>
                   {creating ? "Creating…" : "Create"}
                 </Button>
-                <GhostButton onClick={()=>{ setShowCreate(false); setNewName(""); }}>Cancel</GhostButton>
+                <GhostButton onClick={() => { setShowCreate(false); setNewName(""); }}>
+                  Cancel
+                </GhostButton>
               </div>
-              <InfoText style={{ marginTop: 6 }}>Duplicates allowed. A unique id like <code>Name#1</code> is generated.</InfoText>
+              <InfoText style={{ marginTop: 6 }}>
+                Duplicates allowed. A unique id like <code>Name#1</code> is generated.
+              </InfoText>
             </>
           )}
         </>
@@ -493,8 +600,16 @@ const occurrences = useMemo(() => {
             evByMonthDay, setEvByMonthDay, evWeekOfMonth, setEvWeekOfMonth,
             evDayOfWeek, setEvDayOfWeek, evEndMode, setEvEndMode, evUntil, setEvUntil, evCount, setEvCount
           }}
+          durMin={durMin}
+          onChangeStart={onChangeStart}
+          onChangeEnd={onChangeEnd}
+          inlineError={inlineError}
+          localErr={localErr}
+          setLocalErr={setLocalErr}
           onSaveEvent={saveEvent}
-          onDeleteEvent={removeEvent}
+          onDeleteEventSeries={removeEventSeries}
+          onDeleteEventOccurrence={removeEventOccurrence}
+          onRefreshCalendar={refreshCalendar}
           onDeleted={() => { setSelected(null); setMembers([]); refreshTeams(); }}
         />
       )}
@@ -505,12 +620,37 @@ const occurrences = useMemo(() => {
 function TeamDetail({
   team, members, currentUserId, subTab, setSubTab,
   onChangeRole, calErr, occurrences,
-  showAddEvent, setShowAddEvent, evState, onSaveEvent, onDeleteEvent, onDeleted
+  showAddEvent, setShowAddEvent, evState, durMin, onChangeStart, onChangeEnd,
+  inlineError, localErr, setLocalErr,
+  onSaveEvent, onDeleteEventSeries, onDeleteEventOccurrence, onRefreshCalendar,
+  onDeleted
 }) {
   const isAdmin = team.role === "admin";
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
   const [msg, setMsg] = useState("");
+
+  // Add member UI
+  const [showInvite, setShowInvite] = useState(false);
+  const [inviteEmail, setInviteEmail] = useState("");
+  const [inviteRole, setInviteRole] = useState("member");
+  const [inviting, setInviting] = useState(false);
+
+  const addMember = async () => {
+    const email = inviteEmail.trim(); if (!email) return;
+    setInviting(true); setErr(""); setMsg("");
+    try {
+      await addMemberByEmailRPC(team.id, email, inviteRole);
+      setInviteEmail(""); setInviteRole("member");
+      setShowInvite(false);
+      setMsg("Member added ✓");
+      setTimeout(() => setMsg(""), 1500);
+    } catch (e) {
+      setErr(e.message || "Add member failed");
+    } finally {
+      setInviting(false);
+    }
+  };
 
   const deleteTeam = async () => {
     if (!window.confirm(`Delete “${team.name}” permanently? This cannot be undone.`)) return;
@@ -527,9 +667,9 @@ function TeamDetail({
       </p>
 
       {/* Sub-tabs */}
-      <div style={{ display:"flex", gap:8, margin:"8px 0 12px" }}>
-        <GhostButton onClick={()=>setSubTab("members")} style={subTab==="members"?styles.subActive:null}>Members</GhostButton>
-        <GhostButton onClick={()=>setSubTab("calendar")} style={subTab==="calendar"?styles.subActive:null}>Calendar</GhostButton>
+      <div style={{ display: "flex", gap: 8, margin: "8px 0 12px" }}>
+        <GhostButton onClick={() => setSubTab("members")} style={subTab === "members" ? styles.subActive : null}>Members</GhostButton>
+        <GhostButton onClick={() => setSubTab("calendar")} style={subTab === "calendar" ? styles.subActive : null}>Calendar</GhostButton>
       </div>
 
       {err && <ErrorText>{err}</ErrorText>}
@@ -537,23 +677,25 @@ function TeamDetail({
 
       {subTab === "members" ? (
         <>
-          <h3 style={{ margin:"8px 0 8px", fontSize:16 }}>Members</h3>
+          <h3 style={{ margin: "8px 0 8px", fontSize: 16 }}>Members</h3>
           {members.length === 0 ? (
             <p style={{ opacity: 0.8 }}>No members yet.</p>
           ) : (
-            <ul style={{ listStyle:"none", padding:0, margin:0 }}>
-              {members.map(m => (
-                <li key={m.user_id} style={{ padding:"8px 0", borderBottom:"1px solid rgba(255,255,255,0.06)" }}>
-                  <div style={{ display:"flex", justifyContent:"space-between", gap:12, alignItems:"center" }}>
-                    <div style={{ display:"grid" }}>
+            <ul style={{ listStyle: "none", padding: 0, margin: 0 }}>
+              {members.map((m) => (
+                <li key={m.user_id} style={{ padding: "8px 0", borderBottom: "1px solid rgba(255,255,255,0.06)" }}>
+                  <div style={{ display: "flex", justifyContent: "space-between", gap: 12, alignItems: "center" }}>
+                    <div style={{ display: "grid" }}>
                       <strong>{m.display_name || m.email || m.user_id}</strong>
-                      <span style={{ opacity:0.7, fontSize:12 }}>{m.email || m.user_id}</span>
+                      <span style={{ opacity: 0.7, fontSize: 12 }}>{m.email || m.user_id}</span>
                     </div>
-                    <div style={{ display:"flex", alignItems:"center", gap:8 }}>
-                      <span style={{ opacity:0.8 }}>{m.role}</span>
+                    <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                      <span style={{ opacity: 0.8 }}>{m.role}</span>
                       {team.role === "admin" && m.user_id !== currentUserId && (
-                        <Button style={{ padding:"6px 10px" }}
-                          onClick={()=> onChangeRole(m.user_id, m.role === "admin" ? "member" : "admin")}>
+                        <Button
+                          style={{ padding: "6px 10px" }}
+                          onClick={() => onChangeRole(m.user_id, m.role === "admin" ? "member" : "admin")}
+                        >
                           {m.role === "admin" ? "Make member" : "Make admin"}
                         </Button>
                       )}
@@ -565,7 +707,33 @@ function TeamDetail({
           )}
 
           {/* Add member (toggle) */}
-          <AddMemberRow teamId={team.id} />
+          <div style={{ marginTop: 12 }}>
+            {!showInvite ? (
+              <GhostButton onClick={() => setShowInvite(true)}>+ Add member</GhostButton>
+            ) : (
+              <div style={styles.inlineInvite}>
+                <Input
+                  placeholder="user@example.com"
+                  type="email"
+                  value={inviteEmail}
+                  onChange={(e) => setInviteEmail(e.target.value)}
+                  onKeyDown={(e) => e.key === "Enter" && addMember()}
+                  style={{ minWidth: 220 }}
+                />
+                <select value={inviteRole} onChange={(e) => setInviteRole(e.target.value)} style={styles.select}>
+                  <option value="member">Member</option>
+                  <option value="admin">Admin</option>
+                </select>
+                <Button onClick={addMember} disabled={inviting || !inviteEmail.trim()}>
+                  {inviting ? "Adding…" : "Add"}
+                </Button>
+                <GhostButton onClick={() => { setShowInvite(false); setInviteEmail(""); setInviteRole("member"); }}>
+                  Cancel
+                </GhostButton>
+              </div>
+            )}
+          </div>
+
           {isAdmin && (
             <div style={{ marginTop: 18 }}>
               <DangerButton onClick={deleteTeam} disabled={busy}>Delete team</DangerButton>
@@ -579,8 +747,16 @@ function TeamDetail({
           showAddEvent={showAddEvent}
           setShowAddEvent={setShowAddEvent}
           evState={evState}
+          durMin={durMin}
+          onChangeStart={onChangeStart}
+          onChangeEnd={onChangeEnd}
+          inlineError={inlineError}
+          localErr={localErr}
+          setLocalErr={setLocalErr}
           onSaveEvent={onSaveEvent}
-          onDeleteEvent={onDeleteEvent}
+          onDeleteEventSeries={onDeleteEventSeries}
+          onDeleteEventOccurrence={onDeleteEventOccurrence}
+          onRefreshCalendar={onRefreshCalendar}
           calErr={calErr}
         />
       )}
@@ -588,48 +764,13 @@ function TeamDetail({
   );
 }
 
-function AddMemberRow({ teamId }) {
-  const [inviteEmail, setInviteEmail] = useState("");
-  const [inviteRole, setInviteRole] = useState("member");
-  const [inviting, setInviting] = useState(false);
-  const [err, setErr] = useState(""); const [msg, setMsg] = useState("");
-
-  const add = async () => {
-    const email = inviteEmail.trim(); if (!email) return;
-    setInviting(true); setErr(""); setMsg("");
-    try {
-      await addMemberByEmailRPC(teamId, email, inviteRole);
-      setInviteEmail(""); setInviteRole("member"); setMsg("Member added ✓");
-      setTimeout(()=>setMsg(""),1500);
-    } catch(e) { setErr(e.message || "Add failed"); }
-    finally { setInviting(false); }
-  };
-
-  return (
-    <>
-      {err && <ErrorText>{err}</ErrorText>}
-      {msg && <InfoText>{msg}</InfoText>}
-      <div style={{ marginTop:12 }}>
-        <GhostButton onClick={(e)=> {
-          const row = e.currentTarget.nextSibling;
-          row.style.display = row.style.display === "none" ? "flex" : "none";
-        }}>+ Add member</GhostButton>
-        <div style={{ display:"none", ...styles.inlineInvite }}>
-          <Input placeholder="user@example.com" type="email"
-                 value={inviteEmail} onChange={e=>setInviteEmail(e.target.value)}
-                 onKeyDown={e=> e.key==="Enter" && add()} style={{ minWidth:220 }}/>
-          <select value={inviteRole} onChange={e=>setInviteRole(e.target.value)} style={styles.select}>
-            <option value="member">Member</option>
-            <option value="admin">Admin</option>
-          </select>
-          <Button onClick={add} disabled={inviting || !inviteEmail.trim()}>{inviting ? "Adding…" : "Add"}</Button>
-        </div>
-      </div>
-    </>
-  );
-}
-
-function CalendarPanel({ team, occurrences, showAddEvent, setShowAddEvent, evState, onSaveEvent, onDeleteEvent, calErr }) {
+function CalendarPanel({
+  team, occurrences, showAddEvent, setShowAddEvent,
+  evState, durMin, onChangeStart, onChangeEnd,
+  inlineError, localErr, setLocalErr,
+  onSaveEvent, onDeleteEventSeries, onDeleteEventOccurrence, onRefreshCalendar,
+  calErr
+}) {
   const {
     evTitle, setEvTitle, evDesc, setEvDesc, evLoc, setEvLoc, evCat, setEvCat,
     evTZ, setEvTZ, evStart, setEvStart, evEnd, setEvEnd,
@@ -639,47 +780,10 @@ function CalendarPanel({ team, occurrences, showAddEvent, setShowAddEvent, evSta
     evDayOfWeek, setEvDayOfWeek, evEndMode, setEvEndMode, evUntil, setEvUntil, evCount, setEvCount
   } = evState;
 
-  // duration tracking (minutes)
-  const [durMin, setDurMin] = useState(60);
-  useEffect(() => {
-    if (evStart && evEnd) {
-      const d = (new Date(evEnd) - new Date(evStart)) / 60000;
-      if (d > 0) setDurMin(d);
-    }
-  }, [evStart, evEnd]);
-
-  const nowIso = new Date().toISOString();
-  const [localErr, setLocalErr] = useState("");
-
-  const validate = () => {
-    setLocalErr("");
-    if (!evTitle.trim()) return "Title is required.";
-    if (!evStart || !evEnd) return "Start and end are required.";
-    if (new Date(evStart) < new Date()) return "Start time is in the past.";
-    if (new Date(evEnd) <= new Date(evStart)) return "End must be after start.";
-    return "";
-  };
-
-  const onChangeStart = (val) => {
-    setEvStart(val);
-    // keep duration consistent (shift end)
-    if (val) {
-      const nextEnd = new Date(new Date(val).getTime() + durMin * 60000);
-      setEvEnd(nextEnd.toISOString().slice(0,16));
-    }
-  };
-
-  const onChangeEnd = (val) => {
-    setEvEnd(val);
-    if (evStart && val) {
-      const d = (new Date(val) - new Date(evStart)) / 60000;
-      if (d > 0) setDurMin(d);
-    }
-  };
-
   // EDIT occurrence state
   const [editingKey, setEditingKey] = useState(null); // `${eventId}|${occIso}`
-  const [edit, setEdit] = useState(null); // {title, desc, ... start, end, tz, cat}
+  const [edit, setEdit] = useState(null); // { title, description, location, tz, starts_at, ends_at, category, base }
+
   const beginEdit = (occ) => {
     if (occ.occ_start < new Date()) { alert("Cannot edit a past occurrence."); return; }
     setEditingKey(`${occ.id}|${occ.occ_start.toISOString()}`);
@@ -688,17 +792,16 @@ function CalendarPanel({ team, occurrences, showAddEvent, setShowAddEvent, evSta
       description: occ.description || "",
       location: occ.location || "",
       tz: occ.tz,
-      starts_at: occ.occ_start.toISOString().slice(0,16),
-      ends_at: occ.occ_end.toISOString().slice(0,16),
+      starts_at: occ.occ_start.toISOString().slice(0, 16),
+      ends_at: occ.occ_end.toISOString().slice(0, 16),
       category: occ.category,
-      base: occ, // keep original
+      base: occ,
     });
   };
   const cancelEdit = () => { setEditingKey(null); setEdit(null); };
 
   const saveEditOccurrenceOnly = async () => {
     if (!edit) return;
-    // validate
     if (!edit.title.trim()) return alert("Title required.");
     if (new Date(edit.starts_at) < new Date()) return alert("Start is in the past.");
     if (new Date(edit.ends_at) <= new Date(edit.starts_at)) return alert("End must be after start.");
@@ -713,15 +816,16 @@ function CalendarPanel({ team, occurrences, showAddEvent, setShowAddEvent, evSta
         category: edit.category,
       });
       cancelEdit();
-      window.dispatchEvent(new Event("refreshCalendar")); // signal parent
+      await onRefreshCalendar();
     } catch (e) { alert(e.message || "Failed to save occurrence."); }
   };
 
   const saveEditThisAndFuture = async () => {
     if (!edit) return;
-    if (edit.base.recur_freq === "none") return saveEditOccurrenceOnly(); // no series to split
+    if (edit.base.recur_freq === "none") return saveEditOccurrenceOnly();
     if (!window.confirm("Apply these changes to this and all future occurrences?")) return;
     if (new Date(edit.starts_at) < new Date()) return alert("Start is in the past.");
+    if (new Date(edit.ends_at) <= new Date(edit.starts_at)) return alert("End must be after start.");
     try {
       await splitEventSeries(
         edit.base,
@@ -737,95 +841,101 @@ function CalendarPanel({ team, occurrences, showAddEvent, setShowAddEvent, evSta
         }
       );
       cancelEdit();
-      window.dispatchEvent(new Event("refreshCalendar"));
+      await onRefreshCalendar();
     } catch (e) { alert(e.message || "Failed to update series."); }
   };
 
-  // listen for refresh signal from edits
-  useEffect(() => {
-    const h = () => { /* parent controls actual reload via prop */ };
-    window.addEventListener("refreshCalendar", h);
-    return () => window.removeEventListener("refreshCalendar", h);
-  }, []);
-
   const onClickDelete = async (occ) => {
+    if (occ.occ_start < new Date()) { alert("Cannot delete a past occurrence."); return; }
     if (occ.recur_freq === "none") {
       if (!window.confirm("Delete this event?")) return;
-      await onDeleteEvent(occ.id);
+      await onDeleteEventSeries(occ.id);
       return;
     }
-    // two-step simple prompt
+    // Prompt: this occurrence vs series
     if (window.confirm("Delete this occurrence only? (OK = this occurrence, Cancel = entire series)")) {
-      await deleteEventOccurrence(occ.id, occ.occ_start.toISOString());
-      window.dispatchEvent(new Event("refreshCalendar"));
+      await onDeleteEventOccurrence(occ.id, occ.occ_start.toISOString());
+      await onRefreshCalendar();
     } else {
       if (window.confirm("Delete the entire series? This cannot be undone.")) {
-        await onDeleteEvent(occ.id);
+        await onDeleteEventSeries(occ.id);
       }
     }
   };
 
   return (
     <>
-      <h3 style={{ margin:"8px 0", fontSize:16 }}>Calendar</h3>
-      {(calErr || localErr) && <ErrorText>{calErr || localErr}</ErrorText>}
+      <h3 style={{ margin: "8px 0", fontSize: 16 }}>Calendar</h3>
+      {(calErr || localErr || inlineError) && <ErrorText>{calErr || localErr || inlineError}</ErrorText>}
 
       {occurrences.length === 0 ? (
-        <p style={{ opacity:0.8 }}>No upcoming events.</p>
+        <p style={{ opacity: 0.8 }}>No upcoming events.</p>
       ) : (
-        <ul style={{ listStyle:"none", padding:0, margin:0 }}>
-          {occurrences.map(occ => {
+        <ul style={{ listStyle: "none", padding: 0, margin: 0 }}>
+          {occurrences.map((occ) => {
             const mins = minutesBetween(occ.occ_start, occ.occ_end);
-            const duration = mins < 180 ? `${Math.floor(mins/60)}h ${mins%60}m` : `${(mins/60).toFixed(1)}h`;
+            const duration = mins < 180 ? `${Math.floor(mins / 60)}h ${mins % 60}m` : `${(mins / 60).toFixed(1)}h`;
             const key = `${occ.id}|${occ.occ_start.toISOString()}`;
             const isEditing = editingKey === key;
 
             return (
-              <li key={key} style={{ padding:"10px 0", borderBottom:"1px solid rgba(255,255,255,0.06)" }}>
+              <li key={key} style={{ padding: "10px 0", borderBottom: "1px solid rgba(255,255,255,0.06)" }}>
                 {!isEditing ? (
-                  <div style={{ display:"flex", justifyContent:"space-between", alignItems:"baseline", gap:12 }}>
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", gap: 12 }}>
                     <div>
                       <strong>{occ.title}</strong>{" "}
-                      <span style={{ opacity:0.7 }}>({occ.category})</span>
-                      <div style={{ opacity:0.8, fontSize:12 }}>
-                        {fmtDT(occ.occ_start, occ.tz, { month:"short", day:"2-digit" })} ·{" "}
-                        {fmtTime(occ.occ_start, occ.tz)}–{fmtTime(occ.occ_end, occ.tz)}
-                        {" "}({occ.tz}, {duration})
+                      <span style={{ opacity: 0.7 }}>({occ.category})</span>
+                      <div style={{ opacity: 0.8, fontSize: 12 }}>
+                        {fmtDT(occ.occ_start, occ.tz, { month: "short", day: "2-digit" })} ·{" "}
+                        {fmtTime(occ.occ_start, occ.tz)}–{fmtTime(occ.occ_end, occ.tz)} ({occ.tz}, {duration})
                         {occ.location ? ` · ${occ.location}` : ""}
                       </div>
                     </div>
-                    <div style={{ display:"flex", gap:8 }}>
-                      <GhostButton onClick={()=>beginEdit(occ)}>Edit</GhostButton>
-                      <GhostButton onClick={()=>onClickDelete(occ)}>Delete</GhostButton>
+                    <div style={{ display: "flex", gap: 8 }}>
+                      <GhostButton onClick={() => beginEdit(occ)}>Edit</GhostButton>
+                      <GhostButton onClick={() => onClickDelete(occ)}>Delete</GhostButton>
                     </div>
                   </div>
                 ) : (
-                  <div style={{ display:"grid", gap:6 }}>
-                    <Input placeholder="Title" value={edit.title} onChange={e=>setEdit({...edit, title:e.target.value})}/>
-                    <Input placeholder="Description" value={edit.description} onChange={e=>setEdit({...edit, description:e.target.value})}/>
-                    <Input placeholder="Location" value={edit.location} onChange={e=>setEdit({...edit, location:e.target.value})}/>
-                    <div style={{ display:"flex", gap:8, flexWrap:"wrap" }}>
-                      <select value={edit.category} onChange={e=>setEdit({...edit, category:e.target.value})} style={styles.select}>
+                  <div style={{ display: "grid", gap: 6 }}>
+                    <Input placeholder="Title" value={edit.title} onChange={(e) => setEdit({ ...edit, title: e.target.value })} />
+                    <Input placeholder="Description" value={edit.description} onChange={(e) => setEdit({ ...edit, description: e.target.value })} />
+                    <Input placeholder="Location" value={edit.location} onChange={(e) => setEdit({ ...edit, location: e.target.value })} />
+                    <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                      <select
+                        value={edit.category}
+                        onChange={(e) => setEdit({ ...edit, category: e.target.value })}
+                        style={styles.select}
+                      >
                         <option value="rehearsal">Rehearsal</option>
                         <option value="social">Social</option>
                         <option value="performance">Performance</option>
                       </select>
-                      <Input placeholder="Time zone" value={edit.tz} onChange={e=>setEdit({...edit, tz:e.target.value})}/>
+                      <Input placeholder="Time zone" value={edit.tz} onChange={(e) => setEdit({ ...edit, tz: e.target.value })} />
                     </div>
-                    <div style={{ display:"flex", gap:8, flexWrap:"wrap" }}>
-                      <input type="datetime-local" step="60"
+                    <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                      <input
+                        type="datetime-local"
+                        step="60"
                         value={edit.starts_at}
-                        onChange={e=>setEdit({...edit, starts_at:e.target.value,
-                          ends_at: (() => {
-                            const d = (new Date(edit.ends_at) - new Date(edit.starts_at)) || 3600000;
-                            const next = new Date(e.target.value); return new Date(next.getTime()+d).toISOString().slice(0,16);
-                          })()
-                        })} />
-                      <input type="datetime-local" step="60"
+                        onChange={(e) => {
+                          const startVal = e.target.value;
+                          const currentDur =
+                            (new Date(edit.ends_at) - new Date(edit.starts_at)) || 60 * 60000;
+                          const nextEnd = new Date(new Date(startVal).getTime() + currentDur)
+                            .toISOString()
+                            .slice(0, 16);
+                          setEdit({ ...edit, starts_at: startVal, ends_at: nextEnd });
+                        }}
+                      />
+                      <input
+                        type="datetime-local"
+                        step="60"
                         value={edit.ends_at}
-                        onChange={e=>setEdit({...edit, ends_at:e.target.value})}/>
+                        onChange={(e) => setEdit({ ...edit, ends_at: e.target.value })}
+                      />
                     </div>
-                    <div style={{ display:"flex", gap:8 }}>
+                    <div style={{ display: "flex", gap: 8 }}>
                       <Button onClick={saveEditOccurrenceOnly}>Save this occurrence</Button>
                       {edit.base.recur_freq !== "none" && (
                         <Button onClick={saveEditThisAndFuture}>Save this & future</Button>
@@ -841,59 +951,75 @@ function CalendarPanel({ team, occurrences, showAddEvent, setShowAddEvent, evSta
       )}
 
       {/* Add Event */}
-      <div style={{ marginTop:12 }}>
+      <div style={{ marginTop: 12 }}>
         {!showAddEvent ? (
-          <GhostButton onClick={()=>setShowAddEvent(true)}>+ Add event</GhostButton>
+          <GhostButton onClick={() => setShowAddEvent(true)}>+ Add event</GhostButton>
         ) : (
           <>
-            <div style={{ display:"grid", gap:8 }}>
-              <div style={{ display:"grid", gap:6 }}>
-                <Input placeholder="Title" value={evTitle} onChange={e=>setEvTitle(e.target.value)} />
-                <Input placeholder="Description (optional)" value={evDesc} onChange={e=>setEvDesc(e.target.value)} />
-                <Input placeholder="Location (optional)" value={evLoc} onChange={e=>setEvLoc(e.target.value)} />
-                <div style={{ display:"flex", gap:8, flexWrap:"wrap" }}>
-                  <select value={evCat} onChange={e=>setEvCat(e.target.value)} style={styles.select}>
+            <div style={{ display: "grid", gap: 8 }}>
+              <div style={{ display: "grid", gap: 6 }}>
+                <Input placeholder="Title" value={evTitle} onChange={(e) => setEvTitle(e.target.value)} />
+                <Input placeholder="Description (optional)" value={evDesc} onChange={(e) => setEvDesc(e.target.value)} />
+                <Input placeholder="Location (optional)" value={evLoc} onChange={(e) => setEvLoc(e.target.value)} />
+                <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                  <select value={evCat} onChange={(e) => setEvCat(e.target.value)} style={styles.select}>
                     <option value="rehearsal">Rehearsal</option>
                     <option value="social">Social</option>
                     <option value="performance">Performance</option>
                   </select>
-                  <Input placeholder="Time zone (e.g. Europe/London)" value={evTZ} onChange={e=>setEvTZ(e.target.value)} />
+                  <Input placeholder="Time zone (e.g. Europe/London)" value={evTZ} onChange={(e) => setEvTZ(e.target.value)} />
                 </div>
-                <div style={{ display:"flex", gap:8, flexWrap:"wrap" }}>
-                  <input type="datetime-local" step="60"
-                         value={evStart} onChange={e=>onChangeStart(e.target.value)} />
-                  <input type="datetime-local" step="60"
-                         value={evEnd} onChange={e=>onChangeEnd(e.target.value)} />
+                <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                  <input type="datetime-local" step="60" value={evStart} onChange={(e) => onChangeStart(e.target.value)} />
+                  <input type="datetime-local" step="60" value={evEnd} onChange={(e) => onChangeEnd(e.target.value)} />
                 </div>
               </div>
 
               {/* Recurrence */}
-              <div style={{ borderTop:"1px solid rgba(255,255,255,0.12)", paddingTop:8 }}>
-                <div style={{ display:"flex", gap:8, flexWrap:"wrap", alignItems:"center" }}>
-                  <span style={{ opacity:0.8 }}>Repeat:</span>
-                  <select value={evFreq} onChange={e=>setEvFreq(e.target.value)} style={styles.select}>
+              <div style={{ borderTop: "1px solid rgba(255,255,255,0.12)", paddingTop: 8 }}>
+                <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
+                  <span style={{ opacity: 0.8 }}>Repeat:</span>
+                  <select value={evFreq} onChange={(e) => setEvFreq(e.target.value)} style={styles.select}>
                     <option value="none">Does not repeat</option>
                     <option value="weekly">Weekly</option>
-                    {/* Fortnightly is just weekly interval=2 */}
                     <option value="weekly-2">Fortnightly</option>
                     <option value="monthly">Monthly</option>
                   </select>
 
                   {evFreq.startsWith("weekly") && (
                     <>
-                      <span style={{ opacity:0.8 }}>every</span>
-                      <Input type="number" min={1}
-                        value={evFreq==="weekly-2" ? 2 : evInterval}
-                        onChange={e=>setEvInterval(parseInt(e.target.value||'1',10))}
-                        disabled={evFreq==="weekly-2"} style={{ width:70 }} />
-                      <span style={{ opacity:0.8 }}>week(s) on</span>
-                      <div style={{ display:"flex", gap:6, flexWrap:"wrap" }}>
-                        {["MO","TU","WE","TH","FR","SA","SU"].map(code => (
-                          <label key={code} style={{ display:"inline-flex", gap:6, alignItems:"center", border:"1px solid rgba(255,255,255,0.2)", borderRadius:8, padding:"4px 8px" }}>
-                            <input type="checkbox" checked={evByDay.includes(code)}
-                              onChange={(e)=>{
-                                setEvByDay(prev => e.target.checked ? [...new Set([...prev, code])] : prev.filter(x=>x!==code));
-                              }}/>
+                      <span style={{ opacity: 0.8 }}>every</span>
+                      <Input
+                        type="number"
+                        min={1}
+                        value={evFreq === "weekly-2" ? 2 : evInterval}
+                        onChange={(e) => setEvInterval(parseInt(e.target.value || "1", 10))}
+                        disabled={evFreq === "weekly-2"}
+                        style={{ width: 70 }}
+                      />
+                      <span style={{ opacity: 0.8 }}>week(s) on</span>
+                      <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+                        {["MO", "TU", "WE", "TH", "FR", "SA", "SU"].map((code) => (
+                          <label
+                            key={code}
+                            style={{
+                              display: "inline-flex",
+                              gap: 6,
+                              alignItems: "center",
+                              border: "1px solid rgba(255,255,255,0.2)",
+                              borderRadius: 8,
+                              padding: "4px 8px",
+                            }}
+                          >
+                            <input
+                              type="checkbox"
+                              checked={evByDay.includes(code)}
+                              onChange={(e) => {
+                                setEvByDay((prev) =>
+                                  e.target.checked ? [...new Set([...prev, code])] : prev.filter((x) => x !== code)
+                                );
+                              }}
+                            />
                             {code}
                           </label>
                         ))}
@@ -902,31 +1028,65 @@ function CalendarPanel({ team, occurrences, showAddEvent, setShowAddEvent, evSta
                   )}
 
                   {evFreq === "monthly" && (
-                    <div style={{ display:"grid", gap:6 }}>
-                      <div style={{ display:"flex", gap:8, alignItems:"center", flexWrap:"wrap" }}>
-                        <span style={{ opacity:0.8 }}>every</span>
-                        <Input type="number" min={1} value={evInterval} onChange={e=>setEvInterval(parseInt(e.target.value||'1',10))} style={{ width:70 }} />
-                        <span style={{ opacity:0.8 }}>month(s)</span>
+                    <div style={{ display: "grid", gap: 6 }}>
+                      <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+                        <span style={{ opacity: 0.8 }}>every</span>
+                        <Input
+                          type="number"
+                          min={1}
+                          value={evInterval}
+                          onChange={(e) => setEvInterval(parseInt(e.target.value || "1", 10))}
+                          style={{ width: 70 }}
+                        />
+                        <span style={{ opacity: 0.8 }}>month(s)</span>
                       </div>
-                      <div style={{ display:"flex", gap:12, flexWrap:"wrap" }}>
-                        <label style={{ display:"inline-flex", gap:6, alignItems:"center" }}>
-                          <input type="radio" checked={evMonthMode==="bymonthday"} onChange={()=>setEvMonthMode("bymonthday")} />
+                      <div style={{ display: "flex", gap: 12, flexWrap: "wrap" }}>
+                        <label style={{ display: "inline-flex", gap: 6, alignItems: "center" }}>
+                          <input
+                            type="radio"
+                            checked={evMonthMode === "bymonthday"}
+                            onChange={() => setEvMonthMode("bymonthday")}
+                          />
                           By date:
-                          <Input type="text" value={evByMonthDay.join(",")} onChange={e=>{
-                            const arr = e.target.value.split(",").map(s=>parseInt(s.trim(),10)).filter(n=>!isNaN(n));
-                            setEvByMonthDay(arr.length?arr:[1]);
-                          }} placeholder="e.g. 1 or 1,15,30" style={{ width:160 }} />
+                          <Input
+                            type="text"
+                            value={evByMonthDay.join(",")}
+                            onChange={(e) => {
+                              const arr = e.target.value
+                                .split(",")
+                                .map((s) => parseInt(s.trim(), 10))
+                                .filter((n) => !isNaN(n));
+                              setEvByMonthDay(arr.length ? arr : [1]);
+                            }}
+                            placeholder="e.g. 1 or 1,15,30"
+                            style={{ width: 160 }}
+                          />
                         </label>
-                        <label style={{ display:"inline-flex", gap:6, alignItems:"center" }}>
-                          <input type="radio" checked={evMonthMode==="bynth"} onChange={()=>setEvMonthMode("bynth")} />
+                        <label style={{ display: "inline-flex", gap: 6, alignItems: "center" }}>
+                          <input type="radio" checked={evMonthMode === "bynth"} onChange={() => setEvMonthMode("bynth")} />
                           By weekday:
-                          <select value={evWeekOfMonth} onChange={e=>setEvWeekOfMonth(parseInt(e.target.value,10))} style={styles.select}>
-                            <option value={1}>1st</option><option value={2}>2nd</option>
-                            <option value={3}>3rd</option><option value={4}>4th</option>
-                            <option value={5}>5th</option><option value={-1}>Last</option>
+                          <select
+                            value={evWeekOfMonth}
+                            onChange={(e) => setEvWeekOfMonth(parseInt(e.target.value, 10))}
+                            style={styles.select}
+                          >
+                            <option value={1}>1st</option>
+                            <option value={2}>2nd</option>
+                            <option value={3}>3rd</option>
+                            <option value={4}>4th</option>
+                            <option value={5}>5th</option>
+                            <option value={-1}>Last</option>
                           </select>
-                          <select value={evDayOfWeek} onChange={e=>setEvDayOfWeek(e.target.value)} style={styles.select}>
-                            {["SU","MO","TU","WE","TH","FR","SA"].map(code => <option key={code} value={code}>{code}</option>)}
+                          <select
+                            value={evDayOfWeek}
+                            onChange={(e) => setEvDayOfWeek(e.target.value)}
+                            style={styles.select}
+                          >
+                            {["SU", "MO", "TU", "WE", "TH", "FR", "SA"].map((code) => (
+                              <option key={code} value={code}>
+                                {code}
+                              </option>
+                            ))}
                           </select>
                         </label>
                       </div>
@@ -935,39 +1095,42 @@ function CalendarPanel({ team, occurrences, showAddEvent, setShowAddEvent, evSta
                 </div>
 
                 {/* End conditions */}
-                {(evFreq !== "none") && (
-                  <div style={{ display:"flex", gap:12, alignItems:"center", flexWrap:"wrap", marginTop:8 }}>
-                    <span style={{ opacity:0.8 }}>Ends:</span>
-                    <label style={{ display:"inline-flex", gap:6, alignItems:"center" }}>
-                      <input type="radio" checked={evEndMode==="never"} onChange={()=>setEvEndMode("never")} /> Never
+                {evFreq !== "none" && (
+                  <div style={{ display: "flex", gap: 12, alignItems: "center", flexWrap: "wrap", marginTop: 8 }}>
+                    <span style={{ opacity: 0.8 }}>Ends:</span>
+                    <label style={{ display: "inline-flex", gap: 6, alignItems: "center" }}>
+                      <input type="radio" checked={evEndMode === "never"} onChange={() => setEvEndMode("never")} /> Never
                     </label>
-                    <label style={{ display:"inline-flex", gap:6, alignItems:"center" }}>
-                      <input type="radio" checked={evEndMode==="until"} onChange={()=>setEvEndMode("until")} /> Until
-                      <input type="date" value={evUntil} onChange={e=>setEvUntil(e.target.value)} disabled={evEndMode!=="until"} />
+                    <label style={{ display: "inline-flex", gap: 6, alignItems: "center" }}>
+                      <input type="radio" checked={evEndMode === "until"} onChange={() => setEvEndMode("until")} /> Until
+                      <input type="date" value={evUntil} onChange={(e) => setEvUntil(e.target.value)} disabled={evEndMode !== "until"} />
                     </label>
-                    <label style={{ display:"inline-flex", gap:6, alignItems:"center" }}>
-                      <input type="radio" checked={evEndMode==="count"} onChange={()=>setEvEndMode("count")} /> For
-                      <Input type="number" min={1} value={evCount} onChange={e=>setEvCount(parseInt(e.target.value||'1',10))} style={{ width:80 }} />
+                    <label style={{ display: "inline-flex", gap: 6, alignItems: "center" }}>
+                      <input type="radio" checked={evEndMode === "count"} onChange={() => setEvEndMode("count")} /> For
+                      <Input
+                        type="number"
+                        min={1}
+                        value={evCount}
+                        onChange={(e) => setEvCount(parseInt(e.target.value || "1", 10))}
+                        style={{ width: 80 }}
+                      />
                       occurrence(s)
                     </label>
                   </div>
                 )}
               </div>
 
-              <div style={{ display:"flex", gap:8, marginTop:8 }}>
+              <div style={{ display: "flex", gap: 8, marginTop: 8 }}>
                 <Button
-                  onClick={()=>{
-                    // map fortnightly to weekly interval=2
-                    if (evFreq === "weekly-2") setEvInterval(2);
-                    const msg = validate();
-                    if (msg) { setLocalErr(msg); return; }
+                  onClick={() => {
+                    if (inlineError) { setLocalErr(inlineError); return; }
                     onSaveEvent();
                   }}
-                  disabled={!!validate()}
+                  disabled={!!inlineError}
                 >
                   Save event
                 </Button>
-                <GhostButton onClick={()=>{ setShowAddEvent(false); setLocalErr(""); }}>
+                <GhostButton onClick={() => { setShowAddEvent(false); setLocalErr(""); }}>
                   Cancel
                 </GhostButton>
               </div>
@@ -979,15 +1142,65 @@ function CalendarPanel({ team, occurrences, showAddEvent, setShowAddEvent, evSta
   );
 }
 
-
 const styles = {
-  header: { display:"flex", gap:10, alignItems:"center", justifyContent:"space-between", flexWrap:"wrap", marginBottom:12 },
-  headerLeft: { display:"flex", alignItems:"center", gap:8 },
-  backBtn: { height:40, display:"inline-flex", alignItems:"center" },
-  titleWrap: { display:"inline-flex", alignItems:"center", height:40, gap:8 },
-  titleH1: { margin:0, height:40, lineHeight:"40px", display:"inline-flex", alignItems:"center" },
-  renameIcon: { background:"transparent", border:"1px solid rgba(255,255,255,0.2)", borderRadius:8, padding:"6px 8px", cursor:"pointer", color:"white", height:40, display:"inline-flex", alignItems:"center" },
-  subActive: { border: "1px solid rgba(255,255,255,0.4)", borderRadius: 10 },
-  inlineInvite: { display:"flex", alignItems:"center", gap:8, flexWrap:"wrap" },
-  select: { background:"#0f0f14", color:"white", border:"1px solid rgba(255,255,255,0.2)", borderRadius:10, padding:"10px 12px", outline:"none" },
+  header: {
+    display: "flex",
+    gap: 10,
+    alignItems: "center",
+    justifyContent: "space-between",
+    flexWrap: "wrap",
+    marginBottom: 12,
+  },
+  headerLeft: {
+    display: "flex",
+    alignItems: "center",
+    gap: 8,
+  },
+  backBtn: {
+    height: 40,
+    display: "inline-flex",
+    alignItems: "center",
+  },
+  titleWrap: {
+    display: "inline-flex",
+    alignItems: "center",
+    height: 40,
+    gap: 8,
+  },
+  titleH1: {
+    margin: 0,
+    height: 40,
+    lineHeight: "40px",
+    display: "inline-flex",
+    alignItems: "center",
+  },
+  renameIcon: {
+    background: "transparent",
+    border: "1px solid rgba(255,255,255,0.2)",
+    borderRadius: 8,
+    padding: "6px 8px",
+    cursor: "pointer",
+    color: "white",
+    height: 40,
+    display: "inline-flex",
+    alignItems: "center",
+  },
+  subActive: {
+    border: "1px solid rgba(255,255,255,0.4)",
+    borderRadius: 10,
+  },
+  inlineInvite: {
+    display: "flex",
+    alignItems: "center",
+    gap: 8,
+    flexWrap: "wrap",
+  },
+  select: {
+    background: "#0f0f14",
+    color: "white",
+    border: "1px solid rgba(255,255,255,0.2)",
+    borderRadius: 10,
+    padding: "10px 12px",
+    outline: "none",
+  },
 };
