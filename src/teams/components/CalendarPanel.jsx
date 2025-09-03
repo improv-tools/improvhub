@@ -1,4 +1,3 @@
-// src/teams/components/CalendarPanel.jsx
 import { useEffect, useMemo, useState } from "react";
 import { Button, GhostButton, Input, ErrorText, DangerButton } from "components/ui";
 import { fmtTime, toLocalInput, splitLocal, combineLocal, minutesBetween } from "teams/utils/datetime";
@@ -15,9 +14,8 @@ export default function CalendarPanel({
 }) {
   // Tabs inside Calendar
   const [tab, setTab] = useState("upcoming"); // 'upcoming' | 'past'
-
-  // Clear edit/expand when switching tabs to avoid UI duplication artifacts
   useEffect(() => {
+    // clear edit/expand when switching tabs (prevents UI duplication)
     setEditingKey(null);
     setEdit(null);
     setExpanded(new Set());
@@ -141,7 +139,6 @@ export default function CalendarPanel({
   };
 
   const startEdit = (occ, rowKey) => {
-    // ensure only one open editor
     setEditingKey(rowKey);
     const s = splitLocal(toLocalInput(occ.occ_start));
     const e = splitLocal(toLocalInput(occ.occ_end));
@@ -149,7 +146,7 @@ export default function CalendarPanel({
       title: occ.title, description: occ.description || "", location: occ.location || "",
       tz: occ.tz, category: occ.category,
       startDate: s.date, startTime: s.time, endDate: e.date, endTime: e.time,
-      base: occ,
+      base: occ, // includes base_start for RPCs
     });
   };
   const cancelEdit = () => { setEditingKey(null); setEdit(null); };
@@ -161,7 +158,7 @@ export default function CalendarPanel({
     if (!edit.title.trim()) return alert("Title required.");
     if (new Date(s) < new Date()) return alert("Start is in the past.");
     if (new Date(e) <= new Date(s)) return alert("End must be after start.");
-    await patchOccurrence(edit.base.id, edit.base.occ_start.toISOString(), {
+    await patchOccurrence(edit.base.id, (edit.base.base_start || edit.base.occ_start).toISOString(), {
       title: edit.title, description: edit.description || null, location: edit.location || null,
       tz: edit.tz, category: edit.category,
       starts_at: new Date(s).toISOString(), ends_at: new Date(e).toISOString(),
@@ -169,12 +166,12 @@ export default function CalendarPanel({
     cancelEdit();
   };
 
-  // Save for FUTURE: use BASE occurrences so it’s reliable even if some have overrides already
+  // Save for FUTURE (reliable via base occurrences)
   const saveFuture = async () => {
     if (!window.confirm("Apply these changes to all FUTURE occurrences in this team’s series? This affects the whole team.")) return;
     const sISO = new Date(combineLocal(edit.startDate, edit.startTime)).toISOString();
     const eISO = new Date(combineLocal(edit.endDate, edit.endTime)).toISOString();
-    await applyFutureEdits(edit.base.id, edit.base.occ_start.toISOString(), {
+    await applyFutureEdits(edit.base.id, (edit.base.base_start || edit.base.occ_start).toISOString(), {
       title: edit.title, description: edit.description || null, location: edit.location || null,
       tz: edit.tz, category: edit.category, starts_at: sISO, ends_at: eISO,
     });
@@ -195,10 +192,10 @@ export default function CalendarPanel({
     await refreshCalendar();
   };
 
-  // Delete helpers & confirmations
+  // Delete helpers & confirmations (use base_start key)
   const confirmDeleteOccurrence = async (occ) => {
     if (!window.confirm(`Delete this occurrence for everyone on the team?`)) return;
-    await deleteOccurrence(occ.id, occ.occ_start.toISOString());
+    await deleteOccurrence(occ.id, (occ.base_start || occ.occ_start).toISOString());
     await refreshCalendar();
   };
 
@@ -215,7 +212,6 @@ export default function CalendarPanel({
 
   // Render helpers
   const DateAndTime = ({ occ }) => {
-    // Show date once, then time range
     const dateStr = occ.occ_start.toLocaleDateString(undefined, { month: "short", day: "2-digit" });
     const mins = minutesBetween(occ.occ_start, occ.occ_end);
     const duration = mins < 180 ? `${Math.floor(mins / 60)}h ${mins % 60}m` : `${(mins / 60).toFixed(1)}h`;
@@ -227,7 +223,6 @@ export default function CalendarPanel({
     );
   };
 
-  // Pure row renderer (stable top-level <li key=...>) to avoid double-mount weirdness
   const renderEventRow = (occ, { past }) => {
     const prefix = past ? "past|" : "";
     const rowKey = `${prefix}${occ.id}@${occ.occ_start.getTime()}`;
@@ -239,9 +234,14 @@ export default function CalendarPanel({
         {/* Summary line */}
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", gap: 12 }}>
           <div>
-            <strong style={{ cursor: "pointer" }} onClick={() => toggleExpanded(rowKey)}>
+            <button
+              type="button"
+              onClick={() => toggleExpanded(rowKey)}
+              style={{ all: "unset", cursor: "pointer", fontWeight: 700 }}
+              title={isExpanded ? "Hide details" : "Show details"}
+            >
               {occ.title}
-            </strong>{" "}
+            </button>{" "}
             <span style={{ opacity: 0.7 }}>({occ.category})</span>
             <DateAndTime occ={occ} />
             {isExpanded && occ.description && (
@@ -249,7 +249,7 @@ export default function CalendarPanel({
             )}
           </div>
 
-          {/* Actions (no list-level Delete anymore) */}
+          {/* Actions */}
           {!past && (
             <div style={{ display: "flex", gap: 8 }}>
               {!isEditing && <GhostButton onClick={() => startEdit(occ, rowKey)}>Edit</GhostButton>}
@@ -315,10 +315,10 @@ export default function CalendarPanel({
               <input type="time" step="60" value={edit.endTime} onChange={(e) => setEdit({ ...edit, endTime: e.target.value })}/>
             </div>
 
-            {/* Save options + Delete (moved here) */}
+            {/* Save options + Delete (in edit) */}
             <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
               <Button onClick={saveOccurrenceOnly}>Save this occurrence</Button>
-              <Button onClick={saveFuture}>Save future in series</Button>
+              <Button onClick={saveFuture}>Save from now on (series)</Button>
               <Button onClick={saveSeries}>Save entire series</Button>
               <DangerButton onClick={() => confirmDeleteOccurrence(edit.base)}>Delete (this occurrence)</DangerButton>
               <DangerButton onClick={() => confirmDeleteSeries(edit.base.id)}>Delete series…</DangerButton>
@@ -349,7 +349,10 @@ export default function CalendarPanel({
             <p style={{ opacity: 0.8 }}>No upcoming events.</p>
           ) : (
             <ul style={{ listStyle: "none", padding: 0, margin: 0 }}>
-              {upcomingOcc.map(occ => renderEventRow(occ, { past: false }))}
+              {upcomingOcc.map(occ => {
+                const rowKey = `${occ.id}@${occ.occ_start.getTime()}`;
+                return renderEventRow(occ, { past: false, key: rowKey });
+              })}
             </ul>
           )}
 
@@ -483,7 +486,10 @@ export default function CalendarPanel({
           ) : (
             <>
               <ul style={{ listStyle: "none", padding: 0, margin: 0 }}>
-                {pastSlice.map((occ) => renderEventRow(occ, { past: true }))}
+                {pastSlice.map((occ) => {
+                  const rowKey = `past|${occ.id}@${occ.occ_start.getTime()}`;
+                  return renderEventRow(occ, { past: true, key: rowKey });
+                })}
               </ul>
               {pastHasMore && (
                 <div style={{ marginTop: 10 }}>
