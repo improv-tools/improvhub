@@ -86,7 +86,17 @@ export function useCalendarData(teamId) {
 
   // Human summary like “Every 3 weeks on Thursday until 2025-12-31”
   const dayName = (code) => ({SU:"Sunday",MO:"Monday",TU:"Tuesday",WE:"Wednesday",TH:"Thursday",FR:"Friday",SA:"Saturday"}[code] || code);
-  const nthLabel = (n) => ({1:"1st",2:"2nd",3:"3rd",4:"4th",5:"5th",-1:"last"}[n] || `${n}th`);
+  const nthLabel = (n) => {
+  if (n === -1) return "last";
+  const v = Math.abs(n); // safety, though n should be positive here
+  const mod10 = v % 10, mod100 = v % 100;
+  const suffix =
+    mod10 === 1 && mod100 !== 11 ? "st" :
+    mod10 === 2 && mod100 !== 12 ? "nd" :
+    mod10 === 3 && mod100 !== 13 ? "rd" : "th";
+  return `${v}${suffix}`;
+};
+
   const summarizeRecurrence = (ev) => {
     if (!ev || ev.recur_freq === "none") return "One-off";
     let s = ev.recur_freq === "weekly"
