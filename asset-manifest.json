@@ -1,0 +1,10 @@
+{
+  "files": {
+    "main.js": "/improvhub/static/js/main.6fc8de1c.js",
+    "index.html": "/improvhub/index.html",
+    "main.6fc8de1c.js.map": "/improvhub/static/js/main.6fc8de1c.js.map"
+  },
+  "entrypoints": [
+    "static/js/main.6fc8de1c.js"
+  ]
+}
