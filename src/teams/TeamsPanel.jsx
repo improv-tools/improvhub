@@ -70,6 +70,24 @@ function nthWeekdayOfMonth(year, month /*0-11*/, weekday /*0-6*/, n /*1..5 or -1
   if (dt.getUTCMonth() !== month) return null;
   return dt;
 }
+// Helpers for local date+time <-> combined value
+const pad = (n) => String(n).padStart(2, "0");
+function toLocalInput(date) {
+  const d = new Date(date);
+  const yyyy = d.getFullYear();
+  const mm = pad(d.getMonth() + 1);
+  const dd = pad(d.getDate());
+  const hh = pad(d.getHours());
+  const mi = pad(d.getMinutes());
+  return `${yyyy}-${mm}-${dd}T${hh}:${mi}`; // local
+}
+function splitLocal(localT) {
+  const [date, time] = (localT || "").split("T");
+  return { date: date || "", time: time || "" };
+}
+function combineLocal(date, time) {
+  return date && time ? `${date}T${time}` : "";
+}
 
 /** Expand base events into concrete occurrences inside [fromIso, toIso] */
 function expandOccurrences(events, fromIso, toIso) {
@@ -235,8 +253,11 @@ export default function TeamsPanel() {
   const [evLoc, setEvLoc] = useState("");
   const [evCat, setEvCat] = useState("rehearsal");
   const [evTZ, setEvTZ] = useState(defaultTZ);
-  const [evStart, setEvStart] = useState(""); // "YYYY-MM-DDTHH:MM"
-  const [evEnd, setEvEnd] = useState("");     // "YYYY-MM-DDTHH:MM"
+  // separate date & time inputs
+  const [evStartDate, setEvStartDate] = useState(""); // "YYYY-MM-DD"
+  const [evStartTime, setEvStartTime] = useState(""); // "HH:MM"
+  const [evEndDate, setEvEndDate]     = useState("");
+  const [evEndTime, setEvEndTime]     = useState("");
   // recurrence
   const [evFreq, setEvFreq] = useState("none"); // none | weekly | weekly-2 | monthly
   const [evInterval, setEvInterval] = useState(1);
@@ -249,7 +270,7 @@ export default function TeamsPanel() {
   const [evUntil, setEvUntil] = useState("");
   const [evCount, setEvCount] = useState(10);
 
-  // duration tracking for start/end sync
+  // duration tracking for start/end sync (minutes)
   const [durMin, setDurMin] = useState(60);
 
   const refreshTeams = async () => {
@@ -381,37 +402,61 @@ export default function TeamsPanel() {
     return out;
   }, [eventsBase, overrides, windowFrom, windowTo]);
 
-  // Add event helpers
-  useEffect(() => {
-    if (evStart && evEnd) {
-      const d = (new Date(evEnd) - new Date(evStart)) / 60000;
-      if (d > 0) setDurMin(d);
-    }
-  }, [evStart, evEnd]);
-
-  const onChangeStart = (val) => {
-    setEvStart(val);
-    if (val) {
-      const nextEnd = new Date(new Date(val).getTime() + durMin * 60000);
-      setEvEnd(nextEnd.toISOString().slice(0, 16));
+  // ------ Add Event: duration tracking / syncing ------
+  const onChangeStartDate = (val) => {
+    setEvStartDate(val);
+    if (val && evStartTime) {
+      const start = new Date(combineLocal(val, evStartTime));
+      const end = new Date(start.getTime() + durMin * 60000);
+      const local = toLocalInput(end);
+      const { date, time } = splitLocal(local);
+      setEvEndDate(date);
+      setEvEndTime(time);
     }
   };
-  const onChangeEnd = (val) => {
-    setEvEnd(val);
-    if (evStart && val) {
-      const d = (new Date(val) - new Date(evStart)) / 60000;
+  const onChangeStartTime = (val) => {
+    setEvStartTime(val);
+    if (evStartDate && val) {
+      const start = new Date(combineLocal(evStartDate, val));
+      const end = new Date(start.getTime() + durMin * 60000);
+      const local = toLocalInput(end);
+      const { date, time } = splitLocal(local);
+      setEvEndDate(date);
+      setEvEndTime(time);
+    }
+  };
+  const onChangeEndDate = (val) => {
+    setEvEndDate(val);
+    if (evStartDate && evStartTime && val && evEndTime) {
+      const start = new Date(combineLocal(evStartDate, evStartTime));
+      const end = new Date(combineLocal(val, evEndTime));
+      const d = (end - start) / 60000;
+      if (d > 0) setDurMin(d);
+    }
+  };
+  const onChangeEndTime = (val) => {
+    setEvEndTime(val);
+    if (evStartDate && evStartTime && evEndDate && val) {
+      const start = new Date(combineLocal(evStartDate, evStartTime));
+      const end = new Date(combineLocal(evEndDate, val));
+      const d = (end - start) / 60000;
       if (d > 0) setDurMin(d);
     }
   };
 
   const [localErr, setLocalErr] = useState("");
+  const startLocal = combineLocal(evStartDate, evStartTime);
+  const endLocal   = combineLocal(evEndDate, evEndTime);
+
   const inlineError = useMemo(() => {
+    if (!showAddEvent) return "";
     if (!evTitle.trim()) return "Title is required.";
-    if (!evStart || !evEnd) return "Start and end are required.";
-    if (new Date(evStart) < new Date()) return "Start time is in the past.";
-    if (new Date(evEnd) <= new Date(evStart)) return "End must be after start.";
+    if (!startLocal || !endLocal) return "Start and end are required.";
+    if (new Date(startLocal) < new Date()) return "Start time is in the past.";
+    if (new Date(endLocal) <= new Date(startLocal)) return "End must be after start.";
     return "";
-  }, [evTitle, evStart, evEnd]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [showAddEvent, evTitle, evStartDate, evStartTime, evEndDate, evEndTime]);
 
   const saveEvent = async () => {
     if (!selected) return;
@@ -422,8 +467,8 @@ export default function TeamsPanel() {
       location: evLoc || null,
       category: evCat,
       tz: evTZ,
-      starts_at: new Date(evStart).toISOString(),
-      ends_at: new Date(evEnd).toISOString(),
+      starts_at: new Date(startLocal).toISOString(),
+      ends_at: new Date(endLocal).toISOString(),
       recur_freq: evFreq === "weekly-2" ? "weekly" : evFreq,
       recur_interval: evFreq === "weekly-2" ? 2 : evInterval,
       recur_byday: evFreq.startsWith("weekly") ? evByDay : null,
@@ -433,7 +478,7 @@ export default function TeamsPanel() {
       recur_count: evEndMode === "count" ? evCount : null,
       recur_until: evEndMode === "until" ? evUntil : null,
     };
-    if (!payload.title || !evStart || !evEnd) { setCalErr("Please fill title, start and end."); return; }
+    if (!payload.title || !startLocal || !endLocal) { setCalErr("Please fill title, start and end."); return; }
     if (inlineError) { setLocalErr(inlineError); return; }
 
     try {
@@ -441,7 +486,7 @@ export default function TeamsPanel() {
       setShowAddEvent(false);
       // reset form
       setEvTitle(""); setEvDesc(""); setEvLoc(""); setEvCat("rehearsal");
-      setEvStart(""); setEvEnd(""); setEvTZ(defaultTZ);
+      setEvStartDate(""); setEvStartTime(""); setEvEndDate(""); setEvEndTime(""); setEvTZ(defaultTZ);
       setEvFreq("none"); setEvInterval(1); setEvByDay(["MO"]);
       setEvMonthMode("bymonthday"); setEvByMonthDay([1]); setEvWeekOfMonth(1); setEvDayOfWeek("MO");
       setEvEndMode("never"); setEvUntil(""); setEvCount(10);
@@ -594,15 +639,19 @@ export default function TeamsPanel() {
           setShowAddEvent={setShowAddEvent}
           evState={{
             evTitle, setEvTitle, evDesc, setEvDesc, evLoc, setEvLoc, evCat, setEvCat,
-            evTZ, setEvTZ, evStart, setEvStart, evEnd, setEvEnd,
+            evTZ, setEvTZ,
+            evStartDate, setEvStartDate, evStartTime, setEvStartTime,
+            evEndDate, setEvEndDate, evEndTime, setEvEndTime,
             evFreq, setEvFreq, evInterval, setEvInterval,
             evByDay, setEvByDay, evMonthMode, setEvMonthMode,
             evByMonthDay, setEvByMonthDay, evWeekOfMonth, setEvWeekOfMonth,
             evDayOfWeek, setEvDayOfWeek, evEndMode, setEvEndMode, evUntil, setEvUntil, evCount, setEvCount
           }}
           durMin={durMin}
-          onChangeStart={onChangeStart}
-          onChangeEnd={onChangeEnd}
+          onChangeStartDate={onChangeStartDate}
+          onChangeStartTime={onChangeStartTime}
+          onChangeEndDate={onChangeEndDate}
+          onChangeEndTime={onChangeEndTime}
           inlineError={inlineError}
           localErr={localErr}
           setLocalErr={setLocalErr}
@@ -620,7 +669,8 @@ export default function TeamsPanel() {
 function TeamDetail({
   team, members, currentUserId, subTab, setSubTab,
   onChangeRole, calErr, occurrences,
-  showAddEvent, setShowAddEvent, evState, durMin, onChangeStart, onChangeEnd,
+  showAddEvent, setShowAddEvent, evState, durMin,
+  onChangeStartDate, onChangeStartTime, onChangeEndDate, onChangeEndTime,
   inlineError, localErr, setLocalErr,
   onSaveEvent, onDeleteEventSeries, onDeleteEventOccurrence, onRefreshCalendar,
   onDeleted
@@ -748,8 +798,10 @@ function TeamDetail({
           setShowAddEvent={setShowAddEvent}
           evState={evState}
           durMin={durMin}
-          onChangeStart={onChangeStart}
-          onChangeEnd={onChangeEnd}
+          onChangeStartDate={onChangeStartDate}
+          onChangeStartTime={onChangeStartTime}
+          onChangeEndDate={onChangeEndDate}
+          onChangeEndTime={onChangeEndTime}
           inlineError={inlineError}
           localErr={localErr}
           setLocalErr={setLocalErr}
@@ -766,14 +818,14 @@ function TeamDetail({
 
 function CalendarPanel({
   team, occurrences, showAddEvent, setShowAddEvent,
-  evState, durMin, onChangeStart, onChangeEnd,
-  inlineError, localErr, setLocalErr,
-  onSaveEvent, onDeleteEventSeries, onDeleteEventOccurrence, onRefreshCalendar,
-  calErr
+  evState, durMin, onChangeStartDate, onChangeStartTime, onChangeEndDate, onChangeEndTime,
+  inlineError, localErr, setLocalErr, onSaveEvent,
+  onDeleteEventSeries, onDeleteEventOccurrence, onRefreshCalendar, calErr
 }) {
   const {
     evTitle, setEvTitle, evDesc, setEvDesc, evLoc, setEvLoc, evCat, setEvCat,
-    evTZ, setEvTZ, evStart, setEvStart, evEnd, setEvEnd,
+    evTZ, setEvTZ,
+    evStartDate, evStartTime, evEndDate, evEndTime,
     evFreq, setEvFreq, evInterval, setEvInterval,
     evByDay, setEvByDay, evMonthMode, setEvMonthMode,
     evByMonthDay, setEvByMonthDay, evWeekOfMonth, setEvWeekOfMonth,
@@ -782,18 +834,22 @@ function CalendarPanel({
 
   // EDIT occurrence state
   const [editingKey, setEditingKey] = useState(null); // `${eventId}|${occIso}`
-  const [edit, setEdit] = useState(null); // { title, description, location, tz, starts_at, ends_at, category, base }
+  const [edit, setEdit] = useState(null); // { title, description, location, tz, startDate, startTime, endDate, endTime, category, base }
 
   const beginEdit = (occ) => {
     if (occ.occ_start < new Date()) { alert("Cannot edit a past occurrence."); return; }
+    const startLocal = toLocalInput(occ.occ_start);
+    const endLocal   = toLocalInput(occ.occ_end);
+    const s = splitLocal(startLocal), e = splitLocal(endLocal);
+
     setEditingKey(`${occ.id}|${occ.occ_start.toISOString()}`);
     setEdit({
       title: occ.title,
       description: occ.description || "",
       location: occ.location || "",
       tz: occ.tz,
-      starts_at: occ.occ_start.toISOString().slice(0, 16),
-      ends_at: occ.occ_end.toISOString().slice(0, 16),
+      startDate: s.date, startTime: s.time,
+      endDate: e.date,   endTime: e.time,
       category: occ.category,
       base: occ,
     });
@@ -802,17 +858,19 @@ function CalendarPanel({
 
   const saveEditOccurrenceOnly = async () => {
     if (!edit) return;
+    const startLocal = combineLocal(edit.startDate, edit.startTime);
+    const endLocal   = combineLocal(edit.endDate, edit.endTime);
     if (!edit.title.trim()) return alert("Title required.");
-    if (new Date(edit.starts_at) < new Date()) return alert("Start is in the past.");
-    if (new Date(edit.ends_at) <= new Date(edit.starts_at)) return alert("End must be after start.");
+    if (new Date(startLocal) < new Date()) return alert("Start is in the past.");
+    if (new Date(endLocal) <= new Date(startLocal)) return alert("End must be after start.");
     try {
       await upsertOccurrenceOverride(edit.base.id, edit.base.occ_start.toISOString(), {
         title: edit.title,
         description: edit.description || null,
         location: edit.location || null,
         tz: edit.tz,
-        starts_at: new Date(edit.starts_at).toISOString(),
-        ends_at: new Date(edit.ends_at).toISOString(),
+        starts_at: new Date(startLocal).toISOString(),
+        ends_at: new Date(endLocal).toISOString(),
         category: edit.category,
       });
       cancelEdit();
@@ -824,8 +882,10 @@ function CalendarPanel({
     if (!edit) return;
     if (edit.base.recur_freq === "none") return saveEditOccurrenceOnly();
     if (!window.confirm("Apply these changes to this and all future occurrences?")) return;
-    if (new Date(edit.starts_at) < new Date()) return alert("Start is in the past.");
-    if (new Date(edit.ends_at) <= new Date(edit.starts_at)) return alert("End must be after start.");
+    const startLocal = combineLocal(edit.startDate, edit.startTime);
+    const endLocal   = combineLocal(edit.endDate, edit.endTime);
+    if (new Date(startLocal) < new Date()) return alert("Start is in the past.");
+    if (new Date(endLocal) <= new Date(startLocal)) return alert("End must be after start.");
     try {
       await splitEventSeries(
         edit.base,
@@ -835,8 +895,8 @@ function CalendarPanel({
           description: edit.description || null,
           location: edit.location || null,
           tz: edit.tz,
-          starts_at: new Date(edit.starts_at).toISOString(),
-          ends_at: new Date(edit.ends_at).toISOString(),
+          starts_at: new Date(startLocal).toISOString(),
+          ends_at: new Date(endLocal).toISOString(),
           category: edit.category,
         }
       );
@@ -866,7 +926,9 @@ function CalendarPanel({
   return (
     <>
       <h3 style={{ margin: "8px 0", fontSize: 16 }}>Calendar</h3>
-      {(calErr || localErr || inlineError) && <ErrorText>{calErr || localErr || inlineError}</ErrorText>}
+      {(calErr || localErr || (showAddEvent ? inlineError : "")) && (
+        <ErrorText>{calErr || localErr || inlineError}</ErrorText>
+      )}
 
       {occurrences.length === 0 ? (
         <p style={{ opacity: 0.8 }}>No upcoming events.</p>
@@ -913,26 +975,59 @@ function CalendarPanel({
                       </select>
                       <Input placeholder="Time zone" value={edit.tz} onChange={(e) => setEdit({ ...edit, tz: e.target.value })} />
                     </div>
-                    <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                    <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
+                      <label>Start:&nbsp;
+                        <input
+                          type="date"
+                          value={edit.startDate}
+                          onChange={(e) => {
+                            const v = e.target.value;
+                            const oldStart = combineLocal(edit.startDate, edit.startTime);
+                            const oldEnd   = combineLocal(edit.endDate, edit.endTime);
+                            const dur = (new Date(oldEnd) - new Date(oldStart)) || 60*60000;
+                            const start = combineLocal(v, edit.startTime);
+                            if (start) {
+                              const nextEnd = new Date(new Date(start).getTime() + dur);
+                              const n = splitLocal(toLocalInput(nextEnd));
+                              setEdit({ ...edit, startDate: v, endDate: n.date, endTime: n.time });
+                            } else {
+                              setEdit({ ...edit, startDate: v });
+                            }
+                          }}
+                        />
+                      </label>
                       <input
-                        type="datetime-local"
+                        type="time"
                         step="60"
-                        value={edit.starts_at}
+                        value={edit.startTime}
                         onChange={(e) => {
-                          const startVal = e.target.value;
-                          const currentDur =
-                            (new Date(edit.ends_at) - new Date(edit.starts_at)) || 60 * 60000;
-                          const nextEnd = new Date(new Date(startVal).getTime() + currentDur)
-                            .toISOString()
-                            .slice(0, 16);
-                          setEdit({ ...edit, starts_at: startVal, ends_at: nextEnd });
+                          const v = e.target.value;
+                          const oldStart = combineLocal(edit.startDate, edit.startTime);
+                          const oldEnd   = combineLocal(edit.endDate, edit.endTime);
+                          const dur = (new Date(oldEnd) - new Date(oldStart)) || 60*60000;
+                          const start = combineLocal(edit.startDate, v);
+                          if (start) {
+                            const nextEnd = new Date(new Date(start).getTime() + dur);
+                            const n = splitLocal(toLocalInput(nextEnd));
+                            setEdit({ ...edit, startTime: v, endDate: n.date, endTime: n.time });
+                          } else {
+                            setEdit({ ...edit, startTime: v });
+                          }
                         }}
                       />
+
+                      <label style={{ marginLeft: 12 }}>End:&nbsp;
+                        <input
+                          type="date"
+                          value={edit.endDate}
+                          onChange={(e) => setEdit({ ...edit, endDate: e.target.value })}
+                        />
+                      </label>
                       <input
-                        type="datetime-local"
+                        type="time"
                         step="60"
-                        value={edit.ends_at}
-                        onChange={(e) => setEdit({ ...edit, ends_at: e.target.value })}
+                        value={edit.endTime}
+                        onChange={(e) => setEdit({ ...edit, endTime: e.target.value })}
                       />
                     </div>
                     <div style={{ display: "flex", gap: 8 }}>
@@ -969,9 +1064,17 @@ function CalendarPanel({
                   </select>
                   <Input placeholder="Time zone (e.g. Europe/London)" value={evTZ} onChange={(e) => setEvTZ(e.target.value)} />
                 </div>
-                <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-                  <input type="datetime-local" step="60" value={evStart} onChange={(e) => onChangeStart(e.target.value)} />
-                  <input type="datetime-local" step="60" value={evEnd} onChange={(e) => onChangeEnd(e.target.value)} />
+
+                {/* Date + Time pickers */}
+                <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
+                  <label>Start:&nbsp;
+                    <input type="date" value={evStartDate} onChange={(e) => onChangeStartDate(e.target.value)} />
+                  </label>
+                  <input type="time" step="60" value={evStartTime} onChange={(e) => onChangeStartTime(e.target.value)} />
+                  <label style={{ marginLeft: 12 }}>End:&nbsp;
+                    <input type="date" value={evEndDate} onChange={(e) => onChangeEndDate(e.target.value)} />
+                  </label>
+                  <input type="time" step="60" value={evEndTime} onChange={(e) => onChangeEndTime(e.target.value)} />
                 </div>
               </div>
 
