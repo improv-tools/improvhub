@@ -4,34 +4,17 @@ import { Button, GhostButton, Input, ErrorText, DangerButton, InfoText } from "c
 import { fmtTime, toLocalInput, splitLocal, combineLocal, minutesBetween } from "teams/utils/datetime";
 
 const MAJOR_TIMEZONES = [
-  "Europe/London",
-  "UTC",
-  "America/New_York",
-  "America/Chicago",
-  "America/Los_Angeles",
-  "America/Toronto",
-  "America/Sao_Paulo",
-  "Europe/Paris",
-  "Europe/Berlin",
-  "Europe/Madrid",
-  "Europe/Rome",
-  "Asia/Tokyo",
-  "Asia/Seoul",
-  "Asia/Hong_Kong",
-  "Asia/Singapore",
-  "Asia/Kolkata",
-  "Australia/Sydney",
-  "Pacific/Auckland",
-  "Africa/Johannesburg",
+  "Europe/London","UTC","America/New_York","America/Chicago","America/Los_Angeles","America/Toronto",
+  "America/Sao_Paulo","Europe/Paris","Europe/Berlin","Europe/Madrid","Europe/Rome",
+  "Asia/Tokyo","Asia/Seoul","Asia/Hong_Kong","Asia/Singapore","Asia/Kolkata",
+  "Australia/Sydney","Pacific/Auckland","Africa/Johannesburg",
 ];
 
 function monthsBetweenInclusive(startISO, endISO) {
-  const s = new Date(startISO);
-  const e = new Date(endISO);
-  let months = (e.getFullYear() - s.getFullYear()) * 12 + (e.getMonth() - s.getMonth());
-  // if end day earlier than start day, don't count full month
-  if (e.getDate() < s.getDate()) months -= 1;
-  return Math.max(0, months);
+  const s = new Date(startISO), e = new Date(endISO);
+  let m = (e.getFullYear() - s.getFullYear()) * 12 + (e.getMonth() - s.getMonth());
+  if (e.getDate() < s.getDate()) m -= 1;
+  return Math.max(0, m);
 }
 
 export default function CalendarPanel({
@@ -40,14 +23,13 @@ export default function CalendarPanel({
   upcomingOcc,
   pastSlice, pastHasMore, onPastMore,
   createEvent, deleteSeries, deleteOccurrence, patchOccurrence, refreshCalendar,
-  // helpers from hook:
+  // helpers from hook (may be undefined in some builds):
   getEventById, summarizeRecurrence, countFutureOccurrencesInSeries,
   applyFutureEdits, applySeriesEdits,
 }) {
   // Tabs
   const [tab, setTab] = useState("upcoming"); // 'upcoming' | 'past'
   useEffect(() => {
-    // clear edit/expand when switching tabs
     setEditingKey(null);
     setEdit(null);
     setExpanded(new Set());
@@ -175,8 +157,7 @@ export default function CalendarPanel({
       setFreq("none"); setInterval(1); setByDay(["MO"]);
       setMonthMode("bymonthday"); setByMonthDay([1]); setWeekOfMonth(1); setDayOfWeek("MO");
       setEndMode("never"); setUntil(""); setCount(10);
-      setSaveMsg("Event created ✓");
-      setTimeout(()=>setSaveMsg(""), 1200);
+      setSaveMsg("Event created ✓"); setTimeout(()=>setSaveMsg(""), 1200);
     } catch (e) {
       setFormErr(e.message || "Failed to save event");
     }
@@ -184,7 +165,7 @@ export default function CalendarPanel({
 
   // --- Editing (one open at a time) ---
   const [editingKey, setEditingKey] = useState(null); // `${prefix}${eventId}@${ms}`
-  const [edit, setEdit] = useState(null);             // data for the open editor
+  const [edit, setEdit] = useState(null);
   const [editErr, setEditErr] = useState("");
   const [editBusy, setEditBusy] = useState(false);
   const [expanded, setExpanded] = useState(() => new Set()); // title toggles
@@ -206,7 +187,7 @@ export default function CalendarPanel({
       title: occ.title, description: occ.description || "", location: occ.location || "",
       tz: occ.tz, category: occ.category,
       startDate: s.date, startTime: s.time, endDate: e.date, endTime: e.time,
-      base: occ, // includes base_start for RPCs + recur fields for series checks
+      base: occ, // includes base_start + recur fields
     });
   };
   const cancelEdit = () => { setEditingKey(null); setEdit(null); setEditErr(""); setEditBusy(false); };
@@ -221,6 +202,28 @@ export default function CalendarPanel({
     return "";
   };
 
+  // --- Client-side fallbacks for series edits if helpers not provided ---
+  const batchPatch = async (targets, patch) => {
+    for (const occ of targets) {
+      await patchOccurrence(occ.id, (occ.base_start || occ.occ_start).toISOString(), patch);
+    }
+  };
+  const fallbackSaveFuture = async (eventId, fromBaseISO, patch) => {
+    const fromMs = new Date(fromBaseISO).getTime();
+    const now = Date.now();
+    const targets = occurrencesAll.filter(o =>
+      o.id === eventId &&
+      o.base_start && o.base_start.getTime() >= fromMs &&
+      o.occ_end.getTime() >= now
+    );
+    await batchPatch(targets, patch);
+  };
+  const fallbackSaveSeries = async (eventId, patch) => {
+    const now = Date.now();
+    const targets = occurrencesAll.filter(o => o.id === eventId && o.occ_end.getTime() >= now);
+    await batchPatch(targets, patch);
+  };
+
   // Save just this occurrence (or standalone)
   const saveOccurrenceOnly = async () => {
     const err = validateEditTimes();
@@ -231,8 +234,7 @@ export default function CalendarPanel({
       const eISO = new Date(combineLocal(edit.endDate, edit.endTime)).toISOString();
       await patchOccurrence(edit.base.id, (edit.base.base_start || edit.base.occ_start).toISOString(), {
         title: edit.title, description: edit.description || null, location: edit.location || null,
-        tz: edit.tz, category: edit.category,
-        starts_at: sISO, ends_at: eISO,
+        tz: edit.tz, category: edit.category, starts_at: sISO, ends_at: eISO,
       });
       cancelEdit();
       await refreshCalendar();
@@ -250,10 +252,15 @@ export default function CalendarPanel({
     try {
       const sISO = new Date(combineLocal(edit.startDate, edit.startTime)).toISOString();
       const eISO = new Date(combineLocal(edit.endDate, edit.endTime)).toISOString();
-      await applyFutureEdits(edit.base.id, (edit.base.base_start || edit.base.occ_start).toISOString(), {
+      const patch = {
         title: edit.title, description: edit.description || null, location: edit.location || null,
         tz: edit.tz, category: edit.category, starts_at: sISO, ends_at: eISO,
-      });
+      };
+      if (typeof applyFutureEdits === "function") {
+        await applyFutureEdits(edit.base.id, (edit.base.base_start || edit.base.occ_start).toISOString(), patch);
+      } else {
+        await fallbackSaveFuture(edit.base.id, (edit.base.base_start || edit.base.occ_start).toISOString(), patch);
+      }
       cancelEdit();
       await refreshCalendar();
     } catch (e) {
@@ -270,10 +277,15 @@ export default function CalendarPanel({
     try {
       const sISO = new Date(combineLocal(edit.startDate, edit.startTime)).toISOString();
       const eISO = new Date(combineLocal(edit.endDate, edit.endTime)).toISOString();
-      await applySeriesEdits(edit.base.id, {
+      const patch = {
         title: edit.title, description: edit.description || null, location: edit.location || null,
         tz: edit.tz, category: edit.category, starts_at: sISO, ends_at: eISO,
-      });
+      };
+      if (typeof applySeriesEdits === "function") {
+        await applySeriesEdits(edit.base.id, patch);
+      } else {
+        await fallbackSaveSeries(edit.base.id, patch);
+      }
       cancelEdit();
       await refreshCalendar();
     } catch (e) {
@@ -281,7 +293,7 @@ export default function CalendarPanel({
     } finally { setEditBusy(false); }
   };
 
-  // Delete helpers (use base_start key) then close editor
+  // Delete helpers then close editor
   const confirmDeleteOccurrence = async (occ) => {
     if (!window.confirm("Delete this occurrence for everyone on the team?")) return;
     try {
@@ -293,14 +305,23 @@ export default function CalendarPanel({
   };
 
   const confirmDeleteSeries = async (eventId) => {
-    const ev = getEventById(eventId);
-    const summary = summarizeRecurrence(ev);
-    const remaining = countFutureOccurrencesInSeries(eventId);
+    const ev = typeof getEventById === "function" ? getEventById(eventId) : null;
+    const summary = ev && typeof summarizeRecurrence === "function" ? summarizeRecurrence(ev) : "";
+    const remaining = typeof countFutureOccurrencesInSeries === "function" ? countFutureOccurrencesInSeries(eventId) : occurrencesAll.filter(o => o.id === eventId && o.occ_end.getTime() >= Date.now()).length;
     if (!window.confirm(
-      `Delete the ENTIRE series for the team?\n\n${ev.title} — ${summary}\nThis will remove ${remaining} future occurrence(s).`
+      `Delete the ENTIRE series for the team?\n\n${ev?.title || "This series"}${summary ? ` — ${summary}` : ""}\nThis will remove ${remaining} future occurrence(s).`
     )) return;
     try {
-      await deleteSeries(eventId);
+      if (typeof deleteSeries === "function") {
+        await deleteSeries(eventId);
+      } else {
+        // Fallback: cancel all future occurrences
+        const now = Date.now();
+        const targets = occurrencesAll.filter(o => o.id === eventId && o.occ_end.getTime() >= now);
+        for (const occ of targets) {
+          await deleteOccurrence(eventId, (occ.base_start || occ.occ_start).toISOString());
+        }
+      }
     } finally {
       cancelEdit();
       await refreshCalendar();
@@ -499,8 +520,6 @@ export default function CalendarPanel({
                       <option value="social">Social</option>
                       <option value="performance">Performance</option>
                     </select>
-
-                    {/* Time zone dropdown */}
                     <select value={tz} onChange={(e) => setTz(e.target.value)} style={styles.select}>
                       {MAJOR_TIMEZONES.map(z => <option key={z} value={z}>{z}</option>)}
                     </select>
@@ -512,7 +531,7 @@ export default function CalendarPanel({
                     <input type="time" step="60" value={eTime} onChange={(e)=>onChangeEndTime(e.target.value)} />
                   </div>
 
-                  {/* Recurrence */}
+                  {/* Recurrence UI */}
                   <div style={{ borderTop: "1px solid rgba(255,255,255,0.12)", paddingTop: 8 }}>
                     <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
                       <span style={{ opacity: 0.8 }}>Repeat:</span>
@@ -584,27 +603,15 @@ export default function CalendarPanel({
                       <div style={{ display: "flex", gap: 12, alignItems: "center", flexWrap: "wrap", marginTop: 8 }}>
                         <span style={{ opacity: 0.8 }}>Ends:</span>
                         <label style={{ display: "inline-flex", gap: 6, alignItems: "center" }}>
-                          <input
-                            type="radio"
-                            checked={endMode==="never"}
-                            onChange={()=>setEndMode("never")}
-                          /> Never (disabled)
+                          <input type="radio" checked={endMode==="never"} onChange={()=>setEndMode("never")} /> Never (disabled)
                         </label>
                         <label style={{ display: "inline-flex", gap: 6, alignItems: "center" }}>
-                          <input
-                            type="radio"
-                            checked={endMode==="until"}
-                            onChange={()=>setEndMode("until")}
-                          /> Until
+                          <input type="radio" checked={endMode==="until"} onChange={()=>setEndMode("until")} /> Until
                           <input type="date" value={until} onChange={(e)=>setUntil(e.target.value)} disabled={endMode!=="until"} />
                           <span style={{ opacity: 0.7, fontSize: 12 }}>(≤ 12 months)</span>
                         </label>
                         <label style={{ display: "inline-flex", gap: 6, alignItems: "center" }}>
-                          <input
-                            type="radio"
-                            checked={endMode==="count"}
-                            onChange={()=>setEndMode("count")}
-                          /> For
+                          <input type="radio" checked={endMode==="count"} onChange={()=>setEndMode("count")} /> For
                           <Input type="number" min={1} max={12} value={count} onChange={(e)=>setCount(parseInt(e.target.value || "1",10))} style={{ width: 80 }} />
                           occurrence(s) (max 12)
                         </label>
