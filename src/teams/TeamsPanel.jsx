@@ -455,7 +455,7 @@ export default function TeamsPanel() {
     if (new Date(startLocal) < new Date()) return "Start time is in the past.";
     if (new Date(endLocal) <= new Date(startLocal)) return "End must be after start.";
     return "";
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    // eslint-disable-next-line
   }, [showAddEvent, evTitle, evStartDate, evStartTime, evEndDate, evEndTime]);
 
   const saveEvent = async () => {
