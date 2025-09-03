@@ -1,3 +1,4 @@
+// src/teams/components/CalendarPanel.jsx
 import { useEffect, useMemo, useState } from "react";
 import { Button, GhostButton, Input, ErrorText, DangerButton } from "components/ui";
 import { fmtTime, toLocalInput, splitLocal, combineLocal, minutesBetween } from "teams/utils/datetime";
@@ -15,11 +16,10 @@ export default function CalendarPanel({
   // Tabs inside Calendar
   const [tab, setTab] = useState("upcoming"); // 'upcoming' | 'past'
   useEffect(() => {
-    // clear edit/expand when switching tabs (prevents UI duplication)
+    // clear edit/expand when switching tabs
     setEditingKey(null);
     setEdit(null);
     setExpanded(new Set());
-    setPendingDelete(new Set());
   }, [tab]);
 
   // Add form state
@@ -126,11 +126,10 @@ export default function CalendarPanel({
     setEndMode("never"); setUntil(""); setCount(10);
   };
 
-  // --- Editing (one at a time) ---
+  // --- Editing (one open at a time) ---
   const [editingKey, setEditingKey] = useState(null); // `${prefix}${eventId}@${ms}`
   const [edit, setEdit] = useState(null);             // data for the open editor
   const [expanded, setExpanded] = useState(() => new Set()); // title toggles
-  const [pendingDelete, setPendingDelete] = useState(() => new Set()); // optimistic hide
 
   const toggleExpanded = (rowKey) => {
     setExpanded(prev => {
@@ -141,7 +140,7 @@ export default function CalendarPanel({
   };
 
   const startEdit = (occ, rowKey) => {
-    setEditingKey(rowKey); // ensure only one open
+    setEditingKey(rowKey);
     const s = splitLocal(toLocalInput(occ.occ_start));
     const e = splitLocal(toLocalInput(occ.occ_end));
     setEdit({
@@ -166,6 +165,7 @@ export default function CalendarPanel({
       starts_at: new Date(s).toISOString(), ends_at: new Date(e).toISOString(),
     });
     cancelEdit();
+    await refreshCalendar();
   };
 
   // Save from now on (series)
@@ -194,18 +194,15 @@ export default function CalendarPanel({
     await refreshCalendar();
   };
 
-  // Delete helpers & confirmations (use base_start key) with optimistic hide
-  const hideKey = (occ, past) => `${past ? "past|" : ""}${occ.id}@${occ.occ_start.getTime()}`;
-
-  const confirmDeleteOccurrence = async (occ, past = false) => {
-    if (!window.confirm(`Delete this occurrence for everyone on the team?`)) return;
-    const k = hideKey(occ, past);
-    setPendingDelete(prev => new Set(prev).add(k));     // optimistic hide
+  // Delete helpers & confirmations (use base_start key) then close editor
+  const confirmDeleteOccurrence = async (occ) => {
+    if (!window.confirm("Delete this occurrence for everyone on the team?")) return;
     try {
       await deleteOccurrence(occ.id, (occ.base_start || occ.occ_start).toISOString());
     } finally {
+      setEditingKey(null);
+      setEdit(null);
       await refreshCalendar();
-      setPendingDelete(new Set()); // clear overlay after refetch to avoid stale hides
     }
   };
 
@@ -216,8 +213,13 @@ export default function CalendarPanel({
     if (!window.confirm(
       `Delete the ENTIRE series for the team?\n\n${ev.title} — ${summary}\nThis will remove ${remaining} future occurrence(s).`
     )) return;
-    await deleteSeries(eventId);
-    await refreshCalendar();
+    try {
+      await deleteSeries(eventId);
+    } finally {
+      setEditingKey(null);
+      setEdit(null);
+      await refreshCalendar();
+    }
   };
 
   // Render helpers
@@ -236,8 +238,6 @@ export default function CalendarPanel({
   const renderEventRow = (occ, { past }) => {
     const prefix = past ? "past|" : "";
     const rowKey = `${prefix}${occ.id}@${occ.occ_start.getTime()}`;
-    if (pendingDelete.has(rowKey)) return null; // optimistic hide
-
     const isEditing = editingKey === rowKey;
     const isExpanded = expanded.has(rowKey);
     const isSeries = (occ.recur_freq && occ.recur_freq !== "none");
@@ -270,7 +270,7 @@ export default function CalendarPanel({
           )}
           {past && (
             <div style={{ display: "flex", gap: 8 }}>
-              <DangerButton onClick={() => confirmDeleteOccurrence(occ, true)}>Delete</DangerButton>
+              <DangerButton onClick={() => confirmDeleteOccurrence(occ)}>Delete</DangerButton>
             </div>
           )}
         </div>
@@ -330,11 +330,11 @@ export default function CalendarPanel({
 
             {/* Save options + Delete (in edit) */}
             <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-              <Button onClick={saveOccurrenceOnly}>{isSeries ? "Save this occurrence" : "Save"}</Button>
-              {isSeries && <Button onClick={saveFuture}>Save from now on (series)</Button>}
-              {isSeries && <Button onClick={saveSeries}>Save entire series</Button>}
+              <Button onClick={saveOccurrenceOnly}>{(edit?.base?.recur_freq && edit.base.recur_freq !== "none") ? "Save this occurrence" : "Save"}</Button>
+              {(edit?.base?.recur_freq && edit.base.recur_freq !== "none") && <Button onClick={saveFuture}>Save from now on (series)</Button>}
+              {(edit?.base?.recur_freq && edit.base.recur_freq !== "none") && <Button onClick={saveSeries}>Save entire series</Button>}
               <DangerButton onClick={() => confirmDeleteOccurrence(edit.base)}>Delete (this occurrence)</DangerButton>
-              {isSeries && <DangerButton onClick={() => confirmDeleteSeries(edit.base.id)}>Delete series…</DangerButton>}
+              {(edit?.base?.recur_freq && edit.base.recur_freq !== "none") && <DangerButton onClick={() => confirmDeleteSeries(edit.base.id)}>Delete series…</DangerButton>}
               <GhostButton onClick={cancelEdit}>Cancel</GhostButton>
             </div>
             <div style={{ opacity: 0.7, fontSize: 12 }}>
