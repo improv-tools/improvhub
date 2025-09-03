@@ -10,16 +10,14 @@ import {
   renameTeamRPC,
   deleteTeamRPC,
   addMemberByEmailRPC,
-  removeTeamMemberRPC,
   // events
   listTeamEvents,
   createTeamEvent,
   deleteTeamEvent,
-  // overrides / series
+  // overrides / per-occurrence edits
   listTeamEventOverrides,
   deleteEventOccurrence,
   upsertOccurrenceOverride,
-  splitEventSeries,
 } from "teams/teams.api";
 import {
   H1,
@@ -177,7 +175,7 @@ function expandOccurrences(events, fromIso, toIso) {
           if (dt) {
             const occStart = new Date(Date.UTC(
               dt.getUTCFullYear(), dt.getUTCMonth(), dt.getUTCDate(),
-              start.getUTCHours(), start.getUTCMinutes(), start.getUTCSeconds()
+              start.getUTCHours(), start.getUTCMinutes(), start.getUTCHours()
             ));
             const occEnd = new Date(occStart.getTime() + durMs);
             if (occStart > to) break;
@@ -260,7 +258,7 @@ export default function TeamsPanel() {
   const [evEndDate, setEvEndDate]     = useState("");
   const [evEndTime, setEvEndTime]     = useState("");
   // recurrence
-  const [evFreq, setEvFreq] = useState("none"); // none | weekly | weekly-2 | monthly
+  const [evFreq, setEvFreq] = useState("none"); // none | weekly | monthly
   const [evInterval, setEvInterval] = useState(1);
   const [evByDay, setEvByDay] = useState(["MO"]);
   const [evMonthMode, setEvMonthMode] = useState("bymonthday"); // bymonthday | bynth
@@ -350,9 +348,9 @@ export default function TeamsPanel() {
     } catch (e) { setErr(e.message || "Rename failed"); }
   };
 
-  // ---- Calendar: window & loading
+  // ---- Calendar: load a wide window (past 24mo to +6mo) so we can paginate past
   const windowFrom = useMemo(() => {
-    const now = new Date(); now.setHours(0, 0, 0, 0); return now.toISOString();
+    const d = new Date(); d.setMonth(d.getMonth() - 24); d.setHours(0, 0, 0, 0); return d.toISOString();
   }, []);
   const windowTo = useMemo(() => {
     const d = new Date(); d.setMonth(d.getMonth() + 6); d.setHours(23, 59, 59, 999); return d.toISOString();
@@ -373,11 +371,11 @@ export default function TeamsPanel() {
 
   useEffect(() => { if (selected) refreshCalendar(); /* eslint-disable-next-line */ }, [selected?.id]);
 
-  const occurrences = useMemo(() => {
+  // merge overrides & expand
+  const occurrencesAll = useMemo(() => {
     const occ = expandOccurrences(eventsBase, windowFrom, windowTo);
     if (!overrides.length) return occ;
 
-    // merge per-occurrence overrides/cancellations
     const map = new Map();
     for (const o of overrides) {
       map.set(`${o.event_id}|${new Date(o.occ_start).toISOString()}`, o);
@@ -403,7 +401,25 @@ export default function TeamsPanel() {
     return out;
   }, [eventsBase, overrides, windowFrom, windowTo]);
 
+  const now = new Date();
+  const upcomingOcc = useMemo(() => occurrencesAll.filter(o => o.occ_start >= now), [occurrencesAll]);
+  const pastOccDesc = useMemo(() => {
+    const arr = occurrencesAll.filter(o => o.occ_start < now);
+    arr.sort((a,b) => b.occ_start - a.occ_start); // newest first
+    return arr;
+  }, [occurrencesAll]);
+  const [pastPage, setPastPage] = useState(1); // 25 per page
+  const pastPageSize = 25;
+  const pastSlice = useMemo(() => pastOccDesc.slice(0, pastPage * pastPageSize), [pastOccDesc, pastPage]);
+
   // ------ Add Event: duration tracking / syncing ------
+  useEffect(() => {
+    if (evStartDate && evStartTime && evEndDate && evEndTime) {
+      const d = (new Date(combineLocal(evEndDate, evEndTime)) - new Date(combineLocal(evStartDate, evStartTime))) / 60000;
+      if (d > 0) setDurMin(d);
+    }
+  }, [evStartDate, evStartTime, evEndDate, evEndTime]);
+
   const onChangeStartDate = (val) => {
     setEvStartDate(val);
     if (val && evStartTime) {
@@ -456,8 +472,7 @@ export default function TeamsPanel() {
     if (new Date(startLocal) < new Date()) return "Start time is in the past.";
     if (new Date(endLocal) <= new Date(startLocal)) return "End must be after start.";
     return "";
-    // eslint-disable-next-line
-  }, [showAddEvent, evTitle, evStartDate, evStartTime, evEndDate, evEndTime]);
+  }, [showAddEvent, evTitle, startLocal, endLocal]);
 
   const saveEvent = async () => {
     if (!selected) return;
@@ -470,9 +485,9 @@ export default function TeamsPanel() {
       tz: evTZ,
       starts_at: new Date(startLocal).toISOString(),
       ends_at: new Date(endLocal).toISOString(),
-      recur_freq: evFreq === "weekly-2" ? "weekly" : evFreq,
-      recur_interval: evFreq === "weekly-2" ? 2 : evInterval,
-      recur_byday: evFreq.startsWith("weekly") ? evByDay : null,
+      recur_freq: evFreq,
+      recur_interval: evInterval,
+      recur_byday: evFreq === "weekly" ? evByDay : null,
       recur_bymonthday: (evFreq === "monthly" && evMonthMode === "bymonthday") ? evByMonthDay : null,
       recur_week_of_month: (evFreq === "monthly" && evMonthMode === "bynth") ? evWeekOfMonth : null,
       recur_day_of_week: (evFreq === "monthly" && evMonthMode === "bynth") ? evDayOfWeek : null,
@@ -625,12 +640,6 @@ export default function TeamsPanel() {
           currentUserId={user.id}
           subTab={subTab}
           setSubTab={setSubTab}
-          onSelfLeft={() => {
-             // user left this team: go back to list & refresh
-             setSelected(null);
-             setMembers([]);
-             refreshTeams();
-          }}
           onChangeRole={async (uId, role) => {
             try {
               await setMemberRoleRPC(selected.id, uId, role);
@@ -641,7 +650,11 @@ export default function TeamsPanel() {
           }}
           // calendar props
           calErr={calErr}
-          occurrences={occurrences}
+          upcomingOcc={upcomingOcc}
+          pastOccDesc={pastOccDesc}
+          pastSlice={pastSlice}
+          pastHasMore={pastOccDesc.length > pastSlice.length}
+          onPastMore={() => setPastPage(p => p + 1)}
           showAddEvent={showAddEvent}
           setShowAddEvent={setShowAddEvent}
           evState={{
@@ -666,7 +679,7 @@ export default function TeamsPanel() {
           onDeleteEventSeries={removeEventSeries}
           onDeleteEventOccurrence={removeEventOccurrence}
           onRefreshCalendar={refreshCalendar}
-          onDeleted={() => { setSelected(null); setMembers([]); refreshTeams(); }}
+          occurrencesAll={occurrencesAll}
         />
       )}
     </>
@@ -675,15 +688,15 @@ export default function TeamsPanel() {
 
 function TeamDetail({
   team, members, currentUserId, subTab, setSubTab,
-  onChangeRole, onSelfLeft, calErr, occurrences,
+  onChangeRole, calErr,
+  upcomingOcc, pastOccDesc, pastSlice, pastHasMore, onPastMore,
   showAddEvent, setShowAddEvent, evState, durMin,
   onChangeStartDate, onChangeStartTime, onChangeEndDate, onChangeEndTime,
   inlineError, localErr, setLocalErr,
   onSaveEvent, onDeleteEventSeries, onDeleteEventOccurrence, onRefreshCalendar,
-  onDeleted
+  occurrencesAll
 }) {
   const isAdmin = team.role === "admin";
-  const adminCount = members.filter(m => m.role === "admin").length;
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
   const [msg, setMsg] = useState("");
@@ -710,45 +723,10 @@ function TeamDetail({
     }
   };
 
-  const removeMember = async (targetUserId, targetIsAdmin) => {
-  // Optional guard: avoid removing the only admin (even by another admin)
-  if (targetIsAdmin && adminCount === 1) {
-    alert("You cannot remove the last admin from the team.");
-    return;
-  }
-  if (!window.confirm("Remove this member from the team?")) return;
-  try {
-    await removeTeamMemberRPC(team.id, targetUserId);
-    // refresh members list
-    const mem = await listTeamMembersRPC(team.id);
-    // update parent-visible list
-    onChangeRole?.(targetUserId, "member"); // trigger parent refresh pattern
-    // but we still set the list locally for immediate UI
-    // (safe because parent refresh will overwrite shortly)
-  } catch (e) {
-    alert(e.message || "Failed to remove member.");
-  }
-};
-
-const leaveTeam = async (isLastAdmin) => {
-  if (isLastAdmin) {
-    alert("You are the last admin and cannot leave the team.");
-    return;
-  }
-  if (!window.confirm("Leave this team?")) return;
-  try {
-    await removeTeamMemberRPC(team.id, currentUserId);
-    onSelfLeft?.();
-  } catch (e) {
-    alert(e.message || "Failed to leave team.");
-  }
-};
-
-
   const deleteTeam = async () => {
     if (!window.confirm(`Delete “${team.name}” permanently? This cannot be undone.`)) return;
     setBusy(true); setErr(""); setMsg("");
-    try { await deleteTeamRPC(team.id); onDeleted?.(); }
+    try { await deleteTeamRPC(team.id); window.location.hash = ""; window.location.reload(); }
     catch (e) { setErr(e.message || "Delete failed"); }
     finally { setBusy(false); }
   };
@@ -784,35 +762,14 @@ const leaveTeam = async (isLastAdmin) => {
                     </div>
                     <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
                       <span style={{ opacity: 0.8 }}>{m.role}</span>
-                      {/* Self actions */}
-                       {m.user_id === currentUserId ? (
-                         <DangerButton
-                           style={{ padding: "6px 10px" }}
-                           onClick={() => leaveTeam(m.role === "admin" && adminCount === 1)}
-                         >
-                           Leave
-                         </DangerButton>
-                       ) : (
-                         <>
-                           {/* Admin-only controls for other members */}
-                           {isAdmin && (
-                             <>
-                               <Button
-                                 style={{ padding: "6px 10px" }}
-                                 onClick={() => onChangeRole(m.user_id, m.role === "admin" ? "member" : "admin")}
-                               >
-                                 {m.role === "admin" ? "Make member" : "Make admin"}
-                               </Button>
-                               <GhostButton
-                                 style={{ padding: "6px 10px" }}
-                                 onClick={() => removeMember(m.user_id, m.role === "admin")}
-                               >
-                                 Remove
-                               </GhostButton>
-                             </>
-                           )}
-                         </>
-                       )}
+                      {team.role === "admin" && m.user_id !== currentUserId && (
+                        <Button
+                          style={{ padding: "6px 10px" }}
+                          onClick={() => onChangeRole(m.user_id, m.role === "admin" ? "member" : "admin")}
+                        >
+                          {m.role === "admin" ? "Make member" : "Make admin"}
+                        </Button>
+                      )}
                     </div>
                   </div>
                 </li>
@@ -857,7 +814,10 @@ const leaveTeam = async (isLastAdmin) => {
       ) : (
         <CalendarPanel
           team={team}
-          occurrences={occurrences}
+          upcomingOcc={upcomingOcc}
+          pastSlice={pastSlice}
+          pastHasMore={pastHasMore}
+          onPastMore={onPastMore}
           showAddEvent={showAddEvent}
           setShowAddEvent={setShowAddEvent}
           evState={evState}
@@ -874,6 +834,7 @@ const leaveTeam = async (isLastAdmin) => {
           onDeleteEventOccurrence={onDeleteEventOccurrence}
           onRefreshCalendar={onRefreshCalendar}
           calErr={calErr}
+          occurrencesAll={occurrencesAll}
         />
       )}
     </>
@@ -881,10 +842,14 @@ const leaveTeam = async (isLastAdmin) => {
 }
 
 function CalendarPanel({
-  team, occurrences, showAddEvent, setShowAddEvent,
+  team,
+  upcomingOcc,
+  pastSlice, pastHasMore, onPastMore,
+  showAddEvent, setShowAddEvent,
   evState, durMin, onChangeStartDate, onChangeStartTime, onChangeEndDate, onChangeEndTime,
   inlineError, localErr, setLocalErr, onSaveEvent,
-  onDeleteEventSeries, onDeleteEventOccurrence, onRefreshCalendar, calErr
+  onDeleteEventSeries, onDeleteEventOccurrence, onRefreshCalendar,
+  calErr, occurrencesAll
 }) {
   const {
     evTitle, setEvTitle, evDesc, setEvDesc, evLoc, setEvLoc, evCat, setEvCat,
@@ -920,6 +885,7 @@ function CalendarPanel({
   };
   const cancelEdit = () => { setEditingKey(null); setEdit(null); };
 
+  // Save just this occurrence
   const saveEditOccurrenceOnly = async () => {
     if (!edit) return;
     const startLocal = combineLocal(edit.startDate, edit.startTime);
@@ -942,28 +908,61 @@ function CalendarPanel({
     } catch (e) { alert(e.message || "Failed to save occurrence."); }
   };
 
-  const saveEditThisAndFuture = async () => {
+  // Save for all FUTURE occurrences in this series (no new series)
+  const saveEditFuture = async () => {
     if (!edit) return;
-    if (edit.base.recur_freq === "none") return saveEditOccurrenceOnly();
-    if (!window.confirm("Apply these changes to this and all future occurrences?")) return;
+    if (!window.confirm("Apply these changes to all future occurrences in this series?")) return;
+
     const startLocal = combineLocal(edit.startDate, edit.startTime);
     const endLocal   = combineLocal(edit.endDate, edit.endTime);
     if (new Date(startLocal) < new Date()) return alert("Start is in the past.");
     if (new Date(endLocal) <= new Date(startLocal)) return alert("End must be after start.");
+
     try {
-      await splitEventSeries(
-        edit.base,
-        edit.base.occ_start.toISOString(),
-        {
+      const toPatch = occurrencesAll
+        .filter(o => o.id === edit.base.id && o.occ_start >= edit.base.occ_start);
+
+      for (const o of toPatch) {
+        // eslint-disable-next-line no-await-in-loop
+        await upsertOccurrenceOverride(o.id, o.occ_start.toISOString(), {
           title: edit.title,
           description: edit.description || null,
           location: edit.location || null,
           tz: edit.tz,
-          starts_at: new Date(startLocal).toISOString(),
-          ends_at: new Date(endLocal).toISOString(),
+          starts_at: new Date(combineLocal(edit.startDate, edit.startTime)).toISOString(),
+          ends_at:   new Date(combineLocal(edit.endDate,   edit.endTime)).toISOString(),
           category: edit.category,
-        }
-      );
+        });
+      }
+
+      cancelEdit();
+      await onRefreshCalendar();
+    } catch (e) { alert(e.message || "Failed to update future occurrences."); }
+  };
+
+  // Save for the ENTIRE series (past+future in loaded window) — no new series
+  const saveEditSeries = async () => {
+    if (!edit) return;
+    if (!window.confirm("Apply these changes to the entire series (past & future in the loaded range)?")) return;
+
+    const startLocal = combineLocal(edit.startDate, edit.startTime);
+    const endLocal   = combineLocal(edit.endDate, edit.endTime);
+    if (new Date(endLocal) <= new Date(startLocal)) return alert("End must be after start.");
+
+    try {
+      const toPatch = occurrencesAll.filter(o => o.id === edit.base.id);
+      for (const o of toPatch) {
+        // eslint-disable-next-line no-await-in-loop
+        await upsertOccurrenceOverride(o.id, o.occ_start.toISOString(), {
+          title: edit.title,
+          description: edit.description || null,
+          location: edit.location || null,
+          tz: edit.tz,
+          starts_at: new Date(combineLocal(edit.startDate, edit.startTime)).toISOString(),
+          ends_at:   new Date(combineLocal(edit.endDate,   edit.endTime)).toISOString(),
+          category: edit.category,
+        });
+      }
       cancelEdit();
       await onRefreshCalendar();
     } catch (e) { alert(e.message || "Failed to update series."); }
@@ -994,11 +993,12 @@ function CalendarPanel({
         <ErrorText>{calErr || localErr || inlineError}</ErrorText>
       )}
 
-      {occurrences.length === 0 ? (
+      {/* UPCOMING */}
+      {upcomingOcc.length === 0 ? (
         <p style={{ opacity: 0.8 }}>No upcoming events.</p>
       ) : (
         <ul style={{ listStyle: "none", padding: 0, margin: 0 }}>
-          {occurrences.map((occ) => {
+          {upcomingOcc.map((occ) => {
             const mins = minutesBetween(occ.occ_start, occ.occ_end);
             const duration = mins < 180 ? `${Math.floor(mins / 60)}h ${mins % 60}m` : `${(mins / 60).toFixed(1)}h`;
             const key = `${occ.id}|${occ.occ_start.toISOString()}`;
@@ -1039,6 +1039,8 @@ function CalendarPanel({
                       </select>
                       <Input placeholder="Time zone" value={edit.tz} onChange={(e) => setEdit({ ...edit, tz: e.target.value })} />
                     </div>
+
+                    {/* Date + Time for editing */}
                     <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
                       <label>Start:&nbsp;
                         <input
@@ -1079,7 +1081,6 @@ function CalendarPanel({
                           }
                         }}
                       />
-
                       <label style={{ marginLeft: 12 }}>End:&nbsp;
                         <input
                           type="date"
@@ -1094,11 +1095,11 @@ function CalendarPanel({
                         onChange={(e) => setEdit({ ...edit, endTime: e.target.value })}
                       />
                     </div>
-                    <div style={{ display: "flex", gap: 8 }}>
+
+                    <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
                       <Button onClick={saveEditOccurrenceOnly}>Save this occurrence</Button>
-                      {edit.base.recur_freq !== "none" && (
-                        <Button onClick={saveEditThisAndFuture}>Save this & future</Button>
-                      )}
+                      <Button onClick={saveEditFuture}>Save future in series</Button>
+                      <Button onClick={saveEditSeries}>Save entire series</Button>
                       <GhostButton onClick={cancelEdit}>Cancel</GhostButton>
                     </div>
                   </div>
@@ -1149,19 +1150,17 @@ function CalendarPanel({
                   <select value={evFreq} onChange={(e) => setEvFreq(e.target.value)} style={styles.select}>
                     <option value="none">Does not repeat</option>
                     <option value="weekly">Weekly</option>
-                    <option value="weekly-2">Fortnightly</option>
                     <option value="monthly">Monthly</option>
                   </select>
 
-                  {evFreq.startsWith("weekly") && (
+                  {evFreq === "weekly" && (
                     <>
                       <span style={{ opacity: 0.8 }}>every</span>
                       <Input
                         type="number"
                         min={1}
-                        value={evFreq === "weekly-2" ? 2 : evInterval}
+                        value={evInterval}
                         onChange={(e) => setEvInterval(parseInt(e.target.value || "1", 10))}
-                        disabled={evFreq === "weekly-2"}
                         style={{ width: 70 }}
                       />
                       <span style={{ opacity: 0.8 }}>week(s) on</span>
@@ -1305,6 +1304,43 @@ function CalendarPanel({
           </>
         )}
       </div>
+
+      {/* PAST EVENTS */}
+      <h4 style={{ margin: "18px 0 8px", fontSize: 14, opacity: 0.9 }}>Past events</h4>
+      {pastSlice.length === 0 ? (
+        <p style={{ opacity: 0.6 }}>No past events in the loaded range.</p>
+      ) : (
+        <>
+          <ul style={{ listStyle: "none", padding: 0, margin: 0 }}>
+            {pastSlice.map((occ) => {
+              const mins = minutesBetween(occ.occ_start, occ.occ_end);
+              const duration = mins < 180 ? `${Math.floor(mins / 60)}h ${mins % 60}m` : `${(mins / 60).toFixed(1)}h`;
+              const key = `past|${occ.id}|${occ.occ_start.toISOString()}`;
+              return (
+                <li key={key} style={{ padding: "10px 0", borderBottom: "1px solid rgba(255,255,255,0.06)", opacity: 0.55 }}>
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", gap: 12 }}>
+                    <div>
+                      <strong>{occ.title}</strong>{" "}
+                      <span style={{ opacity: 0.7 }}>({occ.category})</span>
+                      <div style={{ opacity: 0.8, fontSize: 12 }}>
+                        {fmtDT(occ.occ_start, occ.tz, { month: "short", day: "2-digit" })} ·{" "}
+                        {fmtTime(occ.occ_start, occ.tz)}–{fmtTime(occ.occ_end, occ.tz)} ({occ.tz}, {duration})
+                        {occ.location ? ` · ${occ.location}` : ""}
+                      </div>
+                    </div>
+                    {/* read-only; no actions */}
+                  </div>
+                </li>
+              );
+            })}
+          </ul>
+          {pastHasMore && (
+            <div style={{ marginTop: 10 }}>
+              <GhostButton onClick={onPastMore}>Get more</GhostButton>
+            </div>
+          )}
+        </>
+      )}
     </>
   );
 }
