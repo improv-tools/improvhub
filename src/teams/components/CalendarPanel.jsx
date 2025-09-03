@@ -19,6 +19,7 @@ export default function CalendarPanel({
     setEditingKey(null);
     setEdit(null);
     setExpanded(new Set());
+    setPendingDelete(new Set());
   }, [tab]);
 
   // Add form state
@@ -129,6 +130,7 @@ export default function CalendarPanel({
   const [editingKey, setEditingKey] = useState(null); // `${prefix}${eventId}@${ms}`
   const [edit, setEdit] = useState(null);             // data for the open editor
   const [expanded, setExpanded] = useState(() => new Set()); // title toggles
+  const [pendingDelete, setPendingDelete] = useState(() => new Set()); // optimistic hide
 
   const toggleExpanded = (rowKey) => {
     setExpanded(prev => {
@@ -139,7 +141,7 @@ export default function CalendarPanel({
   };
 
   const startEdit = (occ, rowKey) => {
-    setEditingKey(rowKey);
+    setEditingKey(rowKey); // ensure only one open
     const s = splitLocal(toLocalInput(occ.occ_start));
     const e = splitLocal(toLocalInput(occ.occ_end));
     setEdit({
@@ -151,7 +153,7 @@ export default function CalendarPanel({
   };
   const cancelEdit = () => { setEditingKey(null); setEdit(null); };
 
-  // Save just this occurrence
+  // Save just this occurrence (or standalone event)
   const saveOccurrenceOnly = async () => {
     const s = combineLocal(edit.startDate, edit.startTime);
     const e = combineLocal(edit.endDate, edit.endTime);
@@ -166,7 +168,7 @@ export default function CalendarPanel({
     cancelEdit();
   };
 
-  // Save for FUTURE (reliable via base occurrences)
+  // Save from now on (series)
   const saveFuture = async () => {
     if (!window.confirm("Apply these changes to all FUTURE occurrences in this team’s series? This affects the whole team.")) return;
     const sISO = new Date(combineLocal(edit.startDate, edit.startTime)).toISOString();
@@ -179,7 +181,7 @@ export default function CalendarPanel({
     await refreshCalendar();
   };
 
-  // Save for ENTIRE series (in loaded range)
+  // Save entire series (in loaded range)
   const saveSeries = async () => {
     if (!window.confirm("Apply these changes to the ENTIRE team series in the loaded range? This affects the whole team.")) return;
     const sISO = new Date(combineLocal(edit.startDate, edit.startTime)).toISOString();
@@ -192,11 +194,19 @@ export default function CalendarPanel({
     await refreshCalendar();
   };
 
-  // Delete helpers & confirmations (use base_start key)
-  const confirmDeleteOccurrence = async (occ) => {
+  // Delete helpers & confirmations (use base_start key) with optimistic hide
+  const hideKey = (occ, past) => `${past ? "past|" : ""}${occ.id}@${occ.occ_start.getTime()}`;
+
+  const confirmDeleteOccurrence = async (occ, past = false) => {
     if (!window.confirm(`Delete this occurrence for everyone on the team?`)) return;
-    await deleteOccurrence(occ.id, (occ.base_start || occ.occ_start).toISOString());
-    await refreshCalendar();
+    const k = hideKey(occ, past);
+    setPendingDelete(prev => new Set(prev).add(k));     // optimistic hide
+    try {
+      await deleteOccurrence(occ.id, (occ.base_start || occ.occ_start).toISOString());
+    } finally {
+      await refreshCalendar();
+      setPendingDelete(new Set()); // clear overlay after refetch to avoid stale hides
+    }
   };
 
   const confirmDeleteSeries = async (eventId) => {
@@ -226,8 +236,11 @@ export default function CalendarPanel({
   const renderEventRow = (occ, { past }) => {
     const prefix = past ? "past|" : "";
     const rowKey = `${prefix}${occ.id}@${occ.occ_start.getTime()}`;
+    if (pendingDelete.has(rowKey)) return null; // optimistic hide
+
     const isEditing = editingKey === rowKey;
     const isExpanded = expanded.has(rowKey);
+    const isSeries = (occ.recur_freq && occ.recur_freq !== "none");
 
     return (
       <li key={rowKey} style={{ padding: "10px 0", borderBottom: "1px solid rgba(255,255,255,0.06)", opacity: past ? 0.55 : 1 }}>
@@ -257,7 +270,7 @@ export default function CalendarPanel({
           )}
           {past && (
             <div style={{ display: "flex", gap: 8 }}>
-              <DangerButton onClick={() => confirmDeleteOccurrence(occ)}>Delete</DangerButton>
+              <DangerButton onClick={() => confirmDeleteOccurrence(occ, true)}>Delete</DangerButton>
             </div>
           )}
         </div>
@@ -317,11 +330,11 @@ export default function CalendarPanel({
 
             {/* Save options + Delete (in edit) */}
             <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-              <Button onClick={saveOccurrenceOnly}>Save this occurrence</Button>
-              <Button onClick={saveFuture}>Save from now on (series)</Button>
-              <Button onClick={saveSeries}>Save entire series</Button>
+              <Button onClick={saveOccurrenceOnly}>{isSeries ? "Save this occurrence" : "Save"}</Button>
+              {isSeries && <Button onClick={saveFuture}>Save from now on (series)</Button>}
+              {isSeries && <Button onClick={saveSeries}>Save entire series</Button>}
               <DangerButton onClick={() => confirmDeleteOccurrence(edit.base)}>Delete (this occurrence)</DangerButton>
-              <DangerButton onClick={() => confirmDeleteSeries(edit.base.id)}>Delete series…</DangerButton>
+              {isSeries && <DangerButton onClick={() => confirmDeleteSeries(edit.base.id)}>Delete series…</DangerButton>}
               <GhostButton onClick={cancelEdit}>Cancel</GhostButton>
             </div>
             <div style={{ opacity: 0.7, fontSize: 12 }}>
@@ -349,10 +362,7 @@ export default function CalendarPanel({
             <p style={{ opacity: 0.8 }}>No upcoming events.</p>
           ) : (
             <ul style={{ listStyle: "none", padding: 0, margin: 0 }}>
-              {upcomingOcc.map(occ => {
-                const rowKey = `${occ.id}@${occ.occ_start.getTime()}`;
-                return renderEventRow(occ, { past: false, key: rowKey });
-              })}
+              {upcomingOcc.map(occ => renderEventRow(occ, { past: false }))}
             </ul>
           )}
 
@@ -486,10 +496,7 @@ export default function CalendarPanel({
           ) : (
             <>
               <ul style={{ listStyle: "none", padding: 0, margin: 0 }}>
-                {pastSlice.map((occ) => {
-                  const rowKey = `past|${occ.id}@${occ.occ_start.getTime()}`;
-                  return renderEventRow(occ, { past: true, key: rowKey });
-                })}
+                {pastSlice.map((occ) => renderEventRow(occ, { past: true }))}
               </ul>
               {pastHasMore && (
                 <div style={{ marginTop: 10 }}>
