@@ -639,10 +639,136 @@ function CalendarPanel({ team, occurrences, showAddEvent, setShowAddEvent, evSta
     evDayOfWeek, setEvDayOfWeek, evEndMode, setEvEndMode, evUntil, setEvUntil, evCount, setEvCount
   } = evState;
 
+  // duration tracking (minutes)
+  const [durMin, setDurMin] = useState(60);
+  useEffect(() => {
+    if (evStart && evEnd) {
+      const d = (new Date(evEnd) - new Date(evStart)) / 60000;
+      if (d > 0) setDurMin(d);
+    }
+  }, [evStart, evEnd]);
+
+  const nowIso = new Date().toISOString();
+  const [localErr, setLocalErr] = useState("");
+
+  const validate = () => {
+    setLocalErr("");
+    if (!evTitle.trim()) return "Title is required.";
+    if (!evStart || !evEnd) return "Start and end are required.";
+    if (new Date(evStart) < new Date()) return "Start time is in the past.";
+    if (new Date(evEnd) <= new Date(evStart)) return "End must be after start.";
+    return "";
+  };
+
+  const onChangeStart = (val) => {
+    setEvStart(val);
+    // keep duration consistent (shift end)
+    if (val) {
+      const nextEnd = new Date(new Date(val).getTime() + durMin * 60000);
+      setEvEnd(nextEnd.toISOString().slice(0,16));
+    }
+  };
+
+  const onChangeEnd = (val) => {
+    setEvEnd(val);
+    if (evStart && val) {
+      const d = (new Date(val) - new Date(evStart)) / 60000;
+      if (d > 0) setDurMin(d);
+    }
+  };
+
+  // EDIT occurrence state
+  const [editingKey, setEditingKey] = useState(null); // `${eventId}|${occIso}`
+  const [edit, setEdit] = useState(null); // {title, desc, ... start, end, tz, cat}
+  const beginEdit = (occ) => {
+    if (occ.occ_start < new Date()) { alert("Cannot edit a past occurrence."); return; }
+    setEditingKey(`${occ.id}|${occ.occ_start.toISOString()}`);
+    setEdit({
+      title: occ.title,
+      description: occ.description || "",
+      location: occ.location || "",
+      tz: occ.tz,
+      starts_at: occ.occ_start.toISOString().slice(0,16),
+      ends_at: occ.occ_end.toISOString().slice(0,16),
+      category: occ.category,
+      base: occ, // keep original
+    });
+  };
+  const cancelEdit = () => { setEditingKey(null); setEdit(null); };
+
+  const saveEditOccurrenceOnly = async () => {
+    if (!edit) return;
+    // validate
+    if (!edit.title.trim()) return alert("Title required.");
+    if (new Date(edit.starts_at) < new Date()) return alert("Start is in the past.");
+    if (new Date(edit.ends_at) <= new Date(edit.starts_at)) return alert("End must be after start.");
+    try {
+      await upsertOccurrenceOverride(edit.base.id, edit.base.occ_start.toISOString(), {
+        title: edit.title,
+        description: edit.description || null,
+        location: edit.location || null,
+        tz: edit.tz,
+        starts_at: new Date(edit.starts_at).toISOString(),
+        ends_at: new Date(edit.ends_at).toISOString(),
+        category: edit.category,
+      });
+      cancelEdit();
+      window.dispatchEvent(new Event("refreshCalendar")); // signal parent
+    } catch (e) { alert(e.message || "Failed to save occurrence."); }
+  };
+
+  const saveEditThisAndFuture = async () => {
+    if (!edit) return;
+    if (edit.base.recur_freq === "none") return saveEditOccurrenceOnly(); // no series to split
+    if (!window.confirm("Apply these changes to this and all future occurrences?")) return;
+    if (new Date(edit.starts_at) < new Date()) return alert("Start is in the past.");
+    try {
+      await splitEventSeries(
+        edit.base,
+        edit.base.occ_start.toISOString(),
+        {
+          title: edit.title,
+          description: edit.description || null,
+          location: edit.location || null,
+          tz: edit.tz,
+          starts_at: new Date(edit.starts_at).toISOString(),
+          ends_at: new Date(edit.ends_at).toISOString(),
+          category: edit.category,
+        }
+      );
+      cancelEdit();
+      window.dispatchEvent(new Event("refreshCalendar"));
+    } catch (e) { alert(e.message || "Failed to update series."); }
+  };
+
+  // listen for refresh signal from edits
+  useEffect(() => {
+    const h = () => { /* parent controls actual reload via prop */ };
+    window.addEventListener("refreshCalendar", h);
+    return () => window.removeEventListener("refreshCalendar", h);
+  }, []);
+
+  const onClickDelete = async (occ) => {
+    if (occ.recur_freq === "none") {
+      if (!window.confirm("Delete this event?")) return;
+      await onDeleteEvent(occ.id);
+      return;
+    }
+    // two-step simple prompt
+    if (window.confirm("Delete this occurrence only? (OK = this occurrence, Cancel = entire series)")) {
+      await deleteEventOccurrence(occ.id, occ.occ_start.toISOString());
+      window.dispatchEvent(new Event("refreshCalendar"));
+    } else {
+      if (window.confirm("Delete the entire series? This cannot be undone.")) {
+        await onDeleteEvent(occ.id);
+      }
+    }
+  };
+
   return (
     <>
       <h3 style={{ margin:"8px 0", fontSize:16 }}>Calendar</h3>
-      {calErr && <ErrorText>{calErr}</ErrorText>}
+      {(calErr || localErr) && <ErrorText>{calErr || localErr}</ErrorText>}
 
       {occurrences.length === 0 ? (
         <p style={{ opacity:0.8 }}>No upcoming events.</p>
@@ -651,23 +777,63 @@ function CalendarPanel({ team, occurrences, showAddEvent, setShowAddEvent, evSta
           {occurrences.map(occ => {
             const mins = minutesBetween(occ.occ_start, occ.occ_end);
             const duration = mins < 180 ? `${Math.floor(mins/60)}h ${mins%60}m` : `${(mins/60).toFixed(1)}h`;
+            const key = `${occ.id}|${occ.occ_start.toISOString()}`;
+            const isEditing = editingKey === key;
+
             return (
-              <li key={`${occ.id}-${occ.occ_start.toISOString()}`}
-                  style={{ padding:"10px 0", borderBottom:"1px solid rgba(255,255,255,0.06)" }}>
-                <div style={{ display:"flex", justifyContent:"space-between", alignItems:"baseline", gap:12 }}>
-                  <div>
-                    <strong>{occ.title}</strong>{" "}
-                    <span style={{ opacity:0.7 }}>({occ.category})</span>
-                    <div style={{ opacity:0.8, fontSize:12 }}>
-                      {fmtDT(occ.occ_start, occ.tz, { month:"short", day:"2-digit" })} ·
-                      {" "}{fmtTime(occ.occ_start, occ.tz)}–{fmtTime(occ.occ_end, occ.tz)} ({occ.tz}, {duration})
-                      {occ.location ? ` · ${occ.location}` : ""}
+              <li key={key} style={{ padding:"10px 0", borderBottom:"1px solid rgba(255,255,255,0.06)" }}>
+                {!isEditing ? (
+                  <div style={{ display:"flex", justifyContent:"space-between", alignItems:"baseline", gap:12 }}>
+                    <div>
+                      <strong>{occ.title}</strong>{" "}
+                      <span style={{ opacity:0.7 }}>({occ.category})</span>
+                      <div style={{ opacity:0.8, fontSize:12 }}>
+                        {fmtDT(occ.occ_start, occ.tz, { month:"short", day:"2-digit" })} ·{" "}
+                        {fmtTime(occ.occ_start, occ.tz)}–{fmtTime(occ.occ_end, occ.tz)}
+                        {" "}({occ.tz}, {duration})
+                        {occ.location ? ` · ${occ.location}` : ""}
+                      </div>
+                    </div>
+                    <div style={{ display:"flex", gap:8 }}>
+                      <GhostButton onClick={()=>beginEdit(occ)}>Edit</GhostButton>
+                      <GhostButton onClick={()=>onClickDelete(occ)}>Delete</GhostButton>
                     </div>
                   </div>
-                  {/* allow creator or admin to delete (RLS enforces server-side anyway) */}
-                  <GhostButton onClick={()=>onDeleteEvent(occ.id)}>Delete</GhostButton>
-                </div>
-                {occ.description && <div style={{ opacity:0.8, fontSize:12, marginTop:4 }}>{occ.description}</div>}
+                ) : (
+                  <div style={{ display:"grid", gap:6 }}>
+                    <Input placeholder="Title" value={edit.title} onChange={e=>setEdit({...edit, title:e.target.value})}/>
+                    <Input placeholder="Description" value={edit.description} onChange={e=>setEdit({...edit, description:e.target.value})}/>
+                    <Input placeholder="Location" value={edit.location} onChange={e=>setEdit({...edit, location:e.target.value})}/>
+                    <div style={{ display:"flex", gap:8, flexWrap:"wrap" }}>
+                      <select value={edit.category} onChange={e=>setEdit({...edit, category:e.target.value})} style={styles.select}>
+                        <option value="rehearsal">Rehearsal</option>
+                        <option value="social">Social</option>
+                        <option value="performance">Performance</option>
+                      </select>
+                      <Input placeholder="Time zone" value={edit.tz} onChange={e=>setEdit({...edit, tz:e.target.value})}/>
+                    </div>
+                    <div style={{ display:"flex", gap:8, flexWrap:"wrap" }}>
+                      <input type="datetime-local" step="60"
+                        value={edit.starts_at}
+                        onChange={e=>setEdit({...edit, starts_at:e.target.value,
+                          ends_at: (() => {
+                            const d = (new Date(edit.ends_at) - new Date(edit.starts_at)) || 3600000;
+                            const next = new Date(e.target.value); return new Date(next.getTime()+d).toISOString().slice(0,16);
+                          })()
+                        })} />
+                      <input type="datetime-local" step="60"
+                        value={edit.ends_at}
+                        onChange={e=>setEdit({...edit, ends_at:e.target.value})}/>
+                    </div>
+                    <div style={{ display:"flex", gap:8 }}>
+                      <Button onClick={saveEditOccurrenceOnly}>Save this occurrence</Button>
+                      {edit.base.recur_freq !== "none" && (
+                        <Button onClick={saveEditThisAndFuture}>Save this & future</Button>
+                      )}
+                      <GhostButton onClick={cancelEdit}>Cancel</GhostButton>
+                    </div>
+                  </div>
+                )}
               </li>
             );
           })}
@@ -694,8 +860,10 @@ function CalendarPanel({ team, occurrences, showAddEvent, setShowAddEvent, evSta
                   <Input placeholder="Time zone (e.g. Europe/London)" value={evTZ} onChange={e=>setEvTZ(e.target.value)} />
                 </div>
                 <div style={{ display:"flex", gap:8, flexWrap:"wrap" }}>
-                  <input type="datetime-local" value={evStart} onChange={e=>setEvStart(e.target.value)} />
-                  <input type="datetime-local" value={evEnd} onChange={e=>setEvEnd(e.target.value)} />
+                  <input type="datetime-local" step="60"
+                         value={evStart} onChange={e=>onChangeStart(e.target.value)} />
+                  <input type="datetime-local" step="60"
+                         value={evEnd} onChange={e=>onChangeEnd(e.target.value)} />
                 </div>
               </div>
 
@@ -706,20 +874,26 @@ function CalendarPanel({ team, occurrences, showAddEvent, setShowAddEvent, evSta
                   <select value={evFreq} onChange={e=>setEvFreq(e.target.value)} style={styles.select}>
                     <option value="none">Does not repeat</option>
                     <option value="weekly">Weekly</option>
+                    {/* Fortnightly is just weekly interval=2 */}
+                    <option value="weekly-2">Fortnightly</option>
                     <option value="monthly">Monthly</option>
                   </select>
 
-                  {evFreq === "weekly" && (
+                  {evFreq.startsWith("weekly") && (
                     <>
                       <span style={{ opacity:0.8 }}>every</span>
-                      <Input type="number" min={1} value={evInterval} onChange={e=>setEvInterval(parseInt(e.target.value||'1',10))} style={{ width:70 }} />
+                      <Input type="number" min={1}
+                        value={evFreq==="weekly-2" ? 2 : evInterval}
+                        onChange={e=>setEvInterval(parseInt(e.target.value||'1',10))}
+                        disabled={evFreq==="weekly-2"} style={{ width:70 }} />
                       <span style={{ opacity:0.8 }}>week(s) on</span>
                       <div style={{ display:"flex", gap:6, flexWrap:"wrap" }}>
-                        {DOW.slice(1).concat(["SU"]).map(code => ( // Mon..Sun visual order
+                        {["MO","TU","WE","TH","FR","SA","SU"].map(code => (
                           <label key={code} style={{ display:"inline-flex", gap:6, alignItems:"center", border:"1px solid rgba(255,255,255,0.2)", borderRadius:8, padding:"4px 8px" }}>
-                            <input type="checkbox" checked={evByDay.includes(code)} onChange={(e)=>{
-                              setEvByDay(prev => e.target.checked ? [...new Set([...prev, code])] : prev.filter(x=>x!==code));
-                            }} />
+                            <input type="checkbox" checked={evByDay.includes(code)}
+                              onChange={(e)=>{
+                                setEvByDay(prev => e.target.checked ? [...new Set([...prev, code])] : prev.filter(x=>x!==code));
+                              }}/>
                             {code}
                           </label>
                         ))}
@@ -752,7 +926,7 @@ function CalendarPanel({ team, occurrences, showAddEvent, setShowAddEvent, evSta
                             <option value={5}>5th</option><option value={-1}>Last</option>
                           </select>
                           <select value={evDayOfWeek} onChange={e=>setEvDayOfWeek(e.target.value)} style={styles.select}>
-                            {DOW.map(code => <option key={code} value={code}>{code}</option>)}
+                            {["SU","MO","TU","WE","TH","FR","SA"].map(code => <option key={code} value={code}>{code}</option>)}
                           </select>
                         </label>
                       </div>
@@ -761,7 +935,7 @@ function CalendarPanel({ team, occurrences, showAddEvent, setShowAddEvent, evSta
                 </div>
 
                 {/* End conditions */}
-                {evFreq !== "none" && (
+                {(evFreq !== "none") && (
                   <div style={{ display:"flex", gap:12, alignItems:"center", flexWrap:"wrap", marginTop:8 }}>
                     <span style={{ opacity:0.8 }}>Ends:</span>
                     <label style={{ display:"inline-flex", gap:6, alignItems:"center" }}>
@@ -781,8 +955,21 @@ function CalendarPanel({ team, occurrences, showAddEvent, setShowAddEvent, evSta
               </div>
 
               <div style={{ display:"flex", gap:8, marginTop:8 }}>
-                <Button onClick={onSaveEvent}>Save event</Button>
-                <GhostButton onClick={()=>setShowAddEvent(false)}>Cancel</GhostButton>
+                <Button
+                  onClick={()=>{
+                    // map fortnightly to weekly interval=2
+                    if (evFreq === "weekly-2") setEvInterval(2);
+                    const msg = validate();
+                    if (msg) { setLocalErr(msg); return; }
+                    onSaveEvent();
+                  }}
+                  disabled={!!validate()}
+                >
+                  Save event
+                </Button>
+                <GhostButton onClick={()=>{ setShowAddEvent(false); setLocalErr(""); }}>
+                  Cancel
+                </GhostButton>
               </div>
             </div>
           </>
@@ -791,6 +978,7 @@ function CalendarPanel({ team, occurrences, showAddEvent, setShowAddEvent, evSta
     </>
   );
 }
+
 
 const styles = {
   header: { display:"flex", gap:10, alignItems:"center", justifyContent:"space-between", flexWrap:"wrap", marginBottom:12 },
