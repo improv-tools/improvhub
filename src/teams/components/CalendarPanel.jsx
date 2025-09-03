@@ -1,7 +1,7 @@
 // src/teams/components/CalendarPanel.jsx
 import { useMemo, useState } from "react";
-import { Button, GhostButton, Input, ErrorText } from "components/ui";
-import { fmtDT, fmtTime, toLocalInput, splitLocal, combineLocal, minutesBetween } from "teams/utils/datetime";
+import { Button, GhostButton, Input, ErrorText, DangerButton } from "components/ui";
+import { fmtTime, toLocalInput, splitLocal, combineLocal, minutesBetween } from "teams/utils/datetime";
 
 export default function CalendarPanel({
   team,
@@ -9,7 +9,13 @@ export default function CalendarPanel({
   upcomingOcc,
   pastSlice, pastHasMore, onPastMore,
   createEvent, deleteSeries, deleteOccurrence, patchOccurrence, refreshCalendar,
+  // new helpers from hook:
+  getEventById, summarizeRecurrence, countFutureOccurrencesInSeries,
+  applyFutureEdits, applySeriesEdits,
 }) {
+  // Tabs inside Calendar
+  const [tab, setTab] = useState("upcoming"); // 'upcoming' | 'past'
+
   // Add form state
   const defaultTZ = Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
   const [showAdd, setShowAdd] = useState(false);
@@ -38,7 +44,7 @@ export default function CalendarPanel({
 
   // keep end synced when start changes
   const startLocal = combineLocal(sDate, sTime);
-  const endLocal = combineLocal(eDate, eTime);
+  const endLocal   = combineLocal(eDate, eTime);
 
   const onChangeStartDate = (v) => {
     setSDate(v);
@@ -114,346 +120,370 @@ export default function CalendarPanel({
     setEndMode("never"); setUntil(""); setCount(10);
   };
 
-  // Edit occurrence row
-  const [editingKey, setEditingKey] = useState(null);
-  const [edit, setEdit] = useState(null);
-  const beginEdit = (occ) => {
-    if (occ.occ_start < new Date()) { alert("Cannot edit a past occurrence."); return; }
+  // --- Editing ---
+  const [editingKey, setEditingKey] = useState(null); // `${eventId}|${occIso}`
+  const [edit, setEdit] = useState(null);             // data for the open editor
+  const [expanded, setExpanded] = useState(() => new Set()); // title toggles
+
+  const toggleExpanded = (key) => {
+    setExpanded(prev => {
+      const n = new Set(prev);
+      if (n.has(key)) n.delete(key); else n.add(key);
+      return n;
+    });
+  };
+
+  const startEdit = (occ) => {
+    // ensure only one open editor
+    const key = `${occ.id}|${occ.occ_start.toISOString()}`;
+    setEditingKey(key);
     const s = splitLocal(toLocalInput(occ.occ_start));
     const e = splitLocal(toLocalInput(occ.occ_end));
-    setEditingKey(`${occ.id}|${occ.occ_start.toISOString()}`);
     setEdit({
-      title: occ.title,
-      description: occ.description || "",
-      location: occ.location || "",
-      tz: occ.tz,
-      startDate: s.date, startTime: s.time,
-      endDate: e.date, endTime: e.time,
-      category: occ.category,
+      title: occ.title, description: occ.description || "", location: occ.location || "",
+      tz: occ.tz, category: occ.category,
+      startDate: s.date, startTime: s.time, endDate: e.date, endTime: e.time,
       base: occ,
     });
   };
   const cancelEdit = () => { setEditingKey(null); setEdit(null); };
 
-  const saveEditOccurrenceOnly = async () => {
+  // Save just this occurrence
+  const saveOccurrenceOnly = async () => {
     const s = combineLocal(edit.startDate, edit.startTime);
     const e = combineLocal(edit.endDate, edit.endTime);
     if (!edit.title.trim()) return alert("Title required.");
     if (new Date(s) < new Date()) return alert("Start is in the past.");
     if (new Date(e) <= new Date(s)) return alert("End must be after start.");
     await patchOccurrence(edit.base.id, edit.base.occ_start.toISOString(), {
-      title: edit.title,
-      description: edit.description || null,
-      location: edit.location || null,
-      tz: edit.tz,
-      starts_at: new Date(s).toISOString(),
-      ends_at: new Date(e).toISOString(),
-      category: edit.category,
+      title: edit.title, description: edit.description || null, location: edit.location || null,
+      tz: edit.tz, category: edit.category,
+      starts_at: new Date(s).toISOString(), ends_at: new Date(e).toISOString(),
     });
     cancelEdit();
   };
 
-  // Apply to FUTURE — we don't create a new series; we just override each future occurrence.
-  const saveEditFuture = async () => {
-    if (!window.confirm("Apply these changes to all future occurrences in this series?")) return;
+  // Save for FUTURE: use BASE occurrences so it’s reliable even if some have overrides already
+  const saveFuture = async () => {
+    if (!window.confirm("Apply these changes to all FUTURE occurrences in this team’s series? This affects the whole team.")) return;
     const sISO = new Date(combineLocal(edit.startDate, edit.startTime)).toISOString();
     const eISO = new Date(combineLocal(edit.endDate, edit.endTime)).toISOString();
-    const toPatch = occurrencesAll.filter(o => o.id === edit.base.id && o.occ_start >= edit.base.occ_start);
-    for (const o of toPatch) {
-      // eslint-disable-next-line no-await-in-loop
-      await patchOccurrence(o.id, o.occ_start.toISOString(), {
-        title: edit.title, description: edit.description || null, location: edit.location || null,
-        tz: edit.tz, starts_at: sISO, ends_at: eISO, category: edit.category,
-      });
-    }
+    await applyFutureEdits(edit.base.id, edit.base.occ_start.toISOString(), {
+      title: edit.title, description: edit.description || null, location: edit.location || null,
+      tz: edit.tz, category: edit.category, starts_at: sISO, ends_at: eISO,
+    });
     cancelEdit();
     await refreshCalendar();
   };
 
-  // Apply to ENTIRE series across loaded range (no split)
-  const saveEditSeries = async () => {
-    if (!window.confirm("Apply these changes to the entire series in the loaded range?")) return;
+  // Save for ENTIRE series (in loaded range)
+  const saveSeries = async () => {
+    if (!window.confirm("Apply these changes to the ENTIRE team series in the loaded range? This affects the whole team.")) return;
     const sISO = new Date(combineLocal(edit.startDate, edit.startTime)).toISOString();
     const eISO = new Date(combineLocal(edit.endDate, edit.endTime)).toISOString();
-    const toPatch = occurrencesAll.filter(o => o.id === edit.base.id);
-    for (const o of toPatch) {
-      // eslint-disable-next-line no-await-in-loop
-      await patchOccurrence(o.id, o.occ_start.toISOString(), {
-        title: edit.title, description: edit.description || null, location: edit.location || null,
-        tz: edit.tz, starts_at: sISO, ends_at: eISO, category: edit.category,
-      });
-    }
+    await applySeriesEdits(edit.base.id, {
+      title: edit.title, description: edit.description || null, location: edit.location || null,
+      tz: edit.tz, category: edit.category, starts_at: sISO, ends_at: eISO,
+    });
     cancelEdit();
     await refreshCalendar();
   };
 
-  const onClickDelete = async (occ) => {
-    if (occ.occ_start < new Date()) { alert("Cannot delete a past occurrence."); return; }
-    if (occ.recur_freq === "none") {
-      if (!window.confirm("Delete this event?")) return;
-      await deleteSeries(occ.id);
-      return;
-    }
-    if (window.confirm("Delete this occurrence only? (OK = this occurrence, Cancel = entire series)")) {
-      await deleteOccurrence(occ.id, occ.occ_start.toISOString());
-      await refreshCalendar();
-    } else {
-      if (window.confirm("Delete the entire series? This cannot be undone.")) {
-        await deleteSeries(occ.id);
-      }
-    }
+  // Delete helpers & confirmations
+  const confirmDeleteOccurrence = async (occ) => {
+    if (!window.confirm(`Delete this occurrence for everyone on the team?`)) return;
+    await deleteOccurrence(occ.id, occ.occ_start.toISOString());
+    await refreshCalendar();
+  };
+
+  const confirmDeleteSeries = async (eventId) => {
+    const ev = getEventById(eventId);
+    const summary = summarizeRecurrence(ev);
+    const remaining = countFutureOccurrencesInSeries(eventId);
+    if (!window.confirm(
+      `Delete the ENTIRE series for the team?\n\n${ev.title} — ${summary}\nThis will remove ${remaining} future occurrence(s).`
+    )) return;
+    await deleteSeries(eventId);
+    await refreshCalendar();
+  };
+
+  // Render helpers
+  const DateAndTime = ({ occ }) => {
+    // Show date once, then time range
+    const d = occ.occ_start;
+    const dateStr = d.toLocaleDateString(undefined, { month: "short", day: "2-digit" });
+    const mins = minutesBetween(occ.occ_start, occ.occ_end);
+    const duration = mins < 180 ? `${Math.floor(mins / 60)}h ${mins % 60}m` : `${(mins / 60).toFixed(1)}h`;
+    return (
+      <div style={{ opacity: 0.8, fontSize: 12 }}>
+        {dateStr} · {fmtTime(occ.occ_start, occ.tz)}–{fmtTime(occ.occ_end, occ.tz)} ({occ.tz}, {duration})
+        {occ.location ? ` · ${occ.location}` : ""}
+      </div>
+    );
+  };
+
+  const EventRow = ({ occ, past = false }) => {
+    const key = `${past ? "past|" : ""}${occ.id}|${occ.occ_start.toISOString()}`;
+    const isEditing = editingKey === key;
+    const isExpanded = expanded.has(key);
+
+    return (
+      <li key={key} style={{ padding: "10px 0", borderBottom: "1px solid rgba(255,255,255,0.06)", opacity: past ? 0.55 : 1 }}>
+        {/* Summary line */}
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", gap: 12 }}>
+          <div>
+            <strong style={{ cursor: "pointer" }} onClick={() => toggleExpanded(key)}>
+              {occ.title}
+            </strong>{" "}
+            <span style={{ opacity: 0.7 }}>({occ.category})</span>
+            <DateAndTime occ={occ} />
+            {isExpanded && occ.description && (
+              <div style={{ marginTop: 4, opacity: 0.85, fontSize: 13 }}>{occ.description}</div>
+            )}
+          </div>
+
+          {/* Actions (no list-level Delete anymore) */}
+          {!past && (
+            <div style={{ display: "flex", gap: 8 }}>
+              {!isEditing && <GhostButton onClick={() => startEdit(occ)}>Edit</GhostButton>}
+            </div>
+          )}
+          {past && (
+            <div style={{ display: "flex", gap: 8 }}>
+              <DangerButton onClick={() => confirmDeleteOccurrence(occ)}>Delete</DangerButton>
+            </div>
+          )}
+        </div>
+
+        {/* Edit panel (only one at a time) */}
+        {!past && isEditing && (
+          <div style={{ display: "grid", gap: 6, marginTop: 8 }}>
+            <Input placeholder="Title" value={edit.title} onChange={(e) => setEdit({ ...edit, title: e.target.value })} />
+            <Input placeholder="Description" value={edit.description} onChange={(e) => setEdit({ ...edit, description: e.target.value })} />
+            <Input placeholder="Location" value={edit.location} onChange={(e) => setEdit({ ...edit, location: e.target.value })} />
+            <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+              <select
+                value={edit.category}
+                onChange={(e) => setEdit({ ...edit, category: e.target.value })}
+                style={styles.select}
+              >
+                <option value="rehearsal">Rehearsal</option>
+                <option value="social">Social</option>
+                <option value="performance">Performance</option>
+              </select>
+              <Input placeholder="Time zone" value={edit.tz} onChange={(e) => setEdit({ ...edit, tz: e.target.value })} />
+            </div>
+
+            {/* Date+Time */}
+            <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
+              <label>Start:&nbsp;
+                <input type="date" value={edit.startDate} onChange={(e) => {
+                  const v = e.target.value;
+                  const oldStart = combineLocal(edit.startDate, edit.startTime);
+                  const oldEnd   = combineLocal(edit.endDate, edit.endTime);
+                  const dur = (new Date(oldEnd) - new Date(oldStart)) || 60*60000;
+                  const start = combineLocal(v, edit.startTime);
+                  if (start) {
+                    const nextEnd = new Date(new Date(start).getTime() + dur);
+                    const n = splitLocal(toLocalInput(nextEnd));
+                    setEdit({ ...edit, startDate: v, endDate: n.date, endTime: n.time });
+                  } else setEdit({ ...edit, startDate: v });
+                }}/>
+              </label>
+              <input type="time" step="60" value={edit.startTime} onChange={(e) => {
+                const v = e.target.value;
+                const oldStart = combineLocal(edit.startDate, edit.startTime);
+                const oldEnd   = combineLocal(edit.endDate, edit.endTime);
+                const dur = (new Date(oldEnd) - new Date(oldStart)) || 60*60000;
+                const start = combineLocal(edit.startDate, v);
+                if (start) {
+                  const nextEnd = new Date(new Date(start).getTime() + dur);
+                  const n = splitLocal(toLocalInput(nextEnd));
+                  setEdit({ ...edit, startTime: v, endDate: n.date, endTime: n.time });
+                } else setEdit({ ...edit, startTime: v });
+              }}/>
+              <label style={{ marginLeft: 12 }}>End:&nbsp;
+                <input type="date" value={edit.endDate} onChange={(e) => setEdit({ ...edit, endDate: e.target.value })}/>
+              </label>
+              <input type="time" step="60" value={edit.endTime} onChange={(e) => setEdit({ ...edit, endTime: e.target.value })}/>
+            </div>
+
+            {/* Save options + Delete (moved here) */}
+            <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+              <Button onClick={saveOccurrenceOnly}>Save this occurrence</Button>
+              <Button onClick={saveFuture}>Save future in series</Button>
+              <Button onClick={saveSeries}>Save entire series</Button>
+              <DangerButton onClick={() => confirmDeleteOccurrence(edit.base)}>Delete (this occurrence)</DangerButton>
+              <DangerButton onClick={() => confirmDeleteSeries(edit.base.id)}>Delete series…</DangerButton>
+              <GhostButton onClick={cancelEdit}>Cancel</GhostButton>
+            </div>
+            <div style={{ opacity: 0.7, fontSize: 12 }}>
+              Note: These actions affect <strong>the whole team</strong>, not just you.
+            </div>
+          </div>
+        )}
+      </li>
+    );
   };
 
   return (
     <>
       <h3 style={{ margin: "8px 0", fontSize: 16 }}>Calendar</h3>
 
-      {/* UPCOMING */}
-      {upcomingOcc.length === 0 ? (
-        <p style={{ opacity: 0.8 }}>No upcoming events.</p>
-      ) : (
-        <ul style={{ listStyle: "none", padding: 0, margin: 0 }}>
-          {upcomingOcc.map((occ) => {
-            const mins = minutesBetween(occ.occ_start, occ.occ_end);
-            const duration = mins < 180 ? `${Math.floor(mins / 60)}h ${mins % 60}m` : `${(mins / 60).toFixed(1)}h`;
-            const key = `${occ.id}|${occ.occ_start.toISOString()}`;
-            const isEditing = editingKey === key;
-
-            return (
-              <li key={key} style={{ padding: "10px 0", borderBottom: "1px solid rgba(255,255,255,0.06)" }}>
-                {!isEditing ? (
-                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", gap: 12 }}>
-                    <div>
-                      <strong>{occ.title}</strong>{" "}
-                      <span style={{ opacity: 0.7 }}>({occ.category})</span>
-                      <div style={{ opacity: 0.8, fontSize: 12 }}>
-                        {fmtDT(occ.occ_start, occ.tz, { month: "short", day: "2-digit" })} ·{" "}
-                        {fmtTime(occ.occ_start, occ.tz)}–{fmtTime(occ.occ_end, occ.tz)} ({occ.tz}, {duration})
-                        {occ.location ? ` · ${occ.location}` : ""}
-                      </div>
-                    </div>
-                    <div style={{ display: "flex", gap: 8 }}>
-                      <GhostButton onClick={() => beginEdit(occ)}>Edit</GhostButton>
-                      <GhostButton onClick={() => onClickDelete(occ)}>Delete</GhostButton>
-                    </div>
-                  </div>
-                ) : (
-                  <div style={{ display: "grid", gap: 6 }}>
-                    <Input placeholder="Title" value={edit.title} onChange={(e) => setEdit({ ...edit, title: e.target.value })} />
-                    <Input placeholder="Description" value={edit.description} onChange={(e) => setEdit({ ...edit, description: e.target.value })} />
-                    <Input placeholder="Location" value={edit.location} onChange={(e) => setEdit({ ...edit, location: e.target.value })} />
-                    <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-                      <select
-                        value={edit.category}
-                        onChange={(e) => setEdit({ ...edit, category: e.target.value })}
-                        style={styles.select}
-                      >
-                        <option value="rehearsal">Rehearsal</option>
-                        <option value="social">Social</option>
-                        <option value="performance">Performance</option>
-                      </select>
-                      <Input placeholder="Time zone" value={edit.tz} onChange={(e) => setEdit({ ...edit, tz: e.target.value })} />
-                    </div>
-                    <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
-                      <label>Start:&nbsp;
-                        <input type="date" value={edit.startDate} onChange={(e) => {
-                          const v = e.target.value;
-                          const oldStart = combineLocal(edit.startDate, edit.startTime);
-                          const oldEnd   = combineLocal(edit.endDate, edit.endTime);
-                          const dur = (new Date(oldEnd) - new Date(oldStart)) || 60*60000;
-                          const start = combineLocal(v, edit.startTime);
-                          if (start) {
-                            const nextEnd = new Date(new Date(start).getTime() + dur);
-                            const n = splitLocal(toLocalInput(nextEnd));
-                            setEdit({ ...edit, startDate: v, endDate: n.date, endTime: n.time });
-                          } else setEdit({ ...edit, startDate: v });
-                        }}/>
-                      </label>
-                      <input type="time" step="60" value={edit.startTime} onChange={(e) => {
-                        const v = e.target.value;
-                        const oldStart = combineLocal(edit.startDate, edit.startTime);
-                        const oldEnd   = combineLocal(edit.endDate, edit.endTime);
-                        const dur = (new Date(oldEnd) - new Date(oldStart)) || 60*60000;
-                        const start = combineLocal(edit.startDate, v);
-                        if (start) {
-                          const nextEnd = new Date(new Date(start).getTime() + dur);
-                          const n = splitLocal(toLocalInput(nextEnd));
-                          setEdit({ ...edit, startTime: v, endDate: n.date, endTime: n.time });
-                        } else setEdit({ ...edit, startTime: v });
-                      }}/>
-                      <label style={{ marginLeft: 12 }}>End:&nbsp;
-                        <input type="date" value={edit.endDate} onChange={(e) => setEdit({ ...edit, endDate: e.target.value })}/>
-                      </label>
-                      <input type="time" step="60" value={edit.endTime} onChange={(e) => setEdit({ ...edit, endTime: e.target.value })}/>
-                    </div>
-                    <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-                      <Button onClick={saveEditOccurrenceOnly}>Save this occurrence</Button>
-                      <Button onClick={saveEditFuture}>Save future in series</Button>
-                      <Button onClick={saveEditSeries}>Save entire series</Button>
-                      <GhostButton onClick={cancelEdit}>Cancel</GhostButton>
-                    </div>
-                  </div>
-                )}
-              </li>
-            );
-          })}
-        </ul>
-      )}
-
-      {/* Add event */}
-      <div style={{ marginTop: 12 }}>
-        {!showAdd ? (
-          <GhostButton onClick={() => setShowAdd(true)}>+ Add event</GhostButton>
-        ) : (
-          <>
-            {(inlineError) && <ErrorText>{inlineError}</ErrorText>}
-            <div style={{ display: "grid", gap: 8 }}>
-              <Input placeholder="Title" value={title} onChange={(e) => setTitle(e.target.value)} />
-              <Input placeholder="Description (optional)" value={desc} onChange={(e) => setDesc(e.target.value)} />
-              <Input placeholder="Location (optional)" value={loc} onChange={(e) => setLoc(e.target.value)} />
-              <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-                <select value={cat} onChange={(e) => setCat(e.target.value)} style={styles.select}>
-                  <option value="rehearsal">Rehearsal</option>
-                  <option value="social">Social</option>
-                  <option value="performance">Performance</option>
-                </select>
-                <Input placeholder="Time zone (e.g. Europe/London)" value={tz} onChange={(e) => setTz(e.target.value)} />
-              </div>
-              <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
-                <label>Start:&nbsp;<input type="date" value={sDate} onChange={(e)=>onChangeStartDate(e.target.value)} /></label>
-                <input type="time" step="60" value={sTime} onChange={(e)=>onChangeStartTime(e.target.value)} />
-                <label style={{ marginLeft: 12 }}>End:&nbsp;<input type="date" value={eDate} onChange={(e)=>onChangeEndDate(e.target.value)} /></label>
-                <input type="time" step="60" value={eTime} onChange={(e)=>onChangeEndTime(e.target.value)} />
-              </div>
-
-              {/* Recurrence */}
-              <div style={{ borderTop: "1px solid rgba(255,255,255,0.12)", paddingTop: 8 }}>
-                <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
-                  <span style={{ opacity: 0.8 }}>Repeat:</span>
-                  <select value={freq} onChange={(e) => setFreq(e.target.value)} style={styles.select}>
-                    <option value="none">Does not repeat</option>
-                    <option value="weekly">Weekly</option>
-                    <option value="monthly">Monthly</option>
-                  </select>
-
-                  {freq === "weekly" && (
-                    <>
-                      <span style={{ opacity: 0.8 }}>every</span>
-                      <Input type="number" min={1} value={interval} onChange={(e)=>setInterval(parseInt(e.target.value || "1",10))} style={{ width: 70 }} />
-                      <span style={{ opacity: 0.8 }}>week(s) on</span>
-                      <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
-                        {["MO","TU","WE","TH","FR","SA","SU"].map(code => (
-                          <label key={code} style={{ display:"inline-flex", gap:6, alignItems:"center", border:"1px solid rgba(255,255,255,0.2)", borderRadius:8, padding:"4px 8px" }}>
-                            <input
-                              type="checkbox"
-                              checked={byDay.includes(code)}
-                              onChange={(e)=> setByDay(prev => e.target.checked ? [...new Set([...prev, code])] : prev.filter(x=>x!==code))}
-                            />
-                            {code}
-                          </label>
-                        ))}
-                      </div>
-                    </>
-                  )}
-
-                  {freq === "monthly" && (
-                    <div style={{ display: "grid", gap: 6 }}>
-                      <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
-                        <span style={{ opacity: 0.8 }}>every</span>
-                        <Input type="number" min={1} value={interval} onChange={(e)=>setInterval(parseInt(e.target.value || "1",10))} style={{ width: 70 }} />
-                        <span style={{ opacity: 0.8 }}>month(s)</span>
-                      </div>
-                      <div style={{ display:"flex", gap:12, flexWrap:"wrap" }}>
-                        <label style={{ display:"inline-flex", gap:6, alignItems:"center" }}>
-                          <input type="radio" checked={monthMode==="bymonthday"} onChange={()=>setMonthMode("bymonthday")} />
-                          By date:
-                          <Input
-                            type="text"
-                            value={byMonthDay.join(",")}
-                            onChange={(e)=>{
-                              const arr = e.target.value.split(",").map(s=>parseInt(s.trim(),10)).filter(n=>!isNaN(n));
-                              setByMonthDay(arr.length?arr:[1]);
-                            }}
-                            placeholder="e.g. 1 or 1,15,30"
-                            style={{ width: 160 }}
-                          />
-                        </label>
-                        <label style={{ display:"inline-flex", gap:6, alignItems:"center" }}>
-                          <input type="radio" checked={monthMode==="bynth"} onChange={()=>setMonthMode("bynth")} />
-                          By weekday:
-                          <select value={weekOfMonth} onChange={(e)=>setWeekOfMonth(parseInt(e.target.value,10))} style={styles.select}>
-                            <option value={1}>1st</option><option value={2}>2nd</option><option value={3}>3rd</option><option value={4}>4th</option><option value={5}>5th</option><option value={-1}>Last</option>
-                          </select>
-                          <select value={dayOfWeek} onChange={(e)=>setDayOfWeek(e.target.value)} style={styles.select}>
-                            {["SU","MO","TU","WE","TH","FR","SA"].map(code => <option key={code} value={code}>{code}</option>)}
-                          </select>
-                        </label>
-                      </div>
-                    </div>
-                  )}
-                </div>
-
-                {/* End conditions */}
-                {freq !== "none" && (
-                  <div style={{ display: "flex", gap: 12, alignItems: "center", flexWrap: "wrap", marginTop: 8 }}>
-                    <span style={{ opacity: 0.8 }}>Ends:</span>
-                    <label style={{ display: "inline-flex", gap: 6, alignItems: "center" }}>
-                      <input type="radio" checked={endMode==="never"} onChange={()=>setEndMode("never")} /> Never
-                    </label>
-                    <label style={{ display: "inline-flex", gap: 6, alignItems: "center" }}>
-                      <input type="radio" checked={endMode==="until"} onChange={()=>setEndMode("until")} /> Until
-                      <input type="date" value={until} onChange={(e)=>setUntil(e.target.value)} disabled={endMode!=="until"} />
-                    </label>
-                    <label style={{ display: "inline-flex", gap: 6, alignItems: "center" }}>
-                      <input type="radio" checked={endMode==="count"} onChange={()=>setEndMode("count")} /> For
-                      <Input type="number" min={1} value={count} onChange={(e)=>setCount(parseInt(e.target.value || "1",10))} style={{ width: 80 }} />
-                      occurrence(s)
-                    </label>
-                  </div>
-                )}
-              </div>
-
-              <div style={{ display: "flex", gap: 8, marginTop: 8 }}>
-                <Button onClick={saveEvent} disabled={!!inlineError}>Save event</Button>
-                <GhostButton onClick={() => setShowAdd(false)}>Cancel</GhostButton>
-              </div>
-            </div>
-          </>
-        )}
+      {/* Tabs: Upcoming / Past */}
+      <div style={{ display: "flex", gap: 8, margin: "6px 0 10px" }}>
+        <button onClick={() => setTab("upcoming")} style={tab==="upcoming" ? styles.tabActive : styles.tabBtn}>Upcoming</button>
+        <button onClick={() => setTab("past")} style={tab==="past" ? styles.tabActive : styles.tabBtn}>Past</button>
       </div>
 
-      {/* PAST EVENTS */}
-      <h4 style={{ margin: "18px 0 8px", fontSize: 14, opacity: 0.9 }}>Past events</h4>
-      {pastSlice.length === 0 ? (
-        <p style={{ opacity: 0.6 }}>No past events in the loaded range.</p>
-      ) : (
+      {tab === "upcoming" ? (
         <>
-          <ul style={{ listStyle: "none", padding: 0, margin: 0 }}>
-            {pastSlice.map((occ) => {
-              const mins = minutesBetween(occ.occ_start, occ.occ_end);
-              const duration = mins < 180 ? `${Math.floor(mins / 60)}h ${mins % 60}m` : `${(mins / 60).toFixed(1)}h`;
-              const key = `past|${occ.id}|${occ.occ_start.toISOString()}`;
-              return (
-                <li key={key} style={{ padding: "10px 0", borderBottom: "1px solid rgba(255,255,255,0.06)", opacity: 0.55 }}>
-                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", gap: 12 }}>
-                    <div>
-                      <strong>{occ.title}</strong>{" "}
-                      <span style={{ opacity: 0.7 }}>({occ.category})</span>
-                      <div style={{ opacity: 0.8, fontSize: 12 }}>
-                        {fmtDT(occ.occ_start, occ.tz, { month: "short", day: "2-digit" })} ·{" "}
-                        {fmtTime(occ.occ_start, occ.tz)}–{fmtTime(occ.occ_end, occ.tz)} ({occ.tz}, {duration})
-                        {occ.location ? ` · ${occ.location}` : ""}
-                      </div>
-                    </div>
+          {upcomingOcc.length === 0 ? (
+            <p style={{ opacity: 0.8 }}>No upcoming events.</p>
+          ) : (
+            <ul style={{ listStyle: "none", padding: 0, margin: 0 }}>
+              {upcomingOcc.map(occ => <EventRow key={`${occ.id}|${occ.occ_start.toISOString()}`} occ={occ} />)}
+            </ul>
+          )}
+
+          {/* Add event */}
+          <div style={{ marginTop: 12 }}>
+            {!showAdd ? (
+              <GhostButton onClick={() => setShowAdd(true)}>+ Add event</GhostButton>
+            ) : (
+              <>
+                {(inlineError) && <ErrorText>{inlineError}</ErrorText>}
+                <div style={{ display: "grid", gap: 8 }}>
+                  <Input placeholder="Title" value={title} onChange={(e) => setTitle(e.target.value)} />
+                  <Input placeholder="Description (optional)" value={desc} onChange={(e) => setDesc(e.target.value)} />
+                  <Input placeholder="Location (optional)" value={loc} onChange={(e) => setLoc(e.target.value)} />
+                  <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                    <select value={cat} onChange={(e) => setCat(e.target.value)} style={styles.select}>
+                      <option value="rehearsal">Rehearsal</option>
+                      <option value="social">Social</option>
+                      <option value="performance">Performance</option>
+                    </select>
+                    <Input placeholder="Time zone (e.g. Europe/London)" value={tz} onChange={(e) => setTz(e.target.value)} />
                   </div>
-                </li>
-              );
-            })}
-          </ul>
-          {pastHasMore && (
-            <div style={{ marginTop: 10 }}>
-              <GhostButton onClick={onPastMore}>Get more</GhostButton>
-            </div>
+                  <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
+                    <label>Start:&nbsp;<input type="date" value={sDate} onChange={(e)=>onChangeStartDate(e.target.value)} /></label>
+                    <input type="time" step="60" value={sTime} onChange={(e)=>onChangeStartTime(e.target.value)} />
+                    <label style={{ marginLeft: 12 }}>End:&nbsp;<input type="date" value={eDate} onChange={(e)=>onChangeEndDate(e.target.value)} /></label>
+                    <input type="time" step="60" value={eTime} onChange={(e)=>onChangeEndTime(e.target.value)} />
+                  </div>
+
+                  {/* Recurrence */}
+                  <div style={{ borderTop: "1px solid rgba(255,255,255,0.12)", paddingTop: 8 }}>
+                    <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
+                      <span style={{ opacity: 0.8 }}>Repeat:</span>
+                      <select value={freq} onChange={(e) => setFreq(e.target.value)} style={styles.select}>
+                        <option value="none">Does not repeat</option>
+                        <option value="weekly">Weekly</option>
+                        <option value="monthly">Monthly</option>
+                      </select>
+
+                      {freq === "weekly" && (
+                        <>
+                          <span style={{ opacity: 0.8 }}>every</span>
+                          <Input type="number" min={1} value={interval} onChange={(e)=>setInterval(parseInt(e.target.value || "1",10))} style={{ width: 70 }} />
+                          <span style={{ opacity: 0.8 }}>week(s) on</span>
+                          <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+                            {["MO","TU","WE","TH","FR","SA","SU"].map(code => (
+                              <label key={code} style={{ display:"inline-flex", gap:6, alignItems:"center", border:"1px solid rgba(255,255,255,0.2)", borderRadius:8, padding:"4px 8px" }}>
+                                <input
+                                  type="checkbox"
+                                  checked={byDay.includes(code)}
+                                  onChange={(e)=> setByDay(prev => e.target.checked ? [...new Set([...prev, code])] : prev.filter(x=>x!==code))}
+                                />
+                                {code}
+                              </label>
+                            ))}
+                          </div>
+                        </>
+                      )}
+
+                      {freq === "monthly" && (
+                        <div style={{ display: "grid", gap: 6 }}>
+                          <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+                            <span style={{ opacity: 0.8 }}>every</span>
+                            <Input type="number" min={1} value={interval} onChange={(e)=>setInterval(parseInt(e.target.value || "1",10))} style={{ width: 70 }} />
+                            <span style={{ opacity: 0.8 }}>month(s)</span>
+                          </div>
+                          <div style={{ display:"flex", gap:12, flexWrap:"wrap" }}>
+                            <label style={{ display:"inline-flex", gap:6, alignItems:"center" }}>
+                              <input type="radio" checked={monthMode==="bymonthday"} onChange={()=>setMonthMode("bymonthday")} />
+                              By date:
+                              <Input
+                                type="text"
+                                value={byMonthDay.join(",")}
+                                onChange={(e)=>{
+                                  const arr = e.target.value.split(",").map(s=>parseInt(s.trim(),10)).filter(n=>!isNaN(n));
+                                  setByMonthDay(arr.length?arr:[1]);
+                                }}
+                                placeholder="e.g. 1 or 1,15,30"
+                                style={{ width: 160 }}
+                              />
+                            </label>
+                            <label style={{ display:"inline-flex", gap:6, alignItems:"center" }}>
+                              <input type="radio" checked={monthMode==="bynth"} onChange={()=>setMonthMode("bynth")} />
+                              By weekday:
+                              <select value={weekOfMonth} onChange={(e)=>setWeekOfMonth(parseInt(e.target.value,10))} style={styles.select}>
+                                <option value={1}>1st</option><option value={2}>2nd</option><option value={3}>3rd</option><option value={4}>4th</option><option value={5}>5th</option><option value={-1}>Last</option>
+                              </select>
+                              <select value={dayOfWeek} onChange={(e)=>setDayOfWeek(e.target.value)} style={styles.select}>
+                                {["SU","MO","TU","WE","TH","FR","SA"].map(code => <option key={code} value={code}>{code}</option>)}
+                              </select>
+                            </label>
+                          </div>
+                        </div>
+                      )}
+                    </div>
+
+                    {/* End conditions */}
+                    {freq !== "none" && (
+                      <div style={{ display: "flex", gap: 12, alignItems: "center", flexWrap: "wrap", marginTop: 8 }}>
+                        <span style={{ opacity: 0.8 }}>Ends:</span>
+                        <label style={{ display: "inline-flex", gap: 6, alignItems: "center" }}>
+                          <input type="radio" checked={endMode==="never"} onChange={()=>setEndMode("never")} /> Never
+                        </label>
+                        <label style={{ display: "inline-flex", gap: 6, alignItems: "center" }}>
+                          <input type="radio" checked={endMode==="until"} onChange={()=>setEndMode("until")} /> Until
+                          <input type="date" value={until} onChange={(e)=>setUntil(e.target.value)} disabled={endMode!=="until"} />
+                        </label>
+                        <label style={{ display: "inline-flex", gap: 6, alignItems: "center" }}>
+                          <input type="radio" checked={endMode==="count"} onChange={()=>setEndMode("count")} /> For
+                          <Input type="number" min={1} value={count} onChange={(e)=>setCount(parseInt(e.target.value || "1",10))} style={{ width: 80 }} />
+                          occurrence(s)
+                        </label>
+                      </div>
+                    )}
+                  </div>
+
+                  <div style={{ display: "flex", gap: 8, marginTop: 8 }}>
+                    <Button onClick={saveEvent} disabled={!!inlineError}>Save event</Button>
+                    <GhostButton onClick={() => setShowAdd(false)}>Cancel</GhostButton>
+                  </div>
+                </div>
+              </>
+            )}
+          </div>
+        </>
+      ) : (
+        // PAST tab
+        <>
+          {pastSlice.length === 0 ? (
+            <p style={{ opacity: 0.6 }}>No past events in the loaded range.</p>
+          ) : (
+            <>
+              <ul style={{ listStyle: "none", padding: 0, margin: 0 }}>
+                {pastSlice.map((occ) => <EventRow key={`past|${occ.id}|${occ.occ_start.toISOString()}`} occ={occ} past />)}
+              </ul>
+              {pastHasMore && (
+                <div style={{ marginTop: 10 }}>
+                  <GhostButton onClick={onPastMore}>Get more</GhostButton>
+                </div>
+              )}
+            </>
           )}
         </>
       )}
@@ -469,5 +499,21 @@ const styles = {
     borderRadius: 10,
     padding: "10px 12px",
     outline: "none",
+  },
+  tabBtn: {
+    background: "transparent",
+    color: "white",
+    border: "1px solid rgba(255,255,255,0.2)",
+    borderRadius: 10,
+    padding: "6px 10px",
+    cursor: "pointer",
+  },
+  tabActive: {
+    background: "transparent",
+    color: "white",
+    border: "1px solid rgba(255,255,255,0.4)",
+    borderRadius: 10,
+    padding: "6px 10px",
+    cursor: "pointer",
   },
 };
