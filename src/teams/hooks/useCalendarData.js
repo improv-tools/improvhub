@@ -41,11 +41,11 @@ export function useCalendarData(teamId) {
     [eventsBase, windowFrom, windowTo]
   );
 
-// Merged occurrences (WITH overrides) — use for display, but keep base_start for ID ops
+// Merged occurrences (WITH overrides) — keep base_start for precise RPC keys
 const occurrencesAll = useMemo(() => {
   const base = expandOccurrences(eventsBase, windowFrom, windowTo);
 
-  // map overrides by original base occurrence start
+  // map overrides by original (base) occurrence start
   const oMap = new Map();
   for (const o of overrides) {
     oMap.set(`${o.event_id}|${new Date(o.occ_start).toISOString()}`, o);
@@ -57,24 +57,25 @@ const occurrencesAll = useMemo(() => {
     const o = oMap.get(key);
 
     if (!o) {
-      merged.push({ ...e, base_start: e.occ_start }); // carry base_start
+      // include recurrence fields so UI can check if it's a series
+      merged.push({ ...e, base_start: e.occ_start });
     } else {
       if (o.canceled) continue;
       merged.push({
         ...e,
-        base_start: e.occ_start, // original key for RPCs
-        title: o.title ?? e.title,
+        base_start: e.occ_start,                     // original base key for RPCs
+        title:       o.title       ?? e.title,
         description: o.description ?? e.description,
-        location: o.location ?? e.location,
-        tz: o.tz ?? e.tz,
-        occ_start: o.starts_at ? new Date(o.starts_at) : e.occ_start,
-        occ_end:   o.ends_at   ? new Date(o.ends_at)   : e.occ_end,
-        category: o.category ?? e.category,
+        location:    o.location    ?? e.location,
+        tz:          o.tz          ?? e.tz,
+        occ_start:   o.starts_at ? new Date(o.starts_at) : e.occ_start,
+        occ_end:     o.ends_at   ? new Date(o.ends_at)   : e.occ_end,
+        category:    o.category    ?? e.category,
       });
     }
   }
 
-  // De-dupe by (eventId, occ_start ms) after merge
+  // De-dupe by (eventId, occ_start) after merge (prevents flicker/dupes)
   const dedup = new Map();
   for (const item of merged) {
     const k = `${item.id}|${item.occ_start.getTime()}`;
@@ -85,7 +86,7 @@ const occurrencesAll = useMemo(() => {
   return out;
 }, [eventsBase, overrides, windowFrom, windowTo]);
 
-// Partition by END time so “ongoing now” is Upcoming
+// Partition by END time so ongoing "now" stays in Upcoming
 const upcomingOcc = useMemo(() => {
   const now = Date.now();
   return occurrencesAll.filter(o => o.occ_end.getTime() >= now);
@@ -98,17 +99,17 @@ const pastOccDesc = useMemo(() => {
   return arr;
 }, [occurrencesAll]);
 
-// --- helpers for counts/summaries ---
-
+// Helpers (use BASE occurrences for series-wide ops)
 const getEventById = (eventId) => eventsBase.find(e => e.id === eventId) || null;
 const getBaseOccurrencesFor = (eventId) =>
   expandOccurrences(eventsBase.filter(e => e.id === eventId), windowFrom, windowTo);
 
-// Count future by END time (don’t include already-finished)
+// Count FUTURE by end time (don’t include past)
 const countFutureOccurrencesInSeries = (eventId) => {
   const now = Date.now();
   return getBaseOccurrencesFor(eventId).filter(o => o.occ_end.getTime() >= now).length;
 };
+
 
 
   // Human summary like “Every 3 weeks on Thursday until 2025-12-31”
