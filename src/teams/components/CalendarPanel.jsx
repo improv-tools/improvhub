@@ -1,7 +1,38 @@
 // src/teams/components/CalendarPanel.jsx
 import { useEffect, useMemo, useState } from "react";
-import { Button, GhostButton, Input, ErrorText, DangerButton } from "components/ui";
+import { Button, GhostButton, Input, ErrorText, DangerButton, InfoText } from "components/ui";
 import { fmtTime, toLocalInput, splitLocal, combineLocal, minutesBetween } from "teams/utils/datetime";
+
+const MAJOR_TIMEZONES = [
+  "Europe/London",
+  "UTC",
+  "America/New_York",
+  "America/Chicago",
+  "America/Los_Angeles",
+  "America/Toronto",
+  "America/Sao_Paulo",
+  "Europe/Paris",
+  "Europe/Berlin",
+  "Europe/Madrid",
+  "Europe/Rome",
+  "Asia/Tokyo",
+  "Asia/Seoul",
+  "Asia/Hong_Kong",
+  "Asia/Singapore",
+  "Asia/Kolkata",
+  "Australia/Sydney",
+  "Pacific/Auckland",
+  "Africa/Johannesburg",
+];
+
+function monthsBetweenInclusive(startISO, endISO) {
+  const s = new Date(startISO);
+  const e = new Date(endISO);
+  let months = (e.getFullYear() - s.getFullYear()) * 12 + (e.getMonth() - s.getMonth());
+  // if end day earlier than start day, don't count full month
+  if (e.getDate() < s.getDate()) months -= 1;
+  return Math.max(0, months);
+}
 
 export default function CalendarPanel({
   team,
@@ -13,17 +44,19 @@ export default function CalendarPanel({
   getEventById, summarizeRecurrence, countFutureOccurrencesInSeries,
   applyFutureEdits, applySeriesEdits,
 }) {
-  // Tabs inside Calendar
+  // Tabs
   const [tab, setTab] = useState("upcoming"); // 'upcoming' | 'past'
   useEffect(() => {
     // clear edit/expand when switching tabs
     setEditingKey(null);
     setEdit(null);
     setExpanded(new Set());
+    setFormErr("");
+    setSaveMsg("");
   }, [tab]);
 
   // Add form state
-  const defaultTZ = Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
+  const defaultTZ = Intl.DateTimeFormat().resolvedOptions().timeZone || "Europe/London";
   const [showAdd, setShowAdd] = useState(false);
   const [title, setTitle] = useState("");
   const [desc, setDesc] = useState("");
@@ -47,6 +80,9 @@ export default function CalendarPanel({
   const [endMode, setEndMode] = useState("never"); // never | until | count
   const [until, setUntil] = useState("");
   const [count, setCount] = useState(10);
+
+  const [formErr, setFormErr] = useState("");
+  const [saveMsg, setSaveMsg] = useState("");
 
   // keep end synced when start changes
   const startLocal = combineLocal(sDate, sTime);
@@ -89,46 +125,68 @@ export default function CalendarPanel({
     }
   };
 
+  // Validation: base + recurrence guardrails
   const inlineError = useMemo(() => {
     if (!showAdd) return "";
     if (!title.trim()) return "Title is required.";
     if (!startLocal || !endLocal) return "Start and end are required.";
     if (new Date(startLocal) < new Date()) return "Start time is in the past.";
     if (new Date(endLocal) <= new Date(startLocal)) return "End must be after start.";
+
+    if (freq !== "none") {
+      if (endMode === "never") return "Repeating events must have an end (count or until).";
+      if (endMode === "count" && (!count || count < 1 || count > 12))
+        return "Occurrences must be between 1 and 12.";
+      if (endMode === "until") {
+        if (!until) return "Please choose an 'until' date.";
+        const months = monthsBetweenInclusive(startLocal, new Date(until).toISOString());
+        if (months > 12) return "Repeating events must end within 12 months.";
+      }
+    }
     return "";
-  }, [showAdd, title, startLocal, endLocal]);
+  }, [showAdd, title, startLocal, endLocal, freq, endMode, count, until]);
 
   const saveEvent = async () => {
-    if (inlineError) return;
-    await createEvent({
-      team_id: team.id,
-      title: title.trim(),
-      description: desc || null,
-      location: loc || null,
-      category: cat,
-      tz,
-      starts_at: new Date(startLocal).toISOString(),
-      ends_at: new Date(endLocal).toISOString(),
-      recur_freq: freq,
-      recur_interval: interval,
-      recur_byday: freq === "weekly" ? byDay : null,
-      recur_bymonthday: (freq === "monthly" && monthMode === "bymonthday") ? byMonthDay : null,
-      recur_week_of_month: (freq === "monthly" && monthMode === "bynth") ? weekOfMonth : null,
-      recur_day_of_week: (freq === "monthly" && monthMode === "bynth") ? dayOfWeek : null,
-      recur_count: endMode === "count" ? count : null,
-      recur_until: endMode === "until" ? until : null,
-    });
-    setShowAdd(false);
-    setTitle(""); setDesc(""); setLoc(""); setCat("rehearsal");
-    setSDate(""); setSTime(""); setEDate(""); setETime(""); setTz(defaultTZ);
-    setFreq("none"); setInterval(1); setByDay(["MO"]);
-    setMonthMode("bymonthday"); setByMonthDay([1]); setWeekOfMonth(1); setDayOfWeek("MO");
-    setEndMode("never"); setUntil(""); setCount(10);
+    setFormErr(""); setSaveMsg("");
+    if (inlineError) { setFormErr(inlineError); return; }
+    try {
+      await createEvent({
+        team_id: team.id,
+        title: title.trim(),
+        description: desc || null,
+        location: loc || null,
+        category: cat,
+        tz,
+        starts_at: new Date(startLocal).toISOString(),
+        ends_at: new Date(endLocal).toISOString(),
+        recur_freq: freq,
+        recur_interval: interval,
+        recur_byday: freq === "weekly" ? byDay : null,
+        recur_bymonthday: (freq === "monthly" && monthMode === "bymonthday") ? byMonthDay : null,
+        recur_week_of_month: (freq === "monthly" && monthMode === "bynth") ? weekOfMonth : null,
+        recur_day_of_week: (freq === "monthly" && monthMode === "bynth") ? dayOfWeek : null,
+        recur_count: endMode === "count" ? count : null,
+        recur_until: endMode === "until" ? until : null,
+      });
+      // reset form & close
+      setShowAdd(false);
+      setTitle(""); setDesc(""); setLoc(""); setCat("rehearsal");
+      setSDate(""); setSTime(""); setEDate(""); setETime(""); setTz(defaultTZ);
+      setFreq("none"); setInterval(1); setByDay(["MO"]);
+      setMonthMode("bymonthday"); setByMonthDay([1]); setWeekOfMonth(1); setDayOfWeek("MO");
+      setEndMode("never"); setUntil(""); setCount(10);
+      setSaveMsg("Event created ✓");
+      setTimeout(()=>setSaveMsg(""), 1200);
+    } catch (e) {
+      setFormErr(e.message || "Failed to save event");
+    }
   };
 
   // --- Editing (one open at a time) ---
   const [editingKey, setEditingKey] = useState(null); // `${prefix}${eventId}@${ms}`
   const [edit, setEdit] = useState(null);             // data for the open editor
+  const [editErr, setEditErr] = useState("");
+  const [editBusy, setEditBusy] = useState(false);
   const [expanded, setExpanded] = useState(() => new Set()); // title toggles
 
   const toggleExpanded = (rowKey) => {
@@ -141,67 +199,95 @@ export default function CalendarPanel({
 
   const startEdit = (occ, rowKey) => {
     setEditingKey(rowKey);
+    setEditErr("");
     const s = splitLocal(toLocalInput(occ.occ_start));
     const e = splitLocal(toLocalInput(occ.occ_end));
     setEdit({
       title: occ.title, description: occ.description || "", location: occ.location || "",
       tz: occ.tz, category: occ.category,
       startDate: s.date, startTime: s.time, endDate: e.date, endTime: e.time,
-      base: occ, // includes base_start for RPCs
+      base: occ, // includes base_start for RPCs + recur fields for series checks
     });
   };
-  const cancelEdit = () => { setEditingKey(null); setEdit(null); };
+  const cancelEdit = () => { setEditingKey(null); setEdit(null); setEditErr(""); setEditBusy(false); };
 
-  // Save just this occurrence (or standalone event)
-  const saveOccurrenceOnly = async () => {
+  const validateEditTimes = () => {
     const s = combineLocal(edit.startDate, edit.startTime);
     const e = combineLocal(edit.endDate, edit.endTime);
-    if (!edit.title.trim()) return alert("Title required.");
-    if (new Date(s) < new Date()) return alert("Start is in the past.");
-    if (new Date(e) <= new Date(s)) return alert("End must be after start.");
-    await patchOccurrence(edit.base.id, (edit.base.base_start || edit.base.occ_start).toISOString(), {
-      title: edit.title, description: edit.description || null, location: edit.location || null,
-      tz: edit.tz, category: edit.category,
-      starts_at: new Date(s).toISOString(), ends_at: new Date(e).toISOString(),
-    });
-    cancelEdit();
-    await refreshCalendar();
+    if (!edit.title.trim()) return "Title required.";
+    if (!s || !e) return "Start and end are required.";
+    if (new Date(s) < new Date()) return "Start is in the past.";
+    if (new Date(e) <= new Date(s)) return "End must be after start.";
+    return "";
+  };
+
+  // Save just this occurrence (or standalone)
+  const saveOccurrenceOnly = async () => {
+    const err = validateEditTimes();
+    if (err) { setEditErr(err); return; }
+    setEditBusy(true); setEditErr("");
+    try {
+      const sISO = new Date(combineLocal(edit.startDate, edit.startTime)).toISOString();
+      const eISO = new Date(combineLocal(edit.endDate, edit.endTime)).toISOString();
+      await patchOccurrence(edit.base.id, (edit.base.base_start || edit.base.occ_start).toISOString(), {
+        title: edit.title, description: edit.description || null, location: edit.location || null,
+        tz: edit.tz, category: edit.category,
+        starts_at: sISO, ends_at: eISO,
+      });
+      cancelEdit();
+      await refreshCalendar();
+    } catch (e) {
+      setEditErr(e.message || "Save failed");
+    } finally { setEditBusy(false); }
   };
 
   // Save from now on (series)
   const saveFuture = async () => {
+    const err = validateEditTimes();
+    if (err) { setEditErr(err); return; }
     if (!window.confirm("Apply these changes to all FUTURE occurrences in this team’s series? This affects the whole team.")) return;
-    const sISO = new Date(combineLocal(edit.startDate, edit.startTime)).toISOString();
-    const eISO = new Date(combineLocal(edit.endDate, edit.endTime)).toISOString();
-    await applyFutureEdits(edit.base.id, (edit.base.base_start || edit.base.occ_start).toISOString(), {
-      title: edit.title, description: edit.description || null, location: edit.location || null,
-      tz: edit.tz, category: edit.category, starts_at: sISO, ends_at: eISO,
-    });
-    cancelEdit();
-    await refreshCalendar();
+    setEditBusy(true); setEditErr("");
+    try {
+      const sISO = new Date(combineLocal(edit.startDate, edit.startTime)).toISOString();
+      const eISO = new Date(combineLocal(edit.endDate, edit.endTime)).toISOString();
+      await applyFutureEdits(edit.base.id, (edit.base.base_start || edit.base.occ_start).toISOString(), {
+        title: edit.title, description: edit.description || null, location: edit.location || null,
+        tz: edit.tz, category: edit.category, starts_at: sISO, ends_at: eISO,
+      });
+      cancelEdit();
+      await refreshCalendar();
+    } catch (e) {
+      setEditErr(e.message || "Save failed");
+    } finally { setEditBusy(false); }
   };
 
   // Save entire series (in loaded range)
   const saveSeries = async () => {
+    const err = validateEditTimes();
+    if (err) { setEditErr(err); return; }
     if (!window.confirm("Apply these changes to the ENTIRE team series in the loaded range? This affects the whole team.")) return;
-    const sISO = new Date(combineLocal(edit.startDate, edit.startTime)).toISOString();
-    const eISO = new Date(combineLocal(edit.endDate, edit.endTime)).toISOString();
-    await applySeriesEdits(edit.base.id, {
-      title: edit.title, description: edit.description || null, location: edit.location || null,
-      tz: edit.tz, category: edit.category, starts_at: sISO, ends_at: eISO,
-    });
-    cancelEdit();
-    await refreshCalendar();
+    setEditBusy(true); setEditErr("");
+    try {
+      const sISO = new Date(combineLocal(edit.startDate, edit.startTime)).toISOString();
+      const eISO = new Date(combineLocal(edit.endDate, edit.endTime)).toISOString();
+      await applySeriesEdits(edit.base.id, {
+        title: edit.title, description: edit.description || null, location: edit.location || null,
+        tz: edit.tz, category: edit.category, starts_at: sISO, ends_at: eISO,
+      });
+      cancelEdit();
+      await refreshCalendar();
+    } catch (e) {
+      setEditErr(e.message || "Save failed");
+    } finally { setEditBusy(false); }
   };
 
-  // Delete helpers & confirmations (use base_start key) then close editor
+  // Delete helpers (use base_start key) then close editor
   const confirmDeleteOccurrence = async (occ) => {
     if (!window.confirm("Delete this occurrence for everyone on the team?")) return;
     try {
       await deleteOccurrence(occ.id, (occ.base_start || occ.occ_start).toISOString());
     } finally {
-      setEditingKey(null);
-      setEdit(null);
+      cancelEdit();
       await refreshCalendar();
     }
   };
@@ -216,8 +302,7 @@ export default function CalendarPanel({
     try {
       await deleteSeries(eventId);
     } finally {
-      setEditingKey(null);
-      setEdit(null);
+      cancelEdit();
       await refreshCalendar();
     }
   };
@@ -231,6 +316,17 @@ export default function CalendarPanel({
       <div style={{ opacity: 0.8, fontSize: 12 }}>
         {dateStr} · {fmtTime(occ.occ_start, occ.tz)}–{fmtTime(occ.occ_end, occ.tz)} ({occ.tz}, {duration})
         {occ.location ? ` · ${occ.location}` : ""}
+      </div>
+    );
+  };
+
+  const renderDetailsBlock = (occ, isExpanded) => {
+    if (!isExpanded) return null;
+    return (
+      <div style={{ marginTop: 6, padding: "8px 10px", background: "rgba(255,255,255,0.04)", borderRadius: 8 }}>
+        <div style={{ opacity: 0.9, fontSize: 13, whiteSpace: "pre-wrap" }}>
+          {occ.description?.trim() ? occ.description : <span style={{ opacity: 0.7 }}>(No description)</span>}
+        </div>
       </div>
     );
   };
@@ -257,9 +353,7 @@ export default function CalendarPanel({
             </button>{" "}
             <span style={{ opacity: 0.7 }}>({occ.category})</span>
             <DateAndTime occ={occ} />
-            {isExpanded && occ.description && (
-              <div style={{ marginTop: 4, opacity: 0.85, fontSize: 13 }}>{occ.description}</div>
-            )}
+            {renderDetailsBlock(occ, isExpanded)}
           </div>
 
           {/* Actions */}
@@ -278,6 +372,7 @@ export default function CalendarPanel({
         {/* Edit panel (only one at a time) */}
         {!past && isEditing && (
           <div style={{ display: "grid", gap: 6, marginTop: 8 }}>
+            {editErr && <ErrorText>{editErr}</ErrorText>}
             <Input placeholder="Title" value={edit.title} onChange={(e) => setEdit({ ...edit, title: e.target.value })} />
             <Input placeholder="Description" value={edit.description} onChange={(e) => setEdit({ ...edit, description: e.target.value })} />
             <Input placeholder="Location" value={edit.location} onChange={(e) => setEdit({ ...edit, location: e.target.value })} />
@@ -291,7 +386,15 @@ export default function CalendarPanel({
                 <option value="social">Social</option>
                 <option value="performance">Performance</option>
               </select>
-              <Input placeholder="Time zone" value={edit.tz} onChange={(e) => setEdit({ ...edit, tz: e.target.value })} />
+
+              {/* Time zone dropdown */}
+              <select
+                value={edit.tz}
+                onChange={(e) => setEdit({ ...edit, tz: e.target.value })}
+                style={styles.select}
+              >
+                {MAJOR_TIMEZONES.map(z => <option key={z} value={z}>{z}</option>)}
+              </select>
             </div>
 
             {/* Date+Time */}
@@ -330,12 +433,24 @@ export default function CalendarPanel({
 
             {/* Save options + Delete (in edit) */}
             <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-              <Button onClick={saveOccurrenceOnly}>{(edit?.base?.recur_freq && edit.base.recur_freq !== "none") ? "Save this occurrence" : "Save"}</Button>
-              {(edit?.base?.recur_freq && edit.base.recur_freq !== "none") && <Button onClick={saveFuture}>Save from now on (series)</Button>}
-              {(edit?.base?.recur_freq && edit.base.recur_freq !== "none") && <Button onClick={saveSeries}>Save entire series</Button>}
-              <DangerButton onClick={() => confirmDeleteOccurrence(edit.base)}>Delete (this occurrence)</DangerButton>
-              {(edit?.base?.recur_freq && edit.base.recur_freq !== "none") && <DangerButton onClick={() => confirmDeleteSeries(edit.base.id)}>Delete series…</DangerButton>}
-              <GhostButton onClick={cancelEdit}>Cancel</GhostButton>
+              <Button onClick={saveOccurrenceOnly} disabled={editBusy}>
+                {(edit?.base?.recur_freq && edit.base.recur_freq !== "none") ? "Save this occurrence" : "Save"}
+              </Button>
+              {(edit?.base?.recur_freq && edit.base.recur_freq !== "none") && (
+                <>
+                  <Button onClick={saveFuture} disabled={editBusy}>Save from now on (series)</Button>
+                  <Button onClick={saveSeries} disabled={editBusy}>Save entire series</Button>
+                </>
+              )}
+              <DangerButton onClick={() => confirmDeleteOccurrence(edit.base)} disabled={editBusy}>
+                Delete (this occurrence)
+              </DangerButton>
+              {(edit?.base?.recur_freq && edit.base.recur_freq !== "none") && (
+                <DangerButton onClick={() => confirmDeleteSeries(edit.base.id)} disabled={editBusy}>
+                  Delete series…
+                </DangerButton>
+              )}
+              <GhostButton onClick={cancelEdit} disabled={editBusy}>Cancel</GhostButton>
             </div>
             <div style={{ opacity: 0.7, fontSize: 12 }}>
               Note: These actions affect <strong>the whole team</strong>, not just you.
@@ -356,6 +471,7 @@ export default function CalendarPanel({
         <button onClick={() => setTab("past")} style={tab==="past" ? styles.tabActive : styles.tabBtn}>Past</button>
       </div>
 
+      {saveMsg && <InfoText>{saveMsg}</InfoText>}
       {tab === "upcoming" ? (
         <>
           {upcomingOcc.length === 0 ? (
@@ -372,7 +488,7 @@ export default function CalendarPanel({
               <GhostButton onClick={() => setShowAdd(true)}>+ Add event</GhostButton>
             ) : (
               <>
-                {(inlineError) && <ErrorText>{inlineError}</ErrorText>}
+                {(inlineError || formErr) && <ErrorText>{inlineError || formErr}</ErrorText>}
                 <div style={{ display: "grid", gap: 8 }}>
                   <Input placeholder="Title" value={title} onChange={(e) => setTitle(e.target.value)} />
                   <Input placeholder="Description (optional)" value={desc} onChange={(e) => setDesc(e.target.value)} />
@@ -383,7 +499,11 @@ export default function CalendarPanel({
                       <option value="social">Social</option>
                       <option value="performance">Performance</option>
                     </select>
-                    <Input placeholder="Time zone (e.g. Europe/London)" value={tz} onChange={(e) => setTz(e.target.value)} />
+
+                    {/* Time zone dropdown */}
+                    <select value={tz} onChange={(e) => setTz(e.target.value)} style={styles.select}>
+                      {MAJOR_TIMEZONES.map(z => <option key={z} value={z}>{z}</option>)}
+                    </select>
                   </div>
                   <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
                     <label>Start:&nbsp;<input type="date" value={sDate} onChange={(e)=>onChangeStartDate(e.target.value)} /></label>
@@ -459,21 +579,34 @@ export default function CalendarPanel({
                       )}
                     </div>
 
-                    {/* End conditions */}
+                    {/* End conditions with limits */}
                     {freq !== "none" && (
                       <div style={{ display: "flex", gap: 12, alignItems: "center", flexWrap: "wrap", marginTop: 8 }}>
                         <span style={{ opacity: 0.8 }}>Ends:</span>
                         <label style={{ display: "inline-flex", gap: 6, alignItems: "center" }}>
-                          <input type="radio" checked={endMode==="never"} onChange={()=>setEndMode("never")} /> Never
+                          <input
+                            type="radio"
+                            checked={endMode==="never"}
+                            onChange={()=>setEndMode("never")}
+                          /> Never (disabled)
                         </label>
                         <label style={{ display: "inline-flex", gap: 6, alignItems: "center" }}>
-                          <input type="radio" checked={endMode==="until"} onChange={()=>setEndMode("until")} /> Until
+                          <input
+                            type="radio"
+                            checked={endMode==="until"}
+                            onChange={()=>setEndMode("until")}
+                          /> Until
                           <input type="date" value={until} onChange={(e)=>setUntil(e.target.value)} disabled={endMode!=="until"} />
+                          <span style={{ opacity: 0.7, fontSize: 12 }}>(≤ 12 months)</span>
                         </label>
                         <label style={{ display: "inline-flex", gap: 6, alignItems: "center" }}>
-                          <input type="radio" checked={endMode==="count"} onChange={()=>setEndMode("count")} /> For
-                          <Input type="number" min={1} value={count} onChange={(e)=>setCount(parseInt(e.target.value || "1",10))} style={{ width: 80 }} />
-                          occurrence(s)
+                          <input
+                            type="radio"
+                            checked={endMode==="count"}
+                            onChange={()=>setEndMode("count")}
+                          /> For
+                          <Input type="number" min={1} max={12} value={count} onChange={(e)=>setCount(parseInt(e.target.value || "1",10))} style={{ width: 80 }} />
+                          occurrence(s) (max 12)
                         </label>
                       </div>
                     )}
