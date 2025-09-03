@@ -81,6 +81,7 @@ export async function createTeamEvent(payload) {
 }
 
 
+/** Delete whole series (or one-off) by removing the base row. */
 export async function deleteTeamEvent(eventId) {
   const { error } = await supabase
     .from("team_events")
@@ -88,6 +89,7 @@ export async function deleteTeamEvent(eventId) {
     .eq("id", eventId);
   if (error) throw new Error(error.message);
 }
+
 
 
 // --- Overrides/series helpers ---
@@ -99,6 +101,7 @@ export async function listTeamEventOverrides(teamId, fromIso, toIso) {
   return data || [];
 }
 
+/** Cancel ONE occurrence by base start (writes/updates override: canceled=true). */
 export async function deleteEventOccurrence(eventId, baseStartIso) {
   const { error } = await supabase
     .from("team_event_overrides")
@@ -109,7 +112,6 @@ export async function deleteEventOccurrence(eventId, baseStartIso) {
   if (error) throw new Error(error.message);
 }
 
-/** Edit ONE occurrence (creates/updates override for that base start). */
 export async function patchEventOccurrence(eventId, baseStartIso, patch) {
   const row = { event_id: eventId, occ_start: baseStartIso, canceled: false, ...patch };
   const { error } = await supabase
