@@ -57,3 +57,44 @@ export async function addMemberByEmailRPC(teamId, email, role = "member") {
   // no return data
 }
 
+// --- EVENTS API ---
+// list events that may occur within [from, to] (server returns base events, client expands)
+export async function listTeamEvents(teamId, fromIso, toIso) {
+  const { data, error } = await supabase.rpc("list_team_events", {
+    p_team_id: teamId,
+    p_from: fromIso,
+    p_to: toIso,
+  });
+  if (error) throw error;
+  return data || [];
+}
+
+// create event (with recurrence fields)
+export async function createTeamEvent(payload) {
+  const { data, error } = await supabase.rpc("create_team_event", {
+    p_team_id: payload.team_id,
+    p_title: payload.title,
+    p_description: payload.description || null,
+    p_location: payload.location || null,
+    p_category: payload.category,           // 'rehearsal' | 'social' | 'performance'
+    p_tz: payload.tz,                       // IANA TZ string
+    p_starts_at: payload.starts_at,         // ISO
+    p_ends_at: payload.ends_at,             // ISO
+    p_recur_freq: payload.recur_freq || 'none',          // 'none'|'weekly'|'monthly'
+    p_recur_interval: payload.recur_interval || 1,       // 1,2,3...
+    p_recur_byday: payload.recur_byday || null,          // ['MO','WE']
+    p_recur_bymonthday: payload.recur_bymonthday || null,// [15]
+    p_recur_week_of_month: payload.recur_week_of_month || null, // 1..5 or -1
+    p_recur_day_of_week: payload.recur_day_of_week || null,     // 'MO'
+    p_recur_count: payload.recur_count || null,
+    p_recur_until: payload.recur_until || null,          // '2025-12-31'
+  });
+  if (error) throw error;
+  return data;
+}
+
+export async function deleteTeamEvent(eventId) {
+  const { error } = await supabase.rpc("delete_team_event", { p_event_id: eventId });
+  if (error) throw error;
+}
+
