@@ -41,37 +41,61 @@ export function useCalendarData(teamId) {
     [eventsBase, windowFrom, windowTo]
   );
 
-  // Merged occurrences (WITH overrides) — use for display
+// Merged occurrences (WITH overrides) — use for display
   const occurrencesAll = useMemo(() => {
-    const base = baseOccurrencesAll;
-    if (!overrides.length) return base;
-    const map = new Map();
-    for (const o of overrides) map.set(`${o.event_id}|${new Date(o.occ_start).toISOString()}`, o);
-    const out = [];
+    // 1) expand from base
+    const base = expandOccurrences(eventsBase, windowFrom, windowTo);
+
+    // 2) apply overrides
+    const oMap = new Map();
+    for (const o of overrides) {
+      // key by the ORIGINAL base occurrence start time for that event
+      oMap.set(`${o.event_id}|${new Date(o.occ_start).toISOString()}`, o);
+    }
+
+    const merged = [];
     for (const e of base) {
       const key = `${e.id}|${e.occ_start.toISOString()}`;
-      const o = map.get(key);
-      if (!o) { out.push(e); continue; }
-      if (o.canceled) continue;
-      out.push({
-        ...e,
-        title: o.title ?? e.title,
-        description: o.description ?? e.description,
-        location: o.location ?? e.location,
-        tz: o.tz ?? e.tz,
-        occ_start: o.starts_at ? new Date(o.starts_at) : e.occ_start,
-        occ_end: o.ends_at ? new Date(o.ends_at) : e.occ_end,
-        category: o.category ?? e.category,
-      });
+      const o = oMap.get(key);
+      if (!o) {
+        merged.push(e);
+      } else {
+        if (o.canceled) continue;
+        merged.push({
+          ...e,
+          title: o.title ?? e.title,
+          description: o.description ?? e.description,
+          location: o.location ?? e.location,
+          tz: o.tz ?? e.tz,
+          // IMPORTANT: overrides may shift the occurrence time
+          occ_start: o.starts_at ? new Date(o.starts_at) : e.occ_start,
+          occ_end:   o.ends_at   ? new Date(o.ends_at)   : e.occ_end,
+          category: o.category ?? e.category,
+        });
+      }
     }
-    out.sort((a,b)=>a.occ_start-b.occ_start);
-    return out;
-  }, [baseOccurrencesAll, overrides]);
 
-  const now = new Date();
-  const upcomingOcc = useMemo(() => occurrencesAll.filter(o => o.occ_start >= now), [occurrencesAll]);
+    // 3) DE-DUPE by (eventId, occ_start) after merge to avoid any double-rows
+    const dedup = new Map();
+    for (const item of merged) {
+      const k = `${item.id}|${item.occ_start.getTime()}`;
+      dedup.set(k, item); // last write wins
+    }
+
+    const out = Array.from(dedup.values());
+    out.sort((a,b) => a.occ_start - b.occ_start);
+    return out;
+  }, [eventsBase, overrides, windowFrom, windowTo]);
+
+  // Partition by END time so "ongoing now" is NOT Past
+  const upcomingOcc = useMemo(() => {
+    const now = Date.now();
+    return occurrencesAll.filter(o => o.occ_end.getTime() >= now);
+  }, [occurrencesAll]);
+
   const pastOccDesc = useMemo(() => {
-    const arr = occurrencesAll.filter(o => o.occ_start < now);
+    const now = Date.now();
+    const arr = occurrencesAll.filter(o => o.occ_end.getTime() < now);
     arr.sort((a, b) => b.occ_start - a.occ_start);
     return arr;
   }, [occurrencesAll]);
