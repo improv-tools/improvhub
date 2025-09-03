@@ -23,7 +23,7 @@ export default function CalendarPanel({
   upcomingOcc,
   pastSlice, pastHasMore, onPastMore,
   createEvent, deleteSeries, deleteOccurrence, patchOccurrence, refreshCalendar,
-  // helpers from hook (may be undefined in some builds):
+  // helpers from hook (may be undefined; panel has fallbacks too):
   getEventById, summarizeRecurrence, countFutureOccurrencesInSeries,
   applyFutureEdits, applySeriesEdits,
 }) {
@@ -150,7 +150,7 @@ export default function CalendarPanel({
         recur_count: endMode === "count" ? count : null,
         recur_until: endMode === "until" ? until : null,
       });
-      // reset form & close
+      // reset
       setShowAdd(false);
       setTitle(""); setDesc(""); setLoc(""); setCat("rehearsal");
       setSDate(""); setSTime(""); setEDate(""); setETime(""); setTz(defaultTZ);
@@ -173,7 +173,7 @@ export default function CalendarPanel({
   const toggleExpanded = (rowKey) => {
     setExpanded(prev => {
       const n = new Set(prev);
-      if (n.has(rowKey)) n.delete(rowKey); else n.add(rowKey);
+      n.has(rowKey) ? n.delete(rowKey) : n.add(rowKey);
       return n;
     });
   };
@@ -202,26 +202,25 @@ export default function CalendarPanel({
     return "";
   };
 
-  // --- Client-side fallbacks for series edits if helpers not provided ---
-  const batchPatch = async (targets, patch) => {
-    for (const occ of targets) {
-      await patchOccurrence(occ.id, (occ.base_start || occ.occ_start).toISOString(), patch);
-    }
-  };
-  const fallbackSaveFuture = async (eventId, fromBaseISO, patch) => {
+  // Client-side fallbacks (if props not provided)
+  const fallbackFutureEdits = async (eventId, fromBaseISO, patch) => {
     const fromMs = new Date(fromBaseISO).getTime();
     const now = Date.now();
     const targets = occurrencesAll.filter(o =>
       o.id === eventId &&
-      o.base_start && o.base_start.getTime() >= fromMs &&
+      (o.base_start?.getTime?.() ?? o.occ_start.getTime()) >= fromMs &&
       o.occ_end.getTime() >= now
     );
-    await batchPatch(targets, patch);
+    for (const occ of targets) {
+      await patchOccurrence(eventId, (occ.base_start || occ.occ_start).toISOString(), patch);
+    }
   };
-  const fallbackSaveSeries = async (eventId, patch) => {
+  const fallbackSeriesEdits = async (eventId, patch) => {
     const now = Date.now();
     const targets = occurrencesAll.filter(o => o.id === eventId && o.occ_end.getTime() >= now);
-    await batchPatch(targets, patch);
+    for (const occ of targets) {
+      await patchOccurrence(eventId, (occ.base_start || occ.occ_start).toISOString(), patch);
+    }
   };
 
   // Save just this occurrence (or standalone)
@@ -259,7 +258,7 @@ export default function CalendarPanel({
       if (typeof applyFutureEdits === "function") {
         await applyFutureEdits(edit.base.id, (edit.base.base_start || edit.base.occ_start).toISOString(), patch);
       } else {
-        await fallbackSaveFuture(edit.base.id, (edit.base.base_start || edit.base.occ_start).toISOString(), patch);
+        await fallbackFutureEdits(edit.base.id, (edit.base.base_start || edit.base.occ_start).toISOString(), patch);
       }
       cancelEdit();
       await refreshCalendar();
@@ -284,7 +283,7 @@ export default function CalendarPanel({
       if (typeof applySeriesEdits === "function") {
         await applySeriesEdits(edit.base.id, patch);
       } else {
-        await fallbackSaveSeries(edit.base.id, patch);
+        await fallbackSeriesEdits(edit.base.id, patch);
       }
       cancelEdit();
       await refreshCalendar();
@@ -307,10 +306,14 @@ export default function CalendarPanel({
   const confirmDeleteSeries = async (eventId) => {
     const ev = typeof getEventById === "function" ? getEventById(eventId) : null;
     const summary = ev && typeof summarizeRecurrence === "function" ? summarizeRecurrence(ev) : "";
-    const remaining = typeof countFutureOccurrencesInSeries === "function" ? countFutureOccurrencesInSeries(eventId) : occurrencesAll.filter(o => o.id === eventId && o.occ_end.getTime() >= Date.now()).length;
+    const remaining = typeof countFutureOccurrencesInSeries === "function"
+      ? countFutureOccurrencesInSeries(eventId)
+      : occurrencesAll.filter(o => o.id === eventId && o.occ_end.getTime() >= Date.now()).length;
+
     if (!window.confirm(
       `Delete the ENTIRE series for the team?\n\n${ev?.title || "This series"}${summary ? ` — ${summary}` : ""}\nThis will remove ${remaining} future occurrence(s).`
     )) return;
+
     try {
       if (typeof deleteSeries === "function") {
         await deleteSeries(eventId);
@@ -407,8 +410,6 @@ export default function CalendarPanel({
                 <option value="social">Social</option>
                 <option value="performance">Performance</option>
               </select>
-
-              {/* Time zone dropdown */}
               <select
                 value={edit.tz}
                 onChange={(e) => setEdit({ ...edit, tz: e.target.value })}
