@@ -94,8 +94,11 @@ export async function createTeamEvent(payload) {
 }
 
 export async function deleteTeamEvent(eventId) {
-  const { error } = await supabase.rpc("delete_team_event", { p_event_id: eventId });
-  if (error) throw error;
+  const { error } = await supabase
+    .from("team_events")
+    .delete()
+    .eq("id", eventId);
+  if (error) throw new Error(error.message);
 }
 
 // --- Overrides/series helpers ---
@@ -107,11 +110,17 @@ export async function listTeamEventOverrides(teamId, fromIso, toIso) {
   return data || [];
 }
 
-export async function deleteEventOccurrence(eventId, occStartIso) {
-  const { error } = await supabase.rpc("delete_event_occurrence", {
-    p_event_id: eventId, p_occ_start: occStartIso,
-  });
-  if (error) throw error;
+export async function deleteEventOccurrence(eventId, baseStartIso) {
+  const { data, error } = await supabase
+    .from("team_event_overrides")
+    .upsert(
+      [{ event_id: eventId, occ_start: baseStartIso, canceled: true }],
+      { onConflict: "event_id,occ_start" }
+    )
+    .select();
+
+  if (error) throw new Error(error.message);
+  return data;
 }
 
 export async function upsertOccurrenceOverride(eventId, occStartIso, patch) {
