@@ -69,29 +69,17 @@ export async function listTeamEvents(teamId, fromIso, toIso) {
   return data || [];
 }
 
-// create event (with recurrence fields)
+/** Create a base event (one-off or series). */
 export async function createTeamEvent(payload) {
-  const { data, error } = await supabase.rpc("create_team_event", {
-    p_team_id: payload.team_id,
-    p_title: payload.title,
-    p_description: payload.description || null,
-    p_location: payload.location || null,
-    p_category: payload.category,           // 'rehearsal' | 'social' | 'performance'
-    p_tz: payload.tz,                       // IANA TZ string
-    p_starts_at: payload.starts_at,         // ISO
-    p_ends_at: payload.ends_at,             // ISO
-    p_recur_freq: payload.recur_freq || 'none',          // 'none'|'weekly'|'monthly'
-    p_recur_interval: payload.recur_interval || 1,       // 1,2,3...
-    p_recur_byday: payload.recur_byday || null,          // ['MO','WE']
-    p_recur_bymonthday: payload.recur_bymonthday || null,// [15]
-    p_recur_week_of_month: payload.recur_week_of_month || null, // 1..5 or -1
-    p_recur_day_of_week: payload.recur_day_of_week || null,     // 'MO'
-    p_recur_count: payload.recur_count || null,
-    p_recur_until: payload.recur_until || null,          // '2025-12-31'
-  });
-  if (error) throw error;
+  const { data, error } = await supabase
+    .from("team_events")
+    .insert([payload])
+    .select()
+    .single();
+  if (error) throw new Error(error.message);
   return data;
 }
+
 
 export async function deleteTeamEvent(eventId) {
   const { error } = await supabase
@@ -100,6 +88,7 @@ export async function deleteTeamEvent(eventId) {
     .eq("id", eventId);
   if (error) throw new Error(error.message);
 }
+
 
 // --- Overrides/series helpers ---
 export async function listTeamEventOverrides(teamId, fromIso, toIso) {
@@ -111,16 +100,22 @@ export async function listTeamEventOverrides(teamId, fromIso, toIso) {
 }
 
 export async function deleteEventOccurrence(eventId, baseStartIso) {
-  const { data, error } = await supabase
+  const { error } = await supabase
     .from("team_event_overrides")
     .upsert(
       [{ event_id: eventId, occ_start: baseStartIso, canceled: true }],
       { onConflict: "event_id,occ_start" }
-    )
-    .select();
-
+    );
   if (error) throw new Error(error.message);
-  return data;
+}
+
+/** Edit ONE occurrence (creates/updates override for that base start). */
+export async function patchEventOccurrence(eventId, baseStartIso, patch) {
+  const row = { event_id: eventId, occ_start: baseStartIso, canceled: false, ...patch };
+  const { error } = await supabase
+    .from("team_event_overrides")
+    .upsert([row], { onConflict: "event_id,occ_start" });
+  if (error) throw new Error(error.message);
 }
 
 export async function upsertOccurrenceOverride(eventId, occStartIso, patch) {
