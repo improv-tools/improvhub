@@ -12,6 +12,10 @@ import {
   listTeamEvents,
   createTeamEvent,
   deleteTeamEvent,
+  listTeamEventOverrides,
+  deleteEventOccurrence,
+  upsertOccurrenceOverride,
+  splitEventSeries,
 } from "teams/teams.api";
 import {
   H1,
@@ -187,6 +191,7 @@ export default function TeamsPanel() {
   const [eventsBase, setEventsBase] = useState([]);
   const [calErr, setCalErr] = useState("");
   const [showAddEvent, setShowAddEvent] = useState(false);
+  const [overrides, setOverrides] = useState([]);
 
   // add event form fields
   const defaultTZ = Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
@@ -286,23 +291,59 @@ export default function TeamsPanel() {
     const d = new Date(); d.setMonth(d.getMonth()+6); d.setHours(23,59,59,999); return d.toISOString();
   }, []);
 
-  const refreshCalendar = async () => {
-    if (!selected) return;
-    setCalErr("");
-    try {
-      const evs = await listTeamEvents(selected.id, windowFrom, windowTo);
-      setEventsBase(evs);
-    } catch (e) {
-      setCalErr(e.message || "Failed to load events");
-    }
-  };
+const refreshCalendar = async () => {
+  if (!selected) return;
+  setCalErr("");
+  try {
+    const evs = await listTeamEvents(selected.id, windowFrom, windowTo);
+    setEventsBase(evs);
+
+    // NEW: load per-occurrence overrides/cancellations
+    const ovs = await listTeamEventOverrides(selected.id, windowFrom, windowTo);
+    setOverrides(ovs);
+  } catch (e) {
+    setCalErr(e.message || "Failed to load events");
+  }
+};
 
   useEffect(() => {
     if (selected) refreshCalendar();
     // eslint-disable-next-line
   }, [selected?.id]);
 
-  const occurrences = useMemo(() => expandOccurrences(eventsBase, windowFrom, windowTo), [eventsBase, windowFrom, windowTo]);
+const occurrences = useMemo(() => {
+  const occ = expandOccurrences(eventsBase, windowFrom, windowTo);
+  if (!overrides.length) return occ;
+
+  // Index overrides by "eventId|occurrenceStartIso"
+  const map = new Map();
+  for (const o of overrides) {
+    map.set(`${o.event_id}|${new Date(o.occ_start).toISOString()}`, o);
+  }
+
+  const out = [];
+  for (const e of occ) {
+    const key = `${e.id}|${e.occ_start.toISOString()}`;
+    const o = map.get(key);
+    if (!o) { out.push(e); continue; }
+    if (o.canceled) continue; // skip this occurrence
+
+    // Apply per-occurrence overrides
+    out.push({
+      ...e,
+      title: o.title ?? e.title,
+      description: o.description ?? e.description,
+      location: o.location ?? e.location,
+      tz: o.tz ?? e.tz,
+      occ_start: o.starts_at ? new Date(o.starts_at) : e.occ_start,
+      occ_end:   o.ends_at   ? new Date(o.ends_at)   : e.occ_end,
+      category: o.category ?? e.category,
+    });
+  }
+
+  out.sort((a,b) => a.occ_start - b.occ_start);
+  return out;
+}, [eventsBase, overrides, windowFrom, windowTo]);
 
   const saveEvent = async () => {
     if (!selected) return;
