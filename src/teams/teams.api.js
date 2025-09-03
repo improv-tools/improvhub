@@ -98,3 +98,57 @@ export async function deleteTeamEvent(eventId) {
   if (error) throw error;
 }
 
+// --- Overrides/series helpers ---
+export async function listTeamEventOverrides(teamId, fromIso, toIso) {
+  const { data, error } = await supabase.rpc("list_team_event_overrides", {
+    p_team_id: teamId, p_from: fromIso, p_to: toIso,
+  });
+  if (error) throw error;
+  return data || [];
+}
+
+export async function deleteEventOccurrence(eventId, occStartIso) {
+  const { error } = await supabase.rpc("delete_event_occurrence", {
+    p_event_id: eventId, p_occ_start: occStartIso,
+  });
+  if (error) throw error;
+}
+
+export async function upsertOccurrenceOverride(eventId, occStartIso, patch) {
+  const { error } = await supabase.rpc("upsert_event_occurrence_override", {
+    p_event_id: eventId,
+    p_occ_start: occStartIso,
+    p_title: patch.title ?? null,
+    p_description: patch.description ?? null,
+    p_location: patch.location ?? null,
+    p_tz: patch.tz ?? null,
+    p_starts_at: patch.starts_at ?? null,
+    p_ends_at: patch.ends_at ?? null,
+    p_category: patch.category ?? null,
+  });
+  if (error) throw error;
+}
+
+export async function splitEventSeries(event, fromOccStartIso, patch) {
+  const { data, error } = await supabase.rpc("split_event_series", {
+    p_event_id: event.id,
+    p_from_occ_start: fromOccStartIso,
+    p_title: patch.title ?? event.title,
+    p_description: patch.description ?? event.description,
+    p_location: patch.location ?? event.location,
+    p_category: patch.category ?? event.category,
+    p_tz: patch.tz ?? event.tz,
+    p_starts_at: patch.starts_at ?? event.starts_at,
+    p_ends_at: patch.ends_at ?? event.ends_at,
+    p_recur_freq: event.recur_freq,
+    p_recur_interval: event.recur_interval,
+    p_recur_byday: event.recur_byday,
+    p_recur_bymonthday: event.recur_bymonthday,
+    p_recur_week_of_month: event.recur_week_of_month,
+    p_recur_day_of_week: event.recur_day_of_week,
+    p_recur_count: event.recur_count,
+    p_recur_until: event.recur_until,
+  });
+  if (error) throw error;
+  return data;
+}
