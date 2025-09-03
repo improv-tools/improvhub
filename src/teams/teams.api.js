@@ -1,75 +1,11 @@
-import { supabase } from "lib/supabaseClient";
+// src/teams/teams.api.js
+import { supabase } from "lib/supabase";
 
-// List teams for current user from their membership rows (safe with RLS)
-export async function listMyTeams(userId) {
-  const { data, error } = await supabase
-    .from("team_members")
-    .select("role, teams:team_id ( id, name, display_id )")
-    .eq("user_id", userId);
-  if (error) throw error;
-  return (data || [])
-    .map(r => ({ id: r.teams?.id, name: r.teams?.name, display_id: r.teams?.display_id, role: r.role }))
-    .filter(Boolean);
-}
-
-export async function createTeam(name) {
-  const { data, error } = await supabase.rpc("create_team", { p_name: name });
-  if (error) throw error;
-  return Array.isArray(data) ? data[0] : data;
-}
-
-// === RPCs ===
-export async function listTeamMembersRPC(teamId) {
-  const { data, error } = await supabase.rpc("get_team_members", { p_team_id: teamId });
-  if (error) throw error;
-  return data || [];
-}
-
-export async function setMemberRoleRPC(teamId, userId, role) {
-  const { error } = await supabase.rpc("admin_set_member_role", {
-    p_team_id: teamId,
-    p_user_id: userId,
-    p_role: role,
-  });
-  if (error) throw error;
-}
-
-export async function renameTeamRPC(teamId, newName) {
-  const { data, error } = await supabase.rpc("admin_rename_team", {
-    p_team_id: teamId,
-    p_name: newName,
-  });
-  if (error) throw error;
-  return Array.isArray(data) ? data[0] : data; // { id, name, display_id }
-}
-
-export async function deleteTeamRPC(teamId) {
-  const { error } = await supabase.rpc("admin_delete_team", { p_team_id: teamId });
-  if (error) throw error;
-}
-export async function addMemberByEmailRPC(teamId, email, role = "member") {
-  const { error } = await supabase.rpc("admin_add_member_by_email", {
-    p_team_id: teamId,
-    p_email: email,
-    p_role: role,
-  });
-  if (error) throw error;
-  // no return data
-}
-
-// --- EVENTS API ---
-// list events that may occur within [from, to] (server returns base events, client expands)
-export async function listTeamEvents(teamId, fromIso, toIso) {
-  const { data, error } = await supabase.rpc("list_team_events", {
-    p_team_id: teamId,
-    p_from: fromIso,
-    p_to: toIso,
-  });
-  if (error) throw error;
-  return data || [];
-}
-
-/** Create a base event (one-off or series). */
+/**
+ * Create a base team event (one-off or series).
+ * payload must include: team_id, title, tz, starts_at, ends_at
+ * and optional recurrence fields (recur_*).
+ */
 export async function createTeamEvent(payload) {
   const { data, error } = await supabase
     .from("team_events")
@@ -80,28 +16,10 @@ export async function createTeamEvent(payload) {
   return data;
 }
 
-
-/** Delete whole series (or one-off) by removing the base row. */
-export async function deleteTeamEvent(eventId) {
-  const { error } = await supabase
-    .from("team_events")
-    .delete()
-    .eq("id", eventId);
-  if (error) throw new Error(error.message);
-}
-
-
-
-// --- Overrides/series helpers ---
-export async function listTeamEventOverrides(teamId, fromIso, toIso) {
-  const { data, error } = await supabase.rpc("list_team_event_overrides", {
-    p_team_id: teamId, p_from: fromIso, p_to: toIso,
-  });
-  if (error) throw error;
-  return data || [];
-}
-
-/** Cancel ONE occurrence by base start (writes/updates override: canceled=true). */
+/**
+ * Cancel ONE occurrence by base start.
+ * Writes/updates an override row with canceled = true keyed by (event_id, occ_start).
+ */
 export async function deleteEventOccurrence(eventId, baseStartIso) {
   const { error } = await supabase
     .from("team_event_overrides")
@@ -112,6 +30,19 @@ export async function deleteEventOccurrence(eventId, baseStartIso) {
   if (error) throw new Error(error.message);
 }
 
+/** Delete whole series (or one-off) by removing the base event. */
+export async function deleteTeamEvent(eventId) {
+  const { error } = await supabase
+    .from("team_events")
+    .delete()
+    .eq("id", eventId);
+  if (error) throw new Error(error.message);
+}
+
+/**
+ * Edit ONE occurrence (creates/updates override for that base start).
+ * `patch` can include: title, description, location, tz, category, starts_at, ends_at
+ */
 export async function patchEventOccurrence(eventId, baseStartIso, patch) {
   const row = { event_id: eventId, occ_start: baseStartIso, canceled: false, ...patch };
   const { error } = await supabase
@@ -120,49 +51,25 @@ export async function patchEventOccurrence(eventId, baseStartIso, patch) {
   if (error) throw new Error(error.message);
 }
 
-export async function upsertOccurrenceOverride(eventId, occStartIso, patch) {
-  const { error } = await supabase.rpc("upsert_event_occurrence_override", {
-    p_event_id: eventId,
-    p_occ_start: occStartIso,
-    p_title: patch.title ?? null,
-    p_description: patch.description ?? null,
-    p_location: patch.location ?? null,
-    p_tz: patch.tz ?? null,
-    p_starts_at: patch.starts_at ?? null,
-    p_ends_at: patch.ends_at ?? null,
-    p_category: patch.category ?? null,
-  });
-  if (error) throw error;
+/* ---------------------------- Calendar data fetch --------------------------- */
+
+/** Fetch base events for a team. */
+export async function fetchTeamEvents(teamId) {
+  const { data, error } = await supabase
+    .from("team_events")
+    .select("*")
+    .eq("team_id", teamId);
+  if (error) throw new Error(error.message);
+  return data || [];
 }
 
-export async function splitEventSeries(event, fromOccStartIso, patch) {
-  const { data, error } = await supabase.rpc("split_event_series", {
-    p_event_id: event.id,
-    p_from_occ_start: fromOccStartIso,
-    p_title: patch.title ?? event.title,
-    p_description: patch.description ?? event.description,
-    p_location: patch.location ?? event.location,
-    p_category: patch.category ?? event.category,
-    p_tz: patch.tz ?? event.tz,
-    p_starts_at: patch.starts_at ?? event.starts_at,
-    p_ends_at: patch.ends_at ?? event.ends_at,
-    p_recur_freq: event.recur_freq,
-    p_recur_interval: event.recur_interval,
-    p_recur_byday: event.recur_byday,
-    p_recur_bymonthday: event.recur_bymonthday,
-    p_recur_week_of_month: event.recur_week_of_month,
-    p_recur_day_of_week: event.recur_day_of_week,
-    p_recur_count: event.recur_count,
-    p_recur_until: event.recur_until,
-  });
-  if (error) throw error;
-  return data;
-}
-
-export async function removeTeamMemberRPC(teamId, userId) {
-  const { error } = await supabase.rpc("remove_team_member", {
-    p_team_id: teamId,
-    p_user_id: userId,
-  });
-  if (error) throw error;
+/** Fetch overrides for a set of event ids. */
+export async function fetchTeamEventOverrides(eventIds) {
+  if (!eventIds || eventIds.length === 0) return [];
+  const { data, error } = await supabase
+    .from("team_event_overrides")
+    .select("*")
+    .in("event_id", eventIds);
+  if (error) throw new Error(error.message);
+  return data || [];
 }
