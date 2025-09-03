@@ -1,5 +1,5 @@
 // src/teams/components/CalendarPanel.jsx
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { Button, GhostButton, Input, ErrorText, DangerButton } from "components/ui";
 import { fmtTime, toLocalInput, splitLocal, combineLocal, minutesBetween } from "teams/utils/datetime";
 
@@ -9,12 +9,19 @@ export default function CalendarPanel({
   upcomingOcc,
   pastSlice, pastHasMore, onPastMore,
   createEvent, deleteSeries, deleteOccurrence, patchOccurrence, refreshCalendar,
-  // new helpers from hook:
+  // helpers from hook:
   getEventById, summarizeRecurrence, countFutureOccurrencesInSeries,
   applyFutureEdits, applySeriesEdits,
 }) {
   // Tabs inside Calendar
   const [tab, setTab] = useState("upcoming"); // 'upcoming' | 'past'
+
+  // Clear edit/expand when switching tabs to avoid UI duplication artifacts
+  useEffect(() => {
+    setEditingKey(null);
+    setEdit(null);
+    setExpanded(new Set());
+  }, [tab]);
 
   // Add form state
   const defaultTZ = Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
@@ -120,23 +127,22 @@ export default function CalendarPanel({
     setEndMode("never"); setUntil(""); setCount(10);
   };
 
-  // --- Editing ---
-  const [editingKey, setEditingKey] = useState(null); // `${eventId}|${occIso}`
+  // --- Editing (one at a time) ---
+  const [editingKey, setEditingKey] = useState(null); // `${prefix}${eventId}@${ms}`
   const [edit, setEdit] = useState(null);             // data for the open editor
   const [expanded, setExpanded] = useState(() => new Set()); // title toggles
 
-  const toggleExpanded = (key) => {
+  const toggleExpanded = (rowKey) => {
     setExpanded(prev => {
       const n = new Set(prev);
-      if (n.has(key)) n.delete(key); else n.add(key);
+      if (n.has(rowKey)) n.delete(rowKey); else n.add(rowKey);
       return n;
     });
   };
 
-  const startEdit = (occ) => {
+  const startEdit = (occ, rowKey) => {
     // ensure only one open editor
-    const key = `${occ.id}|${occ.occ_start.toISOString()}`;
-    setEditingKey(key);
+    setEditingKey(rowKey);
     const s = splitLocal(toLocalInput(occ.occ_start));
     const e = splitLocal(toLocalInput(occ.occ_end));
     setEdit({
@@ -210,8 +216,7 @@ export default function CalendarPanel({
   // Render helpers
   const DateAndTime = ({ occ }) => {
     // Show date once, then time range
-    const d = occ.occ_start;
-    const dateStr = d.toLocaleDateString(undefined, { month: "short", day: "2-digit" });
+    const dateStr = occ.occ_start.toLocaleDateString(undefined, { month: "short", day: "2-digit" });
     const mins = minutesBetween(occ.occ_start, occ.occ_end);
     const duration = mins < 180 ? `${Math.floor(mins / 60)}h ${mins % 60}m` : `${(mins / 60).toFixed(1)}h`;
     return (
@@ -222,17 +227,19 @@ export default function CalendarPanel({
     );
   };
 
-  const EventRow = ({ occ, past = false }) => {
-    const key = `${past ? "past|" : ""}${occ.id}|${occ.occ_start.toISOString()}`;
-    const isEditing = editingKey === key;
-    const isExpanded = expanded.has(key);
+  // Pure row renderer (stable top-level <li key=...>) to avoid double-mount weirdness
+  const renderEventRow = (occ, { past }) => {
+    const prefix = past ? "past|" : "";
+    const rowKey = `${prefix}${occ.id}@${occ.occ_start.getTime()}`;
+    const isEditing = editingKey === rowKey;
+    const isExpanded = expanded.has(rowKey);
 
     return (
-      <li key={key} style={{ padding: "10px 0", borderBottom: "1px solid rgba(255,255,255,0.06)", opacity: past ? 0.55 : 1 }}>
+      <li key={rowKey} style={{ padding: "10px 0", borderBottom: "1px solid rgba(255,255,255,0.06)", opacity: past ? 0.55 : 1 }}>
         {/* Summary line */}
         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", gap: 12 }}>
           <div>
-            <strong style={{ cursor: "pointer" }} onClick={() => toggleExpanded(key)}>
+            <strong style={{ cursor: "pointer" }} onClick={() => toggleExpanded(rowKey)}>
               {occ.title}
             </strong>{" "}
             <span style={{ opacity: 0.7 }}>({occ.category})</span>
@@ -245,7 +252,7 @@ export default function CalendarPanel({
           {/* Actions (no list-level Delete anymore) */}
           {!past && (
             <div style={{ display: "flex", gap: 8 }}>
-              {!isEditing && <GhostButton onClick={() => startEdit(occ)}>Edit</GhostButton>}
+              {!isEditing && <GhostButton onClick={() => startEdit(occ, rowKey)}>Edit</GhostButton>}
             </div>
           )}
           {past && (
@@ -342,7 +349,7 @@ export default function CalendarPanel({
             <p style={{ opacity: 0.8 }}>No upcoming events.</p>
           ) : (
             <ul style={{ listStyle: "none", padding: 0, margin: 0 }}>
-              {upcomingOcc.map(occ => <EventRow key={`${occ.id}|${occ.occ_start.toISOString()}`} occ={occ} />)}
+              {upcomingOcc.map(occ => renderEventRow(occ, { past: false }))}
             </ul>
           )}
 
@@ -476,7 +483,7 @@ export default function CalendarPanel({
           ) : (
             <>
               <ul style={{ listStyle: "none", padding: 0, margin: 0 }}>
-                {pastSlice.map((occ) => <EventRow key={`past|${occ.id}|${occ.occ_start.toISOString()}`} occ={occ} past />)}
+                {pastSlice.map((occ) => renderEventRow(occ, { past: true }))}
               </ul>
               {pastHasMore && (
                 <div style={{ marginTop: 10 }}>
