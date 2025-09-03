@@ -10,6 +10,7 @@ import {
   renameTeamRPC,
   deleteTeamRPC,
   addMemberByEmailRPC,
+  removeTeamMemberRPC,
   // events
   listTeamEvents,
   createTeamEvent,
@@ -624,6 +625,12 @@ export default function TeamsPanel() {
           currentUserId={user.id}
           subTab={subTab}
           setSubTab={setSubTab}
+          onSelfLeft={() => {
+             // user left this team: go back to list & refresh
+             setSelected(null);
+             setMembers([]);
+             refreshTeams();
+          }}
           onChangeRole={async (uId, role) => {
             try {
               await setMemberRoleRPC(selected.id, uId, role);
@@ -668,7 +675,7 @@ export default function TeamsPanel() {
 
 function TeamDetail({
   team, members, currentUserId, subTab, setSubTab,
-  onChangeRole, calErr, occurrences,
+  onChangeRole, onSelfLeft, calErr, occurrences,
   showAddEvent, setShowAddEvent, evState, durMin,
   onChangeStartDate, onChangeStartTime, onChangeEndDate, onChangeEndTime,
   inlineError, localErr, setLocalErr,
@@ -676,6 +683,7 @@ function TeamDetail({
   onDeleted
 }) {
   const isAdmin = team.role === "admin";
+  const adminCount = members.filter(m => m.role === "admin").length;
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
   const [msg, setMsg] = useState("");
@@ -701,6 +709,41 @@ function TeamDetail({
       setInviting(false);
     }
   };
+
+  const removeMember = async (targetUserId, targetIsAdmin) => {
+  // Optional guard: avoid removing the only admin (even by another admin)
+  if (targetIsAdmin && adminCount === 1) {
+    alert("You cannot remove the last admin from the team.");
+    return;
+  }
+  if (!window.confirm("Remove this member from the team?")) return;
+  try {
+    await removeTeamMemberRPC(team.id, targetUserId);
+    // refresh members list
+    const mem = await listTeamMembersRPC(team.id);
+    // update parent-visible list
+    onChangeRole?.(targetUserId, "member"); // trigger parent refresh pattern
+    // but we still set the list locally for immediate UI
+    // (safe because parent refresh will overwrite shortly)
+  } catch (e) {
+    alert(e.message || "Failed to remove member.");
+  }
+};
+
+const leaveTeam = async (isLastAdmin) => {
+  if (isLastAdmin) {
+    alert("You are the last admin and cannot leave the team.");
+    return;
+  }
+  if (!window.confirm("Leave this team?")) return;
+  try {
+    await removeTeamMemberRPC(team.id, currentUserId);
+    onSelfLeft?.();
+  } catch (e) {
+    alert(e.message || "Failed to leave team.");
+  }
+};
+
 
   const deleteTeam = async () => {
     if (!window.confirm(`Delete “${team.name}” permanently? This cannot be undone.`)) return;
@@ -741,14 +784,35 @@ function TeamDetail({
                     </div>
                     <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
                       <span style={{ opacity: 0.8 }}>{m.role}</span>
-                      {team.role === "admin" && m.user_id !== currentUserId && (
-                        <Button
-                          style={{ padding: "6px 10px" }}
-                          onClick={() => onChangeRole(m.user_id, m.role === "admin" ? "member" : "admin")}
-                        >
-                          {m.role === "admin" ? "Make member" : "Make admin"}
-                        </Button>
-                      )}
+                      {/* Self actions */}
+                       {m.user_id === currentUserId ? (
+                         <DangerButton
+                           style={{ padding: "6px 10px" }}
+                           onClick={() => leaveTeam(m.role === "admin" && adminCount === 1)}
+                         >
+                           Leave
+                         </DangerButton>
+                       ) : (
+                         <>
+                           {/* Admin-only controls for other members */}
+                           {isAdmin && (
+                             <>
+                               <Button
+                                 style={{ padding: "6px 10px" }}
+                                 onClick={() => onChangeRole(m.user_id, m.role === "admin" ? "member" : "admin")}
+                               >
+                                 {m.role === "admin" ? "Make member" : "Make admin"}
+                               </Button>
+                               <GhostButton
+                                 style={{ padding: "6px 10px" }}
+                                 onClick={() => removeMember(m.user_id, m.role === "admin")}
+                               >
+                                 Remove
+                               </GhostButton>
+                             </>
+                           )}
+                         </>
+                       )}
                     </div>
                   </div>
                 </li>
