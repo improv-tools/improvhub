@@ -23,12 +23,12 @@ export default function CalendarPanel({
   upcomingOcc,
   pastSlice, pastHasMore, onPastMore,
   createEvent, deleteSeries, deleteOccurrence, patchOccurrence, refreshCalendar,
-  // helpers from hook (may be undefined; panel has fallbacks too):
+  // optional helpers
   getEventById, summarizeRecurrence, countFutureOccurrencesInSeries,
   applyFutureEdits, applySeriesEdits,
 }) {
   // Tabs
-  const [tab, setTab] = useState("upcoming"); // 'upcoming' | 'past'
+  const [tab, setTab] = useState("upcoming");
   useEffect(() => {
     setEditingKey(null);
     setEdit(null);
@@ -37,7 +37,7 @@ export default function CalendarPanel({
     setSaveMsg("");
   }, [tab]);
 
-  // Add form state
+  // Add form
   const defaultTZ = Intl.DateTimeFormat().resolvedOptions().timeZone || "Europe/London";
   const [showAdd, setShowAdd] = useState(false);
   const [title, setTitle] = useState("");
@@ -45,7 +45,6 @@ export default function CalendarPanel({
   const [loc, setLoc] = useState("");
   const [cat, setCat] = useState("rehearsal");
   const [tz, setTz] = useState(defaultTZ);
-
   const [sDate, setSDate] = useState("");
   const [sTime, setSTime] = useState("");
   const [eDate, setEDate] = useState("");
@@ -66,7 +65,6 @@ export default function CalendarPanel({
   const [formErr, setFormErr] = useState("");
   const [saveMsg, setSaveMsg] = useState("");
 
-  // keep end synced when start changes
   const startLocal = combineLocal(sDate, sTime);
   const endLocal   = combineLocal(eDate, eTime);
 
@@ -107,14 +105,12 @@ export default function CalendarPanel({
     }
   };
 
-  // Validation: base + recurrence guardrails
   const inlineError = useMemo(() => {
     if (!showAdd) return "";
     if (!title.trim()) return "Title is required.";
     if (!startLocal || !endLocal) return "Start and end are required.";
     if (new Date(startLocal) < new Date()) return "Start time is in the past.";
     if (new Date(endLocal) <= new Date(startLocal)) return "End must be after start.";
-
     if (freq !== "none") {
       if (endMode === "never") return "Repeating events must have an end (count or until).";
       if (endMode === "count" && (!count || count < 1 || count > 12))
@@ -150,7 +146,7 @@ export default function CalendarPanel({
         recur_count: endMode === "count" ? count : null,
         recur_until: endMode === "until" ? until : null,
       });
-      // reset
+      // reset & close
       setShowAdd(false);
       setTitle(""); setDesc(""); setLoc(""); setCat("rehearsal");
       setSDate(""); setSTime(""); setEDate(""); setETime(""); setTz(defaultTZ);
@@ -168,7 +164,7 @@ export default function CalendarPanel({
   const [edit, setEdit] = useState(null);
   const [editErr, setEditErr] = useState("");
   const [editBusy, setEditBusy] = useState(false);
-  const [expanded, setExpanded] = useState(() => new Set()); // title toggles
+  const [expanded, setExpanded] = useState(() => new Set());
 
   const toggleExpanded = (rowKey) => {
     setExpanded(prev => {
@@ -187,7 +183,7 @@ export default function CalendarPanel({
       title: occ.title, description: occ.description || "", location: occ.location || "",
       tz: occ.tz, category: occ.category,
       startDate: s.date, startTime: s.time, endDate: e.date, endTime: e.time,
-      base: occ, // includes base_start + recur fields
+      base: occ, // has base_start and current occ_start/occ_end
     });
   };
   const cancelEdit = () => { setEditingKey(null); setEdit(null); setEditErr(""); setEditBusy(false); };
@@ -202,25 +198,41 @@ export default function CalendarPanel({
     return "";
   };
 
-  // Client-side fallbacks (if props not provided)
-  const fallbackFutureEdits = async (eventId, fromBaseISO, patch) => {
+  // Helpers to compute whether time changed and the delta to apply across series
+  const buildEditPatch = () => {
+    const newStartISO = new Date(combineLocal(edit.startDate, edit.startTime)).toISOString();
+    const newEndISO   = new Date(combineLocal(edit.endDate, edit.endTime)).toISOString();
+    const oldStart    = edit.base.occ_start;
+    const oldEnd      = edit.base.occ_end;
+
+    const timeChanged =
+      new Date(newStartISO).getTime() !== oldStart.getTime() ||
+      new Date(newEndISO).getTime()   !== oldEnd.getTime();
+
+    const nonTime = {
+      title: edit.title,
+      description: edit.description || null,
+      location: edit.location || null,
+      tz: edit.tz,
+      category: edit.category,
+    };
+
+    return { timeChanged, newStartISO, newEndISO, nonTime, oldStart, oldEnd };
+  };
+
+  // Targets helpers
+  const futureTargets = (eventId, fromBaseISO) => {
     const fromMs = new Date(fromBaseISO).getTime();
     const now = Date.now();
-    const targets = occurrencesAll.filter(o =>
+    return occurrencesAll.filter(o =>
       o.id === eventId &&
       (o.base_start?.getTime?.() ?? o.occ_start.getTime()) >= fromMs &&
       o.occ_end.getTime() >= now
     );
-    for (const occ of targets) {
-      await patchOccurrence(eventId, (occ.base_start || occ.occ_start).toISOString(), patch);
-    }
   };
-  const fallbackSeriesEdits = async (eventId, patch) => {
+  const seriesTargets = (eventId) => {
     const now = Date.now();
-    const targets = occurrencesAll.filter(o => o.id === eventId && o.occ_end.getTime() >= now);
-    for (const occ of targets) {
-      await patchOccurrence(eventId, (occ.base_start || occ.occ_start).toISOString(), patch);
-    }
+    return occurrencesAll.filter(o => o.id === eventId && o.occ_end.getTime() >= now);
   };
 
   // Save just this occurrence (or standalone)
@@ -229,12 +241,12 @@ export default function CalendarPanel({
     if (err) { setEditErr(err); return; }
     setEditBusy(true); setEditErr("");
     try {
-      const sISO = new Date(combineLocal(edit.startDate, edit.startTime)).toISOString();
-      const eISO = new Date(combineLocal(edit.endDate, edit.endTime)).toISOString();
-      await patchOccurrence(edit.base.id, (edit.base.base_start || edit.base.occ_start).toISOString(), {
-        title: edit.title, description: edit.description || null, location: edit.location || null,
-        tz: edit.tz, category: edit.category, starts_at: sISO, ends_at: eISO,
-      });
+      const { newStartISO, newEndISO, nonTime } = buildEditPatch();
+      await patchOccurrence(
+        edit.base.id,
+        (edit.base.base_start || edit.base.occ_start).toISOString(),
+        { ...nonTime, starts_at: newStartISO, ends_at: newEndISO }
+      );
       cancelEdit();
       await refreshCalendar();
     } catch (e) {
@@ -247,19 +259,33 @@ export default function CalendarPanel({
     const err = validateEditTimes();
     if (err) { setEditErr(err); return; }
     if (!window.confirm("Apply these changes to all FUTURE occurrences in this team’s series? This affects the whole team.")) return;
+
     setEditBusy(true); setEditErr("");
     try {
-      const sISO = new Date(combineLocal(edit.startDate, edit.startTime)).toISOString();
-      const eISO = new Date(combineLocal(edit.endDate, edit.endTime)).toISOString();
-      const patch = {
-        title: edit.title, description: edit.description || null, location: edit.location || null,
-        tz: edit.tz, category: edit.category, starts_at: sISO, ends_at: eISO,
-      };
-      if (typeof applyFutureEdits === "function") {
-        await applyFutureEdits(edit.base.id, (edit.base.base_start || edit.base.occ_start).toISOString(), patch);
+      const { timeChanged, newStartISO, newEndISO, nonTime, oldStart, oldEnd } = buildEditPatch();
+      const fromBaseISO = (edit.base.base_start || edit.base.occ_start).toISOString();
+
+      if (!timeChanged) {
+        // Only non-time fields → simple patch over targets
+        const patch = { ...nonTime };
+        const targets = futureTargets(edit.base.id, fromBaseISO);
+        for (const occ of targets) {
+          await patchOccurrence(edit.base.id, (occ.base_start || occ.occ_start).toISOString(), patch);
+        }
       } else {
-        await fallbackFutureEdits(edit.base.id, (edit.base.base_start || edit.base.occ_start).toISOString(), patch);
+        // Time changed → compute delta from the edited occurrence and apply to each target's base_start
+        const deltaStartMs = new Date(newStartISO).getTime() - oldStart.getTime();
+        const newDurMs     = new Date(newEndISO).getTime()   - new Date(newStartISO).getTime();
+
+        const targets = futureTargets(edit.base.id, fromBaseISO);
+        for (const occ of targets) {
+          const base = (occ.base_start || occ.occ_start);
+          const s = new Date(base.getTime() + deltaStartMs).toISOString();
+          const e = new Date(new Date(s).getTime() + newDurMs).toISOString();
+          await patchOccurrence(edit.base.id, base.toISOString(), { ...nonTime, starts_at: s, ends_at: e });
+        }
       }
+
       cancelEdit();
       await refreshCalendar();
     } catch (e) {
@@ -267,24 +293,35 @@ export default function CalendarPanel({
     } finally { setEditBusy(false); }
   };
 
-  // Save entire series (in loaded range)
+  // Save entire series (in loaded/future range)
   const saveSeries = async () => {
     const err = validateEditTimes();
     if (err) { setEditErr(err); return; }
-    if (!window.confirm("Apply these changes to the ENTIRE team series in the loaded range? This affects the whole team.")) return;
+    if (!window.confirm("Apply these changes to the ENTIRE team series (future only) in the loaded range? This affects the whole team.")) return;
+
     setEditBusy(true); setEditErr("");
     try {
-      const sISO = new Date(combineLocal(edit.startDate, edit.startTime)).toISOString();
-      const eISO = new Date(combineLocal(edit.endDate, edit.endTime)).toISOString();
-      const patch = {
-        title: edit.title, description: edit.description || null, location: edit.location || null,
-        tz: edit.tz, category: edit.category, starts_at: sISO, ends_at: eISO,
-      };
-      if (typeof applySeriesEdits === "function") {
-        await applySeriesEdits(edit.base.id, patch);
+      const { timeChanged, newStartISO, newEndISO, nonTime, oldStart, oldEnd } = buildEditPatch();
+
+      if (!timeChanged) {
+        const patch = { ...nonTime };
+        const targets = seriesTargets(edit.base.id);
+        for (const occ of targets) {
+          await patchOccurrence(edit.base.id, (occ.base_start || occ.occ_start).toISOString(), patch);
+        }
       } else {
-        await fallbackSeriesEdits(edit.base.id, patch);
+        const deltaStartMs = new Date(newStartISO).getTime() - oldStart.getTime();
+        const newDurMs     = new Date(newEndISO).getTime()   - new Date(newStartISO).getTime();
+
+        const targets = seriesTargets(edit.base.id);
+        for (const occ of targets) {
+          const base = (occ.base_start || occ.occ_start);
+          const s = new Date(base.getTime() + deltaStartMs).toISOString();
+          const e = new Date(new Date(s).getTime() + newDurMs).toISOString();
+          await patchOccurrence(edit.base.id, base.toISOString(), { ...nonTime, starts_at: s, ends_at: e });
+        }
       }
+
       cancelEdit();
       await refreshCalendar();
     } catch (e) {
@@ -315,16 +352,7 @@ export default function CalendarPanel({
     )) return;
 
     try {
-      if (typeof deleteSeries === "function") {
-        await deleteSeries(eventId);
-      } else {
-        // Fallback: cancel all future occurrences
-        const now = Date.now();
-        const targets = occurrencesAll.filter(o => o.id === eventId && o.occ_end.getTime() >= now);
-        for (const occ of targets) {
-          await deleteOccurrence(eventId, (occ.base_start || occ.occ_start).toISOString());
-        }
-      }
+      await deleteSeries(eventId);
     } finally {
       cancelEdit();
       await refreshCalendar();
@@ -487,7 +515,7 @@ export default function CalendarPanel({
     <>
       <h3 style={{ margin: "8px 0", fontSize: 16 }}>Calendar</h3>
 
-      {/* Tabs: Upcoming / Past */}
+      {/* Tabs */}
       <div style={{ display: "flex", gap: 8, margin: "6px 0 10px" }}>
         <button onClick={() => setTab("upcoming")} style={tab==="upcoming" ? styles.tabActive : styles.tabBtn}>Upcoming</button>
         <button onClick={() => setTab("past")} style={tab==="past" ? styles.tabActive : styles.tabBtn}>Past</button>
@@ -532,7 +560,7 @@ export default function CalendarPanel({
                     <input type="time" step="60" value={eTime} onChange={(e)=>onChangeEndTime(e.target.value)} />
                   </div>
 
-                  {/* Recurrence UI */}
+                  {/* Recurrence */}
                   <div style={{ borderTop: "1px solid rgba(255,255,255,0.12)", paddingTop: 8 }}>
                     <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
                       <span style={{ opacity: 0.8 }}>Repeat:</span>
