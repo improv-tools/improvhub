@@ -1,6 +1,13 @@
 // src/teams/teams.api.js
 import { supabase } from "lib/supabaseClient";
 
+
+export async function listMyTeams(/* userId */) {
+  const { data, error } = await supabase.rpc("list_my_teams");
+  if (error) throw new Error(error.message);
+  return data || [];
+}
+
 /**
  * Create a base team event (one-off or series).
  * payload must include: team_id, title, tz, starts_at, ends_at
