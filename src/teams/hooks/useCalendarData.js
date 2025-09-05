@@ -386,7 +386,7 @@ export function useCalendarData(teamId) {
     for (const occ of targets) {
       const baseISO = (occ.base_start || occ.occ_start).toISOString();
       // lazy import to avoid circular dep
-      const { supabase } = await import("lib/supabase");
+      const { supabase } = await import("lib/supabaseClient");
       const row = { event_id: eventId, occ_start: baseISO, canceled: false, ...patch };
       const { error } = await supabase
         .from("team_event_overrides")
