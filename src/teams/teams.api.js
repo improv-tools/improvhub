@@ -1,5 +1,5 @@
 // src/teams/teams.api.js
-import { supabase } from "lib/supabase";
+import { supabase } from "lib/supabaseClient";
 
 /**
  * Create a base team event (one-off or series).
