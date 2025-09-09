@@ -1,6 +1,17 @@
 
 import { DOW, nthWeekdayOfMonth } from "./datetime";
 
+/**
+ * Expand recurring events between [fromIso, toIso] inclusive.
+ * Supports:
+ *  - recur_freq: "none" | "daily" | "weekly" | "monthly"
+ *  - recur_interval: number (>=1)
+ *  - recur_byday: text[] like ["MO","WE"] for weekly
+ *  - recur_bymonthday: int[] (1..31) for monthly
+ *  - recur_week_of_month: int | -1 (1..5 or -1 for last) used with recur_byday for monthly patterns like "3rd Tuesday"
+ *  - recur_until: timestamptz (optional)
+ *  - recur_count: int (optional)
+ */
 export function expandOccurrences(events, fromIso, toIso) {
   const from = new Date(fromIso);
   const to = new Date(toIso);
@@ -11,31 +22,56 @@ export function expandOccurrences(events, fromIso, toIso) {
     const end = new Date(e.ends_at);
     const durMs = end - start;
 
-    if (e.recur_freq === "none") {
-      if (start >= from && start <= to) {
-        out.push({ ...e, occ_start: start, occ_end: new Date(start.getTime() + durMs) });
+    const freq = e.recur_freq || "none";
+    const interval = Math.max(1, e.recur_interval || 1);
+    const until = e.recur_until ? new Date(e.recur_until) : null;
+    const countLimit = e.recur_count || Infinity;
+
+    let emitted = 0;
+
+    function pushOcc(dt) {
+      const occStart = dt;
+      const occEnd = new Date(occStart.getTime() + durMs);
+      if (occStart > to) return false;
+      if (occStart >= from) {
+        out.push({ ...e, occ_start: occStart, occ_end: occEnd });
+        emitted += 1;
+      }
+      return emitted < countLimit && (!until || occStart <= until);
+    }
+
+    if (freq === "none") {
+      if (pushOcc(start) === false) {/* no-op */}
+      continue;
+    }
+
+    if (freq === "daily") {
+      // step by N days
+      let k = 0;
+      while (true) {
+        const dt = new Date(start.getTime() + k * interval * 24 * 3600 * 1000);
+        if (!pushOcc(dt)) break;
+        k += 1;
+        if (dt > to) break;
       }
       continue;
     }
 
-    let count = 0;
-    const maxCount = e.recur_count || 1000;
-    const until = e.recur_until ? new Date(`${e.recur_until}T23:59:59Z`) : null;
-    const interval = Math.max(1, e.recur_interval || 1);
-
-    if (e.recur_freq === "weekly") {
-      const by = (e.recur_byday && e.recur_byday.length) ? e.recur_byday : [DOW[start.getUTCDay()]];
+    if (freq === "weekly") {
+      const by = Array.isArray(e.recur_byday) ? e.recur_byday : [DOW[start.getUTCDay()]];
       const weekMs = 7 * 24 * 3600 * 1000;
 
-      const anchorDate = new Date(Date.UTC(start.getUTCFullYear(), start.getUTCMonth(), start.getUTCDate()));
-      const anchorDow = anchorDate.getUTCDay();
-      const anchorMonday = new Date(anchorDate.getTime() - ((anchorDow + 6) % 7) * 24 * 3600 * 1000);
+      // anchor week: monday of the week of the original start (UTC)
+      const anchorMonday = new Date(Date.UTC(
+        start.getUTCFullYear(),
+        start.getUTCMonth(),
+        start.getUTCDate() - ((start.getUTCDay() + 6) % 7),
+        0,0,0,0
+      ));
 
-      const weeksFromAnchor = Math.floor((from - anchorMonday) / weekMs);
-      let k = Math.max(0, Math.floor(weeksFromAnchor / interval));
-
+      let w = 0;
       while (true) {
-        const thisWeek = new Date(anchorMonday.getTime() + k * interval * weekMs);
+        const thisWeek = new Date(anchorMonday.getTime() + w * interval * weekMs);
         for (const code of by) {
           const wday = DOW.indexOf(code);
           if (wday < 0) continue;
@@ -44,72 +80,52 @@ export function expandOccurrences(events, fromIso, toIso) {
             day.getUTCFullYear(), day.getUTCMonth(), day.getUTCDate(),
             start.getUTCHours(), start.getUTCMinutes(), start.getUTCSeconds()
           ));
-          const occEnd = new Date(occStart.getTime() + durMs);
-
-          if (occStart > to) break;
-          if ((until && occStart > until) || count >= maxCount) break;
-          if (occEnd >= from && occStart <= to) {
-            out.push({ ...e, occ_start: occStart, occ_end: occEnd });
-            count++;
-          }
+          if (!pushOcc(occStart)) { w = Infinity; break; }
         }
-        const nextWeekStart = new Date(thisWeek.getTime() + interval * weekMs);
-        if (nextWeekStart > to) break;
-        if ((until && nextWeekStart > until) || count >= maxCount) break;
-        k++;
+        if (w === Infinity) break;
+        if (thisWeek > to) break;
+        w += 1;
       }
-    } else if (e.recur_freq === "monthly") {
-      const byMonthDay = e.recur_bymonthday && e.recur_bymonthday.length ? e.recur_bymonthday : [start.getUTCDate()];
-      const byNth = e.recur_week_of_month
-        ? { n: e.recur_week_of_month, dow: e.recur_day_of_week || DOW[start.getUTCDay()] }
-        : null;
+      continue;
+    }
 
-      let y = start.getUTCFullYear();
-      let m = start.getUTCMonth();
+    if (freq === "monthly") {
+      const byMonthDay = Array.isArray(e.recur_bymonthday) ? e.recur_bymonthday : null;
+      const byDay = Array.isArray(e.recur_byday) ? e.recur_byday : null;
+      const wom = e.recur_week_of_month ?? null; // 1..5 or -1
 
-      while (new Date(Date.UTC(y, m, 1)) < from) {
-        m += interval;
-        if (m > 11) { y += Math.floor(m / 12); m = m % 12; }
-        if ((until && new Date(Date.UTC(y, m, 1)) > until) || count >= maxCount) break;
-      }
-
+      let m = 0;
       while (true) {
-        if (byNth) {
-          const weekday = DOW.indexOf(byNth.dow);
-          const dt = nthWeekdayOfMonth(y, m, weekday, byNth.n);
-          if (dt) {
-            const occStart = new Date(Date.UTC(
-              dt.getUTCFullYear(), dt.getUTCMonth(), dt.getUTCDate(),
-              start.getUTCHours(), start.getUTCMinutes(), start.getUTCSeconds()
-            ));
-            const occEnd = new Date(occStart.getTime() + durMs);
-            if (occStart > to) break;
-            if ((until && occStart > until) || count >= maxCount) break;
-            if (occEnd >= from && occStart <= to) { out.push({ ...e, occ_start: occStart, occ_end: occEnd }); count++; }
+        const anchor = new Date(Date.UTC(start.getUTCFullYear(), start.getUTCMonth() + m*interval, 1));
+        if (byMonthDay && byMonthDay.length) {
+          for (const d of byMonthDay) {
+            const dt = new Date(Date.UTC(anchor.getUTCFullYear(), anchor.getUTCMonth(), d, start.getUTCHours(), start.getUTCMinutes(), start.getUTCSeconds()));
+            if (dt.getUTCMonth() !== anchor.getUTCMonth()) continue; // skip overflow
+            if (!pushOcc(dt)) { m = Infinity; break; }
+          }
+        } else if (byDay && wom) {
+          for (const code of byDay) {
+            const wday = DOW.indexOf(code);
+            if (wday < 0) continue;
+            const nth = nthWeekdayOfMonth(anchor.getUTCFullYear(), anchor.getUTCMonth(), wday, wom);
+            if (!nth) continue;
+            const dt = new Date(Date.UTC(nth.getUTCFullYear(), nth.getUTCMonth(), nth.getUTCDate(), start.getUTCHours(), start.getUTCMinutes(), start.getUTCSeconds()));
+            if (!pushOcc(dt)) { m = Infinity; break; }
           }
         } else {
-          for (const d of byMonthDay) {
-            const dt = new Date(Date.UTC(y, m, d));
-            if (dt.getUTCMonth() !== m) continue;
-            const occStart = new Date(Date.UTC(
-              dt.getUTCFullYear(), dt.getUTCMonth(), dt.getUTCDate(),
-              start.getUTCHours(), start.getUTCMinutes(), start.getUTCSeconds()
-            ));
-            const occEnd = new Date(occStart.getTime() + durMs);
-            if (occStart > to) break;
-            if ((until && occStart > until) || count >= maxCount) break;
-            if (occEnd >= from && occStart <= to) { out.push({ ...e, occ_start: occStart, occ_end: occEnd }); count++; }
-          }
+          // default: same day-of-month as start
+          const dt = new Date(Date.UTC(anchor.getUTCFullYear(), anchor.getUTCMonth(), start.getUTCDate(), start.getUTCHours(), start.getUTCMinutes(), start.getUTCSeconds()));
+          if (!pushOcc(dt)) { m = Infinity; break; }
         }
-        m += interval;
-        if (m > 11) { y += Math.floor(m / 12); m = m % 12; }
-        const nextMonthStart = new Date(Date.UTC(y, m, 1));
-        if (nextMonthStart > to) break;
-        if ((until && nextMonthStart > until) || count >= maxCount) break;
+        if (m === Infinity) break;
+        if (anchor > to) break;
+        m += 1;
       }
+      continue;
     }
   }
 
-  out.sort((a, b) => a.occ_start - b.occ_start);
+  // sort by occurrence start
+  out.sort((a,b) => a.occ_start - b.occ_start);
   return out;
 }
