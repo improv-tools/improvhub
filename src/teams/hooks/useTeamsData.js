@@ -8,94 +8,80 @@ import {
   renameTeamRPC,
   deleteTeamRPC,
   addMemberByEmailRPC,
-  removeTeamMemberRPC, // if you added this RPC earlier
+  removeMemberRPC,
 } from "teams/teams.api";
 
 export function useTeamsData(userId) {
   const [teams, setTeams] = useState([]);
+  const [members, setMembers] = useState([]);
+  const [selected, setSelected] = useState(null);
   const [loading, setLoading] = useState(true);
   const [err, setErr] = useState("");
-  const [selected, setSelected] = useState(null);
-  const [members, setMembers] = useState([]);
 
-  const refreshTeams = async () => {
+  async function refreshTeams() {
+    setLoading(true);
     setErr("");
     try {
-      const list = await listMyTeams(userId);
+      const list = await listMyTeams();
       setTeams(list);
-      setLoading(false);
+      // keep selection in sync
       if (selected) {
-        const s = list.find((t) => t.id === selected.id);
-        if (s) setSelected(s);
-        else { setSelected(null); setMembers([]); }
+        const s = list.find(t => t.id === selected.id);
+        if (!s) { setSelected(null); setMembers([]); } else { setSelected(s); }
       }
     } catch (e) {
       setErr(e.message || "Failed to load teams");
+    } finally {
       setLoading(false);
     }
-  };
+  }
 
-  useEffect(() => { if (userId) refreshTeams(); /* eslint-disable-next-line */ }, [userId]);
+  useEffect(() => { refreshTeams(); /* eslint-disable-next-line */ }, []);
 
-  const openTeam = async (team) => {
-    setSelected(team);
-    setErr("");
-    try {
-      const mem = await listTeamMembersRPC(team.id);
-      setMembers(mem);
-    } catch (e) {
-      setErr(e.message || "Failed to load members");
-    }
-  };
-
-  const backToList = () => { setSelected(null); setMembers([]); };
-
-  const createNewTeam = async (name) => {
-    const team = await createTeam(name);
+  async function create(name) {
+    await createTeam(name);
     await refreshTeams();
-    await openTeam({ ...team, role: "admin" });
-    return team;
-  };
+  }
 
-  const changeRole = async (teamId, userId, role) => {
-    await setMemberRoleRPC(teamId, userId, role);
+  async function openTeam(team) {
+    setSelected(team);
+    const mem = await listTeamMembersRPC(team.id);
+    setMembers(mem);
+  }
+
+  async function changeRole(teamId, uid, role) {
+    await setMemberRoleRPC(teamId, uid, role);
     const mem = await listTeamMembersRPC(teamId);
     setMembers(mem);
     await refreshTeams();
-  };
+  }
 
-  const addMember = async (teamId, email, role) => {
+  async function addMember(teamId, email, role="member") {
     await addMemberByEmailRPC(teamId, email, role);
     const mem = await listTeamMembersRPC(teamId);
     setMembers(mem);
-  };
+  }
 
-  const removeMember = async (teamId, userId) => {
-    await removeTeamMemberRPC(teamId, userId);
+  async function removeMember(teamId, uid) {
+    await removeMemberRPC(teamId, uid);
     const mem = await listTeamMembersRPC(teamId);
     setMembers(mem);
-  };
-
-  const renameTeam = async (teamId, nextName) => {
-    const updated = await renameTeamRPC(teamId, nextName);
-    setSelected((prev) => (prev && prev.id === updated.id ? { ...prev, name: updated.name } : prev));
     await refreshTeams();
-    return updated;
-  };
+  }
 
-  const deleteTeam = async (teamId) => {
+  async function rename(teamId, name) {
+    await renameTeamRPC(teamId, name);
+    await refreshTeams();
+  }
+
+  async function remove(teamId) {
     await deleteTeamRPC(teamId);
-    setSelected(null);
-    setMembers([]);
     await refreshTeams();
-  };
+    if (selected?.id === teamId) { setSelected(null); setMembers([]); }
+  }
 
   return {
-    teams, loading, err,
-    selected, members,
-    setErr,
-    refreshTeams, openTeam, backToList,
-    createNewTeam, changeRole, addMember, removeMember,
-    renameTeam, deleteTeam,
+    teams, members, selected, loading, err,
+    actions: { refreshTeams, create, openTeam, changeRole, addMember, removeMember, rename, remove },
   };
 }
