@@ -28,9 +28,11 @@ export async function createTeam(name) {
 }
 
 export async function listTeamMembersRPC(teamId) {
-  const { data, error } = await supabase.rpc("list_team_members", { p_team_id: teamId });
+  const { data, error } = await supabase.rpc("list_team_members", {
+    p_team_id: teamId,   // <-- must match the SQL parameter name
+  });
   if (error) throw new Error(error.message);
-  return data || [];
+  return data ?? [];
 }
 
 export async function setMemberRoleRPC(teamId, userId, role) {
