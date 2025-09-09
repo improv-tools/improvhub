@@ -14,7 +14,7 @@ function Shell() {
   if (loading) {
     return (
       <div style={{ minHeight:"100vh", display:"grid", placeItems:"center", color:"#fff", background:"#0b0b0e" }}>
-        <div>Checking session…</div>
+        <div style={{ opacity: 0.8 }}>Loading…</div>
       </div>
     );
   }
