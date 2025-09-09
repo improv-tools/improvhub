@@ -382,18 +382,18 @@ security definer
 set search_path = public
 as $$
 declare
-  v_id uuid;
   v_disp text;
 begin
   v_disp := public.next_team_display_id(p_name);
 
-  insert into public.teams (name, display_id)
+  insert into public.teams as t (name, display_id)
   values (p_name, v_disp)
-  returning id, name, display_id into v_id, name, display_id;
+  returning t.id, t.name, t.display_id
+  into id, name, display_id;        -- write directly into OUT params
 
   -- creator becomes admin
   insert into public.team_members (team_id, user_id, role)
-  values (v_id, auth.uid(), 'admin');
+  values (id, auth.uid(), 'admin');
 
   return;
 end;
