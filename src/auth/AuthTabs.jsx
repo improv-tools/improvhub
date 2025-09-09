@@ -15,119 +15,138 @@ export default function AuthTabs() {
   return (
     <CenterWrap>
       <Card>
-        <Tabs>
-          <Tab active={tab==="signin"} onClick={()=>setTab("signin")}>Sign in</Tab>
-          <Tab active={tab==="signup"} onClick={()=>setTab("signup")}>Create account</Tab>
-          <Tab active={tab==="forgot"} onClick={()=>setTab("forgot")}>Forgot password</Tab>
+        <H1>Welcome to ImprovHub</H1>
+        <Tabs value={tab} onChange={setTab}>
+          <Tab value="signin" label="Sign in">
+            <SignIn />
+            <Row>
+              <GhostButton onClick={() => setTab("signup")}>Create account</GhostButton>
+              <GhostButton onClick={() => setTab("reset")}>Forgot password?</GhostButton>
+            </Row>
+          </Tab>
+          <Tab value="signup" label="Sign up">
+            <SignUp onBack={() => setTab("signin")} />
+          </Tab>
+          <Tab value="reset" label="Reset password">
+            <Reset />
+          </Tab>
+          <Tab value="newpass" label="Set new password">
+            <NewPassword onDone={() => { setRecovering(false); setTab("signin"); }} />
+          </Tab>
         </Tabs>
-
-        {tab==="signin" && <SignIn />}
-        {tab==="signup" && <SignUp />}
-        {tab==="forgot" && <Forgot />}
-        {tab==="newpass" && <NewPass onDone={()=>{ setRecovering(false); setTab("signin"); }} />}
       </Card>
     </CenterWrap>
   );
 }
 
 function SignIn() {
-  const [email, setEmail] = useState(""); const [password, setPassword] = useState("");
-  const [err, setErr] = useState(""); const [submitting, setSubmitting] = useState(false);
-
-  const submit = async (e) => {
-    e.preventDefault(); setErr(""); setSubmitting(true);
-    try { const { error } = await signIn(email, password); if (error) throw error; }
-    catch (e2) { setErr(e2.message || "Sign in failed"); }
-    finally { setSubmitting(false); }
-  };
-
-  return (
-    <>
-      <H1>Sign in</H1>
-      {err && <ErrorText>{err}</ErrorText>}
-      <form onSubmit={submit} style={{ display:"grid", gap:12 }}>
-        <Label> Email <Input type="email" value={email} onChange={e=>setEmail(e.target.value)} required/> </Label>
-        <Label> Password <Input type="password" value={password} onChange={e=>setPassword(e.target.value)} required/> </Label>
-        <Button disabled={submitting} type="submit">{submitting?"Signing in…":"Sign in"}</Button>
-      </form>
-    </>
-  );
-}
-
-function SignUp() {
-  const [name, setName] = useState(""); const [email, setEmail] = useState(""); const [password, setPassword] = useState("");
-  const [msg, setMsg] = useState(""); const [err, setErr] = useState(""); const [submitting, setSubmitting] = useState(false);
-
-  const submit = async (e) => {
-    e.preventDefault(); setMsg(""); setErr(""); setSubmitting(true);
-    try {
-      localStorage.setItem("pending_full_name", name);
-      const { data, error } = await signUp(email, password, name, DEFAULT_REDIRECT);
-      if (error) throw error;
-      setMsg(data.session ? "Account created and signed in." : "Check your email to confirm, then return here.");
-    } catch (e2) { setErr(e2.message || "Sign up failed"); }
-    finally { setSubmitting(false); }
-  };
-
-  return (
-    <>
-      <H1>Create account</H1>
-      {err && <ErrorText>{err}</ErrorText>}
-      {msg && <InfoText>{msg}</InfoText>}
-      <form onSubmit={submit} style={{ display:"grid", gap:12 }}>
-        <Label> Name <Input value={name} onChange={e=>setName(e.target.value)} required/> </Label>
-        <Label> Email <Input type="email" value={email} onChange={e=>setEmail(e.target.value)} required/> </Label>
-        <Label> Password <Input type="password" value={password} onChange={e=>setPassword(e.target.value)} required minLength={6}/> </Label>
-        <Button disabled={submitting} type="submit">{submitting?"Creating…":"Create account"}</Button>
-      </form>
-    </>
-  );
-}
-
-function Forgot() {
   const [email, setEmail] = useState("");
-  const [msg, setMsg] = useState(""); const [err, setErr] = useState(""); const [submitting, setSubmitting] = useState(false);
+  const [password, setPassword] = useState("");
+  const [submitting, setSubmitting] = useState(false);
+  const [err, setErr] = useState("");
 
   const submit = async (e) => {
-    e.preventDefault(); setMsg(""); setErr(""); setSubmitting(true);
-    try { const { error } = await resetPassword(email, DEFAULT_REDIRECT); if (error) throw error; setMsg("Password reset email sent. Click the link to continue here."); }
-    catch (e2) { setErr(e2.message || "Could not send reset email"); }
-    finally { setSubmitting(false); }
+    e.preventDefault();
+    setErr("");
+    setSubmitting(true);
+    const { error } = await signIn(email, password);
+    setSubmitting(false);
+    if (error) setErr(error.message || "Failed to sign in");
+  };
+
+  return (
+    <form onSubmit={submit} style={{ display: "grid", gap: 12 }}>
+      {err && <ErrorText>{err}</ErrorText>}
+      <Label> Email <Input type="email" value={email} onChange={e=>setEmail(e.target.value)} required /></Label>
+      <Label> Password <Input type="password" value={password} onChange={e=>setPassword(e.target.value)} required minLength={6} /></Label>
+      <Button type="submit" disabled={submitting}>{submitting ? "Signing in…" : "Sign in"}</Button>
+    </form>
+  );
+}
+
+function SignUp({ onBack }) {
+  const [name, setName] = useState("");
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+  const [msg, setMsg] = useState("");
+  const [err, setErr] = useState("");
+  const [submitting, setSubmitting] = useState(false);
+
+  const submit = async (e) => {
+    e.preventDefault();
+    setErr(""); setMsg("");
+    setSubmitting(true);
+    const { error } = await signUp(email, password, name, DEFAULT_REDIRECT);
+    setSubmitting(false);
+    if (error) setErr(error.message || "Failed to create account");
+    else setMsg("Check your inbox to confirm your email.");
   };
 
   return (
     <>
-      <H1>Forgot password</H1>
       {err && <ErrorText>{err}</ErrorText>}
       {msg && <InfoText>{msg}</InfoText>}
-      <form onSubmit={submit} style={{ display:"grid", gap:12 }}>
-        <Label> Email <Input type="email" value={email} onChange={e=>setEmail(e.target.value)} required/> </Label>
-        <Button disabled={submitting} type="submit">{submitting?"Sending…":"Send reset email"}</Button>
+      <form onSubmit={submit} style={{ display: "grid", gap: 12 }}>
+        <Label> Name <Input value={name} onChange={e=>setName(e.target.value)} required /></Label>
+        <Label> Email <Input type="email" value={email} onChange={e=>setEmail(e.target.value)} required /></Label>
+        <Label> Password <Input type="password" value={password} onChange={e=>setPassword(e.target.value)} required minLength={6} /></Label>
+        <Row>
+          <Button type="submit" disabled={submitting}>{submitting ? "Creating…" : "Create account"}</Button>
+          <GhostButton type="button" onClick={onBack}>Back</GhostButton>
+        </Row>
       </form>
     </>
   );
 }
 
-function NewPass({ onDone }) {
-  const [password, setPassword] = useState("");
-  const [msg, setMsg] = useState(""); const [err, setErr] = useState(""); const [submitting, setSubmitting] = useState(false);
+function Reset() {
+  const [email, setEmail] = useState("");
+  const [msg, setMsg] = useState("");
+  const [err, setErr] = useState("");
+  const [submitting, setSubmitting] = useState(false);
 
   const submit = async (e) => {
-    e.preventDefault(); setMsg(""); setErr(""); setSubmitting(true);
-    try { const { error } = await updateUserPassword(password); if (error) throw error; setMsg("Password updated. You can now sign in."); onDone?.(); }
-    catch (e2) { setErr(e2.message || "Could not update password"); }
-    finally { setSubmitting(false); }
+    e.preventDefault();
+    setErr(""); setMsg("");
+    setSubmitting(true);
+    const { error } = await resetPassword(email, DEFAULT_REDIRECT);
+    setSubmitting(false);
+    if (error) setErr(error.message || "Failed to send reset email");
+    else setMsg("If the email exists, a reset link has been sent.");
   };
 
   return (
-    <>
-      <H1>Set a new password</H1>
+    <form onSubmit={submit} style={{ display: "grid", gap: 12 }}>
       {err && <ErrorText>{err}</ErrorText>}
       {msg && <InfoText>{msg}</InfoText>}
-      <form onSubmit={submit} style={{ display:"grid", gap:12 }}>
-        <Label> New password <Input type="password" value={password} onChange={e=>setPassword(e.target.value)} required minLength={6}/> </Label>
-        <Button disabled={submitting} type="submit">{submitting?"Updating…":"Update password"}</Button>
-      </form>
-    </>
+      <Label> Email <Input type="email" value={email} onChange={e=>setEmail(e.target.value)} required /></Label>
+      <Button type="submit" disabled={submitting}>{submitting ? "Sending…" : "Send reset link"}</Button>
+    </form>
+  );
+}
+
+function NewPassword({ onDone }) {
+  const [password, setPassword] = useState("");
+  const [msg, setMsg] = useState("");
+  const [err, setErr] = useState("");
+  const [submitting, setSubmitting] = useState(false);
+
+  const submit = async (e) => {
+    e.preventDefault();
+    setErr(""); setMsg("");
+    setSubmitting(true);
+    const { error } = await updateUserPassword(password);
+    setSubmitting(false);
+    if (error) setErr(error.message || "Failed to update password");
+    else { setMsg("Password updated."); onDone?.(); }
+  };
+
+  return (
+    <form onSubmit={submit} style={{ display: "grid", gap: 12 }}>
+      {err && <ErrorText>{err}</ErrorText>}
+      {msg && <InfoText>{msg}</InfoText>}
+      <Label> New password <Input type="password" value={password} onChange={e=>setPassword(e.target.value)} required minLength={6} /></Label>
+      <Button type="submit" disabled={submitting}>{submitting ? "Updating…" : "Update password"}</Button>
+    </form>
   );
 }
