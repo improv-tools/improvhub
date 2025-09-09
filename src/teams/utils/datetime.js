@@ -31,10 +31,10 @@ export function fmtTime(date) {
 
 /** Combine a local date+time in a target IANA tz and return ISO UTC string */
 export function combineLocal(dateStr, timeStr) {
-  if (!dateStr || !timeStr) return null;
+  if (!dateStr || !timeStr) return "";
   const iso = `${dateStr}T${timeStr}:00`;
-  const d = new Date(iso); // interpreted in user's local tz
-  return Number.isNaN(d.getTime()) ? null : d.toISOString();
+  const d = new Date(iso); // parsed in user's local tz
+  return Number.isNaN(d.getTime()) ? "" : d.toISOString();
 }
 
 export function fmtRangeLocal(startIso, endIso, tzLabel) {
@@ -44,6 +44,17 @@ export function fmtRangeLocal(startIso, endIso, tzLabel) {
   const st = s.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
   const et = e.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
   return `${d} ${st}–${et}${tzLabel ? ` (${tzLabel})` : ""}`;
+}
+
+export function composeStartEndISO(startDateStr, startTimeStr, endTimeStr) {
+  const startIso = combineLocal(startDateStr, startTimeStr);
+  if (!startIso || !endTimeStr) return { startIso: "", endIso: "" };
+  const [eh, em] = endTimeStr.split(":").map(Number);
+  const start = new Date(startIso);
+  const end = new Date(start);
+  end.setHours(eh, em || 0, 0, 0);
+  if (end <= start) end.setDate(end.getDate() + 1); // roll to next day
+  return { startIso: start.toISOString(), endIso: end.toISOString() };
 }
 
 /** Minutes between two ISO/Date */
