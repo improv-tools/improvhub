@@ -2,18 +2,19 @@
 import { useMemo, useState } from "react";
 import { Button, GhostButton, DangerButton, Label, Input, ErrorText, InfoText, Row } from "components/ui";
 import useCalendarData from "../hooks/useCalendarData";
-import { combineLocal, splitLocal, fmtRangeLocal, browserTZ } from "../utils/datetime";
+import { composeStartEndISO, splitLocal, fmtRangeLocal, browserTZ, combineLocal } from "../utils/datetime";
 
 const CATEGORIES = ["rehearsal", "social", "performance"];
 const FREQUENCIES = ["none", "daily", "weekly", "monthly"];
 const BYDAY = ["MO","TU","WE","TH","FR","SA","SU"];
 
-function DateTimeRow({ valueIso, onChange }) {
-  const { date, time } = splitLocal(valueIso);
+function DateTimeRow({ startDate, startTime, endTime, onChange }) {
   return (
     <Row>
-      <Input type="date" value={date} onChange={(e)=>onChange(combineLocal(e.target.value, time))} />
-      <Input type="time" value={time} onChange={(e)=>onChange(combineLocal(date, e.target.value))} />
+      <Input type="date" value={startDate} onChange={(e)=>onChange({ startDate: e.target.value })} />
+      <Input type="time" value={startTime} onChange={(e)=>onChange({ startTime: e.target.value })} />
+      <span style={{ alignSelf:"center", opacity:0.7 }}>→</span>
+      <Input type="time" value={endTime} onChange={(e)=>onChange({ endTime: e.target.value })} />
     </Row>
   );
 }
@@ -25,47 +26,74 @@ export default function CalendarPanel({ team }) {
   const windowEndIso = new Date(today.getFullYear(), today.getMonth(), today.getDate() + 120).toISOString();
 
   const {
-    loading, err, occurrences, events, reload,
+    loading, err, occurrences, events,
     createBase, updateBase, deleteBase,
     editOccurrence, cancelOccurrence, clearOccurrenceOverride,
   } = useCalendarData(team?.id, windowStartIso, windowEndIso);
 
-  // create form
+  // Create form state
   const [title, setTitle] = useState("");
   const [description, setDescription] = useState("");
   const [location, setLocation] = useState("");
   const [category, setCategory] = useState("rehearsal");
-  const [startIso, setStartIso] = useState("");
-  const [duration, setDuration] = useState(60);
+
+  const now = new Date();
+  const pad = (n)=> String(n).padStart(2,"0");
+  const defaultStartDate = `${now.getFullYear()}-${pad(now.getMonth()+1)}-${pad(now.getDate())}`;
+  const defaultStartTime = `${pad(now.getHours())}:${pad(now.getMinutes())}`;
+  const [startDate, setStartDate] = useState(defaultStartDate);
+  const [startTime, setStartTime] = useState(defaultStartTime);
+  const [endTime, setEndTime] = useState(pad((now.getHours()+1)%24)+":"+pad(now.getMinutes()));
+
   const [recurFreq, setRecurFreq] = useState("none");
-  const [recurInterval, setRecurInterval] = useState(1);
   const [recurByday, setRecurByday] = useState(["MO"]);
   const [recurByMonthday, setRecurByMonthday] = useState(0);
   const [recurWeekOfMonth, setRecurWeekOfMonth] = useState(0);
-  const [recurUntil, setRecurUntil] = useState("");
-  const [recurCount, setRecurCount] = useState("");
+
+  // End options: never | until | count (max 12)
+  const [endMode, setEndMode] = useState("never");
+  const [endUntilDate, setEndUntilDate] = useState("");
+  const [endCount, setEndCount] = useState(6);
+
+  // Edit series panel
+  const [editing, setEditing] = useState(null);
+  const [ed, setEd] = useState(null);
 
   const [msg, setMsg] = useState("");
   const [errMsg, setErrMsg] = useState("");
-  const [saving, setSaving] = useState(false);
-
-  // edit base event modal (simple inline editor)
-  const [editing, setEditing] = useState(null); // event object or null
-  const [ed, setEd] = useState(null); // local copy for editing
 
   const upcoming = useMemo(() => occurrences, [occurrences]);
 
   const toggleDay = (d) => {
-    setRecurByday((cur) =>
-      cur.includes(d) ? cur.filter((x) => x !== d) : [...cur, d].sort()
-    );
+    setRecurByday((cur) => cur.includes(d) ? cur.filter(x=>x!==d) : [...cur, d].sort());
+  };
+
+  const handleDateTimeChange = (patch) => {
+    if (patch.startDate !== undefined) setStartDate(patch.startDate);
+    if (patch.startTime !== undefined) setStartTime(patch.startTime);
+    if (patch.endTime !== undefined) setEndTime(patch.endTime);
   };
 
   const submitCreate = async () => {
-    setErrMsg(""); setMsg("");
-    if (!title.trim() || !startIso) { setErrMsg("Title and start required"); return; }
-    const start = new Date(startIso);
-    const end = new Date(start.getTime() + (Number(duration) || 60)*60000);
+    setMsg(""); setErrMsg("");
+
+    if (!title.trim()) return setErrMsg("Title is required");
+    if (!startDate || !startTime || !endTime) return setErrMsg("Start and end time are required");
+
+    const { startIso, endIso } = composeStartEndISO(startDate, startTime, endTime);
+    if (!startIso || !endIso) return setErrMsg("Invalid date/time");
+
+    let recur_until = null, recur_count = null;
+    if (recurFreq !== "none") {
+      if (endMode === "until") {
+        if (!endUntilDate) return setErrMsg("Choose an 'until' date");
+        // make 'until' inclusive through end of day local
+        recur_until = new Date(`${endUntilDate}T23:59:59`).toISOString();
+      } else if (endMode === "count") {
+        const n = Math.max(1, Math.min(Number(endCount) || 1, 12)); // clamp 1..12
+        recur_count = n;
+      }
+    }
 
     const payload = {
       title: title.trim(),
@@ -73,31 +101,29 @@ export default function CalendarPanel({ team }) {
       location: location.trim(),
       category,
       tz,
-      starts_at: start.toISOString(),
-      ends_at: end.toISOString(),
+      starts_at: startIso,
+      ends_at: endIso,
       recur_freq: recurFreq,
-      recur_interval: Number(recurInterval) || 1,
+      recur_interval: 1,              // no interval
       recur_byday: recurFreq === "weekly" ? recurByday : null,
       recur_bymonthday: recurFreq === "monthly" && recurByMonthday ? Number(recurByMonthday) : null,
       recur_week_of_month: recurFreq === "monthly" && recurWeekOfMonth ? Number(recurWeekOfMonth) : null,
-      recur_until: recurUntil || null,
-      recur_count: recurCount ? Number(recurCount) : null,
+      recur_until,
+      recur_count,
     };
 
-    setSaving(true);
     try {
       await createBase(payload);
+      // reset a few fields
       setTitle(""); setDescription(""); setLocation("");
       setCategory("rehearsal");
-      setStartIso(""); setDuration(60);
-      setRecurFreq("none"); setRecurInterval(1);
-      setRecurByday(["MO"]); setRecurByMonthday(0); setRecurWeekOfMonth(0);
-      setRecurUntil(""); setRecurCount("");
+      setStartDate(defaultStartDate); setStartTime(defaultStartTime);
+      setEndTime(pad((now.getHours()+1)%24)+":"+pad(now.getMinutes()));
+      setRecurFreq("none"); setRecurByday(["MO"]); setRecurByMonthday(0); setRecurWeekOfMonth(0);
+      setEndMode("never"); setEndUntilDate(""); setEndCount(6);
       setMsg("Event created.");
     } catch (e) {
       setErrMsg(e.message || "Failed to create event");
-    } finally {
-      setSaving(false);
     }
   };
 
@@ -105,30 +131,37 @@ export default function CalendarPanel({ team }) {
     const e = events.find((x) => x.id === eventId);
     if (!e) return;
     setEditing(e);
-    setEd({ ...e }); // shallow copy
+    setEd({ ...e });
   };
 
   const saveEditBase = async () => {
     const e = ed;
     if (!e) return;
-    setErrMsg(""); setMsg("");
+    setMsg(""); setErrMsg("");
+
+    // Update start/end via local inputs if changed
+    // Reconstruct from splitLocal on ed.starts_at, ends_at if desired in future UI
+
+    // Always enforce interval = 1; clamp count to 12 when provided
+    const patch = {
+      title: e.title ?? "",
+      description: e.description ?? "",
+      location: e.location ?? "",
+      category: e.category ?? "rehearsal",
+      starts_at: e.starts_at,
+      ends_at: e.ends_at,
+      tz: e.tz || tz,
+      recur_freq: e.recur_freq || "none",
+      recur_interval: 1,
+      recur_byday: e.recur_freq === "weekly" ? (Array.isArray(e.recur_byday) ? e.recur_byday : []) : null,
+      recur_bymonthday: e.recur_freq === "monthly" ? (e.recur_bymonthday || null) : null,
+      recur_week_of_month: e.recur_freq === "monthly" ? (e.recur_week_of_month || null) : null,
+      recur_until: e.recur_until || null,
+      recur_count: e.recur_count ? Math.min(Number(e.recur_count) || 1, 12) : null,
+    };
+
     try {
-      await updateBase(e.id, {
-        title: e.title ?? "",
-        description: e.description ?? "",
-        location: e.location ?? "",
-        category: e.category ?? "rehearsal",
-        starts_at: e.starts_at,
-        ends_at: e.ends_at,
-        tz: e.tz,
-        recur_freq: e.recur_freq,
-        recur_interval: e.recur_interval,
-        recur_byday: e.recur_freq === "weekly" ? e.recur_byday : null,
-        recur_bymonthday: e.recur_freq === "monthly" ? e.recur_bymonthday : null,
-        recur_week_of_month: e.recur_freq === "monthly" ? e.recur_week_of_month : null,
-        recur_until: e.recur_until || null,
-        recur_count: e.recur_count || null,
-      });
+      await updateBase(e.id, patch);
       setEditing(null); setEd(null);
       setMsg("Event updated.");
     } catch (er) {
@@ -138,7 +171,7 @@ export default function CalendarPanel({ team }) {
 
   const removeBase = async (eventId) => {
     if (!window.confirm("Delete this entire event/series?")) return;
-    setErrMsg(""); setMsg("");
+    setMsg(""); setErrMsg("");
     try {
       await deleteBase(eventId);
       setMsg("Event deleted.");
@@ -148,10 +181,9 @@ export default function CalendarPanel({ team }) {
   };
 
   const editOne = async (occ) => {
-    // simple prompt-driven per-occurrence edit; replace with nicer UI if you like
     const newTitle = window.prompt("Edit occurrence title", occ.title || "");
     if (newTitle == null) return;
-    setErrMsg(""); setMsg("");
+    setMsg(""); setErrMsg("");
     try {
       await editOccurrence(occ.event_id, occ.base_start, { title: newTitle });
       setMsg("Occurrence updated.");
@@ -162,7 +194,7 @@ export default function CalendarPanel({ team }) {
 
   const cancelOne = async (occ) => {
     if (!window.confirm("Cancel just this occurrence?")) return;
-    setErrMsg(""); setMsg("");
+    setMsg(""); setErrMsg("");
     try {
       await cancelOccurrence(occ.event_id, occ.base_start);
       setMsg("Occurrence canceled.");
@@ -173,7 +205,7 @@ export default function CalendarPanel({ team }) {
 
   const clearOneOverride = async (occ) => {
     if (!occ.overridden) return;
-    setErrMsg(""); setMsg("");
+    setMsg(""); setErrMsg("");
     try {
       await clearOccurrenceOverride(occ.event_id, occ.base_start);
       setMsg("Occurrence override cleared.");
@@ -202,26 +234,33 @@ export default function CalendarPanel({ team }) {
         <Row>
           <Input placeholder="Description" value={description} onChange={(e)=>setDescription(e.target.value)} style={{ minWidth: 420 }} />
         </Row>
+        <DateTimeRow
+          startDate={startDate}
+          startTime={startTime}
+          endTime={endTime}
+          onChange={(p)=>handleDateTimeChange(p)}
+        />
+
+        {/* Recurrence */}
         <Row>
-          <DateTimeRow valueIso={startIso} onChange={setStartIso} />
-          <Input type="number" min={15} step={15} value={duration} onChange={(e)=>setDuration(e.target.value)} style={{ width: 120 }} />
-          <span style={{ alignSelf: "center", opacity: 0.8 }}>minutes</span>
-        </Row>
-        <Row>
-          <select value={recurFreq} onChange={(e)=>setRecurFreq(e.target.value)} style={styles.select}>
-            {FREQUENCIES.map((f)=> <option key={f} value={f}>{f}</option>)}
-          </select>
-          <Input type="number" min={1} value={recurInterval} onChange={(e)=>setRecurInterval(e.target.value)} style={{ width: 120 }} />
-          <span style={{ alignSelf: "center", opacity: 0.8 }}>interval</span>
+          <Label>
+            Frequency
+            <select value={recurFreq} onChange={(e)=>setRecurFreq(e.target.value)} style={styles.select}>
+              {FREQUENCIES.map((f)=> <option key={f} value={f}>{f}</option>)}
+            </select>
+          </Label>
 
           {recurFreq === "weekly" && (
-            <div style={{ display:"flex", gap:6, flexWrap:"wrap" }}>
-              {BYDAY.map((d)=>(
-                <label key={d} style={{ display:"inline-flex", gap:6, alignItems:"center" }}>
-                  <input type="checkbox" checked={recurByday.includes(d)} onChange={()=>toggleDay(d)} />
-                  <span>{d}</span>
-                </label>
-              ))}
+            <div style={{ display:"flex", gap:6, flexWrap:"wrap", alignItems:"center" }}>
+              {BYDAY.map((d)=> {
+                const chk = recurByday.includes(d);
+                return (
+                  <label key={d} style={{ display:"inline-flex", gap:6, alignItems:"center" }}>
+                    <input type="checkbox" checked={chk} onChange={()=>toggleDay(d)} />
+                    <span>{d}</span>
+                  </label>
+                );
+              })}
             </div>
           )}
 
@@ -243,27 +282,44 @@ export default function CalendarPanel({ team }) {
               </Label>
             </Row>
           )}
-
-          <Label>
-            Until (optional)
-            <Input type="date" value={recurUntil ? splitLocal(recurUntil).date : ""} onChange={(e)=>setRecurUntil(e.target.value ? new Date(`${e.target.value}T00:00:00`).toISOString() : "")} />
-          </Label>
-          <Label>
-            Count (optional)
-            <Input type="number" min={1} value={recurCount} onChange={(e)=>setRecurCount(e.target.value)} style={{ width: 120 }} />
-          </Label>
         </Row>
+
+        {/* End options (Never / Until / Count (<=12)) */}
+        {recurFreq !== "none" && (
+          <Row>
+            <label style={{ display:"inline-flex", gap:8, alignItems:"center" }}>
+              <input type="radio" name="endmode" checked={endMode==="never"} onChange={()=>setEndMode("never")} />
+              <span>Never</span>
+            </label>
+            <label style={{ display:"inline-flex", gap:8, alignItems:"center" }}>
+              <input type="radio" name="endmode" checked={endMode==="until"} onChange={()=>setEndMode("until")} />
+              <span>Until</span>
+            </label>
+            {endMode==="until" && (
+              <Input type="date" value={endUntilDate} onChange={(e)=>setEndUntilDate(e.target.value)} />
+            )}
+            <label style={{ display:"inline-flex", gap:8, alignItems:"center" }}>
+              <input type="radio" name="endmode" checked={endMode==="count"} onChange={()=>setEndMode("count")} />
+              <span>After</span>
+            </label>
+            {endMode==="count" && (
+              <>
+                <Input type="number" min={1} max={12} value={endCount} onChange={(e)=>setEndCount(Math.max(1, Math.min(12, Number(e.target.value) || 1)))} style={{ width: 100 }} />
+                <span style={{ alignSelf:"center", opacity:0.8 }}>occurrences (max 12)</span>
+              </>
+            )}
+          </Row>
+        )}
+
         <Row>
-          <Button onClick={submitCreate} disabled={saving || !title.trim() || !startIso}>
-            {saving ? "Saving…" : "Add"}
-          </Button>
+          <Button onClick={submitCreate} disabled={!title.trim() || !startDate || !startTime || !endTime}>Add</Button>
         </Row>
         <p style={{ opacity: 0.6, fontSize: 12, marginTop: 8 }}>
-          Times saved in UTC; event timezone recorded as <code>{tz}</code>. Recurrence supports: daily/weekly (by weekday)/monthly (by day or nth weekday).
+          Interval is fixed at 1. If you set an "until" date or a "count", we cap to 12 total occurrences.
         </p>
       </div>
 
-      {/* Edit base event (inline panel when open) */}
+      {/* Edit series panel (inline) */}
       {editing && ed && (
         <div style={{ border: "1px solid rgba(255,255,255,0.2)", borderRadius: 12, padding: 12, marginBottom: 16 }}>
           <h4 style={{ margin: "0 0 10px", fontSize: 14 }}>Edit event</h4>
@@ -277,29 +333,37 @@ export default function CalendarPanel({ team }) {
           <Row>
             <Input placeholder="Description" value={ed.description || ""} onChange={(e)=>setEd({ ...ed, description: e.target.value })} style={{ minWidth: 420 }} />
           </Row>
-          <Row>
-            <span>Starts</span>
-            <DateTimeRow
-              valueIso={ed.starts_at}
-              onChange={(v)=> {
-                const dur = new Date(ed.ends_at) - new Date(ed.starts_at);
-                const start = new Date(v);
-                const end = new Date(start.getTime() + dur);
-                setEd({ ...ed, starts_at: start.toISOString(), ends_at: end.toISOString() });
-              }}
-            />
-          </Row>
+
+          {/* Start/end editors */}
+          {(() => {
+            const s = splitLocal(ed.starts_at); const e = splitLocal(ed.ends_at);
+            return (
+              <Row>
+                <Input type="date" value={s.date} onChange={(ev)=>{
+                  const { startIso, endIso } = composeStartEndISO(ev.target.value, s.time, e.time);
+                  setEd({ ...ed, starts_at: startIso, ends_at: endIso });
+                }} />
+                <Input type="time" value={s.time} onChange={(ev)=>{
+                  const { startIso, endIso } = composeStartEndISO(s.date, ev.target.value, e.time);
+                  setEd({ ...ed, starts_at: startIso, ends_at: endIso });
+                }} />
+                <span style={{ alignSelf:"center", opacity:0.7 }}>→</span>
+                <Input type="time" value={e.time} onChange={(ev)=>{
+                  const { startIso, endIso } = composeStartEndISO(s.date, s.time, ev.target.value);
+                  setEd({ ...ed, starts_at: startIso, ends_at: endIso });
+                }} />
+              </Row>
+            );
+          })()}
+
           <Row>
             <Label>
               Frequency
-              <select value={ed.recur_freq || "none"} onChange={(e)=>setEd({ ...ed, recur_freq: e.target.value })} style={styles.select}>
+              <select value={ed.recur_freq || "none"} onChange={(e2)=>setEd({ ...ed, recur_freq: e2.target.value })} style={styles.select}>
                 {FREQUENCIES.map((f)=> <option key={f} value={f}>{f}</option>)}
               </select>
             </Label>
-            <Label>
-              Interval
-              <Input type="number" min={1} value={ed.recur_interval || 1} onChange={(e)=>setEd({ ...ed, recur_interval: Number(e.target.value) })} style={{ width: 120 }} />
-            </Label>
+
             {ed.recur_freq === "weekly" && (
               <div style={{ display:"flex", gap:6, flexWrap:"wrap", alignItems:"center" }}>
                 {BYDAY.map((d)=> {
@@ -307,46 +371,48 @@ export default function CalendarPanel({ team }) {
                   const chk = cur.includes(d);
                   return (
                     <label key={d} style={{ display:"inline-flex", gap:6, alignItems:"center" }}>
-                      <input
-                        type="checkbox"
-                        checked={chk}
-                        onChange={()=>{
-                          const next = chk ? cur.filter(x=>x!==d) : [...cur, d].sort();
-                          setEd({ ...ed, recur_byday: next });
-                        }}
-                      />
+                      <input type="checkbox" checked={chk} onChange={()=>{
+                        const next = chk ? cur.filter(x=>x!==d) : [...cur, d].sort();
+                        setEd({ ...ed, recur_byday: next });
+                      }} />
                       <span>{d}</span>
                     </label>
                   );
                 })}
               </div>
             )}
+
             {ed.recur_freq === "monthly" && (
               <Row>
                 <Label>By month-day
-                  <Input type="number" min={1} max={31} value={ed.recur_bymonthday || 0} onChange={(e)=>setEd({ ...ed, recur_bymonthday: Number(e.target.value) || null })} style={{ width: 120 }} />
+                  <Input type="number" min={1} max={31} value={ed.recur_bymonthday || 0} onChange={(e2)=>setEd({ ...ed, recur_bymonthday: Number(e2.target.value) || null })} style={{ width: 120 }} />
                 </Label>
                 <Label>or week-of-month (1..4, -1=last)
-                  <Input type="number" min={-1} max={4} value={ed.recur_week_of_month || 0} onChange={(e)=>setEd({ ...ed, recur_week_of_month: Number(e.target.value) || null })} style={{ width: 140 }} />
+                  <Input type="number" min={-1} max={4} value={ed.recur_week_of_month || 0} onChange={(e2)=>setEd({ ...ed, recur_week_of_month: Number(e2.target.value) || null })} style={{ width: 140 }} />
                 </Label>
                 <Label>Weekday
-                  <select value={(Array.isArray(ed.recur_byday) && ed.recur_byday[0]) || "MO"} onChange={(e)=>setEd({ ...ed, recur_byday: [e.target.value] })} style={styles.select}>
+                  <select value={(Array.isArray(ed.recur_byday) && ed.recur_byday[0]) || "MO"} onChange={(e2)=>setEd({ ...ed, recur_byday: [e2.target.value] })} style={styles.select}>
                     {BYDAY.map((d)=> <option key={d} value={d}>{d}</option>)}
                   </select>
                 </Label>
               </Row>
             )}
+          </Row>
+
+          {/* End options on edit (simple fields) */}
+          <Row>
             <Label>Until
               <Input
                 type="date"
                 value={ed.recur_until ? splitLocal(ed.recur_until).date : ""}
-                onChange={(e)=>setEd({ ...ed, recur_until: e.target.value ? new Date(`${e.target.value}T00:00:00`).toISOString() : null })}
+                onChange={(e2)=>setEd({ ...ed, recur_until: e2.target.value ? new Date(`${e2.target.value}T23:59:59`).toISOString() : null })}
               />
             </Label>
-            <Label>Count
-              <Input type="number" min={1} value={ed.recur_count || ""} onChange={(e)=>setEd({ ...ed, recur_count: e.target.value ? Number(e.target.value) : null })} style={{ width: 120 }} />
+            <Label>Count (max 12)
+              <Input type="number" min={1} max={12} value={ed.recur_count || ""} onChange={(e2)=>setEd({ ...ed, recur_count: e2.target.value ? Math.max(1, Math.min(12, Number(e2.target.value) || 1)) : null })} style={{ width: 120 }} />
             </Label>
           </Row>
+
           <Row>
             <Button onClick={saveEditBase}>Save</Button>
             <GhostButton onClick={()=>{ setEditing(null); setEd(null); }}>Cancel</GhostButton>
@@ -392,7 +458,16 @@ export default function CalendarPanel({ team }) {
               </div>
               <Row>
                 <GhostButton onClick={() => openEditBase(occ.event_id)}>Edit series</GhostButton>
-                <GhostButton onClick={() => editOne(occ)}>Edit occurrence</GhostButton>
+                <GhostButton onClick={() => {
+                  const s = splitLocal(occ.starts_at);
+                  const e = splitLocal(occ.ends_at);
+                  const newEnd = window.prompt("New end time (HH:MM)", e.time);
+                  if (!newEnd) return;
+                  const sIso = combineLocal(s.date, s.time);
+                  const { endIso } = composeStartEndISO(s.date, s.time, newEnd);
+                  // edit this single occurrence duration/time only
+                  editOccurrence(occ.event_id, occ.base_start, { ends_at: endIso }).catch(err=>console.error(err));
+                }}>Edit occurrence</GhostButton>
                 {occ.overridden && <GhostButton onClick={() => clearOneOverride(occ)}>Clear override</GhostButton>}
                 <DangerButton onClick={() => cancelOne(occ)}>Cancel occurrence</DangerButton>
               </Row>
