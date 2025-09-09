@@ -1,3 +1,4 @@
+
 import React, { forwardRef } from "react";
 
 /* ---------- Design tokens ---------- */
@@ -7,19 +8,17 @@ export const tokens = {
     card: "#14141a",
     text: "#ffffff",
     textMuted: "rgba(255,255,255,0.8)",
-    border: "rgba(255,255,255,0.06)",
+    border: "rgba(255,255,255,0.08)",
     borderMuted: "rgba(255,255,255,0.2)",
     accent: "#ffffff",
     info: "#a0e7ff",
     danger: "#ff6b6b",
   },
   radius: { lg: 16, md: 10, sm: 8 },
-  space: { xs: 6, sm: 8, md: 10, lg: 12, xl: 16, xxl: 20 },
-  shadow: "0 10px 30px rgba(0,0,0,0.35)",
+  space: { xs: 6, sm: 10, md: 14, lg: 20, xl: 28 },
 };
 
-/* ---------- Helpers ---------- */
-const merge = (a, b) => (b ? { ...a, ...b } : a);
+const merge = (...os) => Object.assign({}, ...os);
 
 /* ---------- Layout ---------- */
 export function CenterWrap({ children, style }) {
@@ -41,152 +40,113 @@ export function CenterWrap({ children, style }) {
 export function Card({ children, style }) {
   return (
     <div style={merge({
-      width: "100%",
-      maxWidth: 560,
+      width: "min(1200px, 96vw)",
       background: tokens.color.card,
-      color: tokens.color.text,
-      borderRadius: tokens.radius.lg,
-      padding: tokens.space.xxl,
-      boxShadow: tokens.shadow,
       border: `1px solid ${tokens.color.border}`,
+      borderRadius: tokens.radius.lg,
+      padding: tokens.space.lg,
+      boxShadow: "0 12px 40px rgba(0,0,0,0.4)",
     }, style)}>
       {children}
     </div>
   );
 }
 
-/* ---------- Typography ---------- */
+/* ---------- Headings & text ---------- */
 export function H1({ children, style }) {
-  return <h1 style={merge({
-    fontSize: 20, margin: 0, marginBottom: tokens.space.xl, letterSpacing: 0.3
-  }, style)}>{children}</h1>;
+  return <h1 style={merge({ margin: 0, fontSize: 28, letterSpacing: 0.3 }, style)}>{children}</h1>;
 }
 
-/* ---------- Inputs ---------- */
-export const Input = forwardRef(function Input(
-  { style, ...props }, ref
-) {
+export function ErrorText({ children, style }) {
+  return <div style={merge({ color: tokens.color.danger, fontSize: 14 }, style)}>{children}</div>;
+}
+export function InfoText({ children, style }) {
+  return <div style={merge({ color: tokens.color.info, fontSize: 14 }, style)}>{children}</div>;
+}
+
+/* ---------- Form elements ---------- */
+export function Label({ children, style }) {
+  return <label style={merge({ display: "grid", gap: 6, fontSize: 14 }, style)}>{children}</label>;
+}
+
+export const Input = forwardRef(function Input({ style, ...props }, ref) {
   return (
     <input
       ref={ref}
-      style={merge({
-        background: "#0f0f14",
-        color: tokens.color.text,
-        border: `1px solid ${tokens.color.borderMuted}`,
-        borderRadius: tokens.radius.md,
-        padding: "10px 12px",
-        outline: "none",
-        width: "100%",
-      }, style)}
       {...props}
+      style={merge({
+        background: "transparent",
+        border: `1px solid ${tokens.color.borderMuted}`,
+        color: tokens.color.text,
+        padding: "10px 12px",
+        borderRadius: tokens.radius.sm,
+        outline: "none",
+      }, style)}
     />
   );
 });
 
-export function Label({ children, style }) {
-  return <label style={merge({ display: "grid", gap: tokens.space.xs, fontSize: 14 }, style)}>{children}</label>;
+function baseBtnStyle(kind="solid") {
+  const common = {
+    borderRadius: tokens.radius.sm,
+    padding: "9px 14px",
+    fontWeight: 600,
+    cursor: "pointer",
+    background: "transparent",
+    color: tokens.color.text,
+    border: `1px solid ${tokens.color.borderMuted}`,
+  };
+  if (kind === "solid") {
+    return merge(common, { background: "#1f1f29", borderColor: tokens.color.border });
+  }
+  if (kind === "danger") {
+    return merge(common, { background: "transparent", borderColor: tokens.color.danger, color: tokens.color.danger });
+  }
+  // ghost
+  return merge(common, { background: "transparent", borderColor: tokens.color.border });
 }
 
-/* ---------- Buttons ---------- */
 export function Button({ children, style, ...props }) {
-  return (
-    <button
-      style={merge({
-        background: tokens.color.accent,
-        color: "#000",
-        border: "none",
-        padding: "10px 14px",
-        borderRadius: tokens.radius.md,
-        cursor: "pointer",
-        fontWeight: 600,
-      }, style)}
-      {...props}
-    >
-      {children}
-    </button>
-  );
+  return <button {...props} style={merge(baseBtnStyle("solid"), style)}>{children}</button>;
 }
-
 export function GhostButton({ children, style, ...props }) {
-  return (
-    <button
-      style={merge({
-        background: "transparent",
-        color: tokens.color.text,
-        border: `1px solid ${tokens.color.borderMuted}`,
-        padding: "10px 14px",
-        borderRadius: tokens.radius.md,
-        cursor: "pointer",
-      }, style)}
-      {...props}
-    >
-      {children}
-    </button>
-  );
+  return <button {...props} style={merge(baseBtnStyle("ghost"), style)}>{children}</button>;
 }
-
-/* ---------- Notices ---------- */
-export function ErrorText({ children, style }) {
-  return <p style={merge({ color: tokens.color.danger, margin: "0 0 12px" }, style)}>{children}</p>;
-}
-export function InfoText({ children, style }) {
-  return <p style={merge({ color: tokens.color.info, margin: "0 0 12px" }, style)}>{children}</p>;
-}
-
-/* ---------- Tabs ---------- */
-export function Tabs({ children, style }) {
-  return (
-    <div style={merge({
-      display: "flex",
-      gap: tokens.space.sm,
-      marginBottom: tokens.space.lg,
-      background: "#0f0f14",
-      padding: tokens.space.sm,
-      borderRadius: tokens.radius.md,
-      flexWrap: "wrap",
-    }, style)}>{children}</div>
-  );
-}
-export function Tab({ active, children, style, ...props }) {
-  return (
-    <button
-      style={merge({
-        border: `1px solid ${tokens.color.borderMuted}`,
-        padding: "8px 10px",
-        borderRadius: tokens.radius.sm,
-        background: active ? tokens.color.accent : "transparent",
-        color: active ? "#000" : tokens.color.text,
-        cursor: "pointer",
-      }, style)}
-      {...props}
-    >
-      {children}
-    </button>
-  );
-}
-
 export function DangerButton({ children, style, ...props }) {
+  return <button {...props} style={merge(baseBtnStyle("danger"), style)}>{children}</button>;
+}
+
+/* ---------- Simple tabs ---------- */
+export function Tabs({ value, onChange, tabs, style }) {
+  return (
+    <div style={merge({ display: "flex", gap: 8 }, style)}>
+      {tabs.map(t => (
+        <Tab key={t.key} active={value === t.key} onClick={() => onChange(t.key)}>
+          {t.label}
+        </Tab>
+      ))}
+    </div>
+  );
+}
+export function Tab({ children, active, style, ...props }) {
   return (
     <button
-      style={{
-        background: tokens.color.danger,
-        color: "#000",
-        border: "none",
-        padding: "10px 14px",
-        borderRadius: tokens.radius.md,
-        cursor: "pointer",
-        fontWeight: 700,
-        ...style,
-      }}
       {...props}
+      style={merge({
+        borderRadius: 999,
+        padding: "6px 12px",
+        border: `1px solid ${active ? tokens.color.text : tokens.color.borderMuted}`,
+        background: "transparent",
+        color: active ? tokens.color.text : tokens.color.textMuted,
+        cursor: "pointer",
+      }, style)}
     >
       {children}
     </button>
   );
 }
 
-
-/* ---------- Small layout helpers ---------- */
+/* ---------- Misc layout ---------- */
 export function Row({ children, style }) {
-  return <div style={merge({ display: "flex", gap: 10, marginTop: tokens.space.lg, flexWrap: "wrap" }, style)}>{children}</div>;
+  return <div style={merge({ display: "flex", gap: 10, alignItems: "center" }, style)}>{children}</div>;
 }
