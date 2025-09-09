@@ -1,4 +1,3 @@
-
 import { createContext, useContext, useEffect, useMemo, useState } from "react";
 import { supabase } from "lib/supabaseClient";
 
@@ -13,17 +12,17 @@ export function AuthProvider({ children }) {
   useEffect(() => {
     let mounted = true;
 
-    supabase.auth.getSession().then(({ data, error }) => {
-      if (mounted) {
-        setSession(data?.session ?? null);
-        setLoading(false);
-      }
+    supabase.auth.getSession().then(({ data }) => {
+      if (!mounted) return;
+      setSession(data.session ?? null);
+      setRecovering(false);
+      setLoading(false);
     });
 
-    const { data: sub } = supabase.auth.onAuthStateChange((evt, sess) => {
+    const { data: sub } = supabase.auth.onAuthStateChange((event, sess) => {
       setSession(sess ?? null);
-      if (evt === "PASSWORD_RECOVERY") setRecovering(true);
-      if (evt === "SIGNED_IN" || evt === "USER_UPDATED") setRecovering(false);
+      setLoading(false);
+      setRecovering(event === "PASSWORD_RECOVERY");
     });
 
     return () => {
@@ -32,24 +31,29 @@ export function AuthProvider({ children }) {
     };
   }, []);
 
-  const displayName =
-    session?.user?.user_metadata?.display_name
-    || (session?.user?.email ? session.user.email.split("@")[0] : "");
+  const displayName = useMemo(() => {
+    const u = session?.user;
+    return (
+      u?.user_metadata?.display_name ||
+      (u?.email ? u.email.split("@")[0] : "") ||
+      ""
+    );
+  }, [session]);
 
-  async function refreshUser() {
-    const { data, error } = await supabase.auth.getUser();
-    if (!error) {
-      const { data: sessData } = await supabase.auth.getSession();
-      setSession(sessData?.session ?? null);
-    }
-  }
+  const refreshUser = async () => {
+    // Re-fetch the current session to get latest user metadata
+    const { data, error } = await supabase.auth.getSession();
+    if (!error) setSession(data.session ?? null);
+    return { data, error };
+  };
 
   const value = useMemo(
     () => ({
       session,
       user: session?.user || null,
       loading,
-      recovering, setRecovering,
+      recovering,
+      setRecovering,
       displayName, // 👈 use this everywhere for names
       refreshUser,
     }),
