@@ -29,7 +29,7 @@ export async function createTeam(name) {
 
 export async function listTeamMembersRPC(teamId) {
   const { data, error } = await supabase.rpc("list_team_members", {
-    p_team_id: teamId,   // <-- must match the SQL parameter name
+    p_team_id: teamId,      // <-- must match SQL param name
   });
   if (error) throw new Error(error.message);
   return data ?? [];
