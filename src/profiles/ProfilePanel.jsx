@@ -5,7 +5,7 @@ import { supabase } from "lib/supabaseClient";
 import { H1, Label, Input, Button, ErrorText, InfoText } from "components/ui";
 
 export default function ProfilePanel() {
-  const { session } = useAuth();
+  const { session, refreshUser } = useAuth();
   const user = session?.user;
 
   // Source of truth = Auth display name (raw_user_meta_data.display_name)
@@ -23,42 +23,20 @@ export default function ProfilePanel() {
   }, [currentDisplayName]);
 
   const save = async () => {
-    const next = (name || "").trim();
-    if (!next) return;
-    setSaving(true);
-    setErr("");
-    setMsg("");
-    try {
-      // ✅ Update Auth display name (NOT profiles)
-      const { error } = await supabase.auth.updateUser({
-        data: { display_name: next },
-      });
-      if (error) throw error;
-
-      // Nudge session to refresh so other screens see the new name
-      await supabase.auth.getUser();
-
-      setMsg("Saved ✓");
-      setTimeout(() => setMsg(""), 1500);
-    } catch (e) {
-      setErr(e.message || "Save failed");
-    } finally {
-      setSaving(false);
-    }
+    setErr(""); setMsg(""); setSaving(true);
+    const { error } = await supabase.auth.updateUser({ data: { display_name: name.trim() } });
+    setSaving(false);
+    if (error) setErr(error.message || "Failed to save");
+    else { setMsg("Saved!"); await refreshUser(); }
   };
 
   return (
-    <div>
+    <div style={{ display: "grid", gap: 12 }}>
       <H1>Profile</H1>
 
       <Label>
         Display name
-        <Input
-          value={name}
-          onChange={(e) => setName(e.target.value)}
-          placeholder="Your name"
-          onKeyDown={(e) => e.key === "Enter" && save()}
-        />
+        <Input value={name} onChange={(e)=>setName(e.target.value)} />
       </Label>
 
       <Button onClick={save} disabled={saving || !name.trim()}>
