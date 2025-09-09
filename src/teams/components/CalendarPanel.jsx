@@ -50,8 +50,8 @@ export default function CalendarPanel({ team }) {
   const [recurByMonthday, setRecurByMonthday] = useState(0);
   const [recurWeekOfMonth, setRecurWeekOfMonth] = useState(0);
 
-  // End options: never | until | count (max 12)
-  const [endMode, setEndMode] = useState("never");
+  // End options: UNTIL or COUNT (max 12). No "Never".
+  const [endMode, setEndMode] = useState("count");       // 'until' | 'count'
   const [endUntilDate, setEndUntilDate] = useState("");
   const [endCount, setEndCount] = useState(6);
 
@@ -83,15 +83,17 @@ export default function CalendarPanel({ team }) {
     const { startIso, endIso } = composeStartEndISO(startDate, startTime, endTime);
     if (!startIso || !endIso) return setErrMsg("Invalid date/time");
 
+    // Enforce end rule for recurring series: must have UNTIL or COUNT (<=12).
     let recur_until = null, recur_count = null;
     if (recurFreq !== "none") {
       if (endMode === "until") {
-        if (!endUntilDate) return setErrMsg("Choose an 'until' date");
-        // make 'until' inclusive through end of day local
+        if (!endUntilDate) return setErrMsg("Choose an 'until' date for recurring events");
         recur_until = new Date(`${endUntilDate}T23:59:59`).toISOString();
       } else if (endMode === "count") {
-        const n = Math.max(1, Math.min(Number(endCount) || 1, 12)); // clamp 1..12
+        const n = Math.max(1, Math.min(Number(endCount) || 1, 12));
         recur_count = n;
+      } else {
+        return setErrMsg("Recurring events must end by 'Until' or 'After N occurrences'.");
       }
     }
 
@@ -104,7 +106,7 @@ export default function CalendarPanel({ team }) {
       starts_at: startIso,
       ends_at: endIso,
       recur_freq: recurFreq,
-      recur_interval: 1,              // no interval
+      recur_interval: 1,              // fixed interval = 1
       recur_byday: recurFreq === "weekly" ? recurByday : null,
       recur_bymonthday: recurFreq === "monthly" && recurByMonthday ? Number(recurByMonthday) : null,
       recur_week_of_month: recurFreq === "monthly" && recurWeekOfMonth ? Number(recurWeekOfMonth) : null,
@@ -114,13 +116,13 @@ export default function CalendarPanel({ team }) {
 
     try {
       await createBase(payload);
-      // reset a few fields
+      // reset
       setTitle(""); setDescription(""); setLocation("");
       setCategory("rehearsal");
       setStartDate(defaultStartDate); setStartTime(defaultStartTime);
       setEndTime(pad((now.getHours()+1)%24)+":"+pad(now.getMinutes()));
       setRecurFreq("none"); setRecurByday(["MO"]); setRecurByMonthday(0); setRecurWeekOfMonth(0);
-      setEndMode("never"); setEndUntilDate(""); setEndCount(6);
+      setEndMode("count"); setEndUntilDate(""); setEndCount(6);
       setMsg("Event created.");
     } catch (e) {
       setErrMsg(e.message || "Failed to create event");
@@ -139,10 +141,15 @@ export default function CalendarPanel({ team }) {
     if (!e) return;
     setMsg(""); setErrMsg("");
 
-    // Update start/end via local inputs if changed
-    // Reconstruct from splitLocal on ed.starts_at, ends_at if desired in future UI
+    // Enforce end rule on edit as well.
+    if (e.recur_freq && e.recur_freq !== "none") {
+      const hasUntil = !!e.recur_until;
+      const hasCount = e.recur_count != null && e.recur_count !== "";
+      if (!hasUntil && !hasCount) {
+        return setErrMsg("Recurring events must end by 'Until' date or 'After N occurrences' (≤12).");
+      }
+    }
 
-    // Always enforce interval = 1; clamp count to 12 when provided
     const patch = {
       title: e.title ?? "",
       description: e.description ?? "",
@@ -214,6 +221,8 @@ export default function CalendarPanel({ team }) {
     }
   };
 
+  const upcoming = useMemo(() => occurrences, [occurrences]);
+
   return (
     <div style={{ marginTop: 16 }}>
       <h3 style={{ margin: "8px 0 8px", fontSize: 16 }}>Calendar</h3>
@@ -238,7 +247,11 @@ export default function CalendarPanel({ team }) {
           startDate={startDate}
           startTime={startTime}
           endTime={endTime}
-          onChange={(p)=>handleDateTimeChange(p)}
+          onChange={(p)=>{
+            if (p.startDate !== undefined) setStartDate(p.startDate);
+            if (p.startTime !== undefined) setStartTime(p.startTime);
+            if (p.endTime !== undefined) setEndTime(p.endTime);
+          }}
         />
 
         {/* Recurrence */}
@@ -284,13 +297,9 @@ export default function CalendarPanel({ team }) {
           )}
         </Row>
 
-        {/* End options (Never / Until / Count (<=12)) */}
+        {/* End options (ONLY Until / Count (<=12)) */}
         {recurFreq !== "none" && (
           <Row>
-            <label style={{ display:"inline-flex", gap:8, alignItems:"center" }}>
-              <input type="radio" name="endmode" checked={endMode==="never"} onChange={()=>setEndMode("never")} />
-              <span>Never</span>
-            </label>
             <label style={{ display:"inline-flex", gap:8, alignItems:"center" }}>
               <input type="radio" name="endmode" checked={endMode==="until"} onChange={()=>setEndMode("until")} />
               <span>Until</span>
@@ -304,7 +313,14 @@ export default function CalendarPanel({ team }) {
             </label>
             {endMode==="count" && (
               <>
-                <Input type="number" min={1} max={12} value={endCount} onChange={(e)=>setEndCount(Math.max(1, Math.min(12, Number(e.target.value) || 1)))} style={{ width: 100 }} />
+                <Input
+                  type="number"
+                  min={1}
+                  max={12}
+                  value={endCount}
+                  onChange={(e)=>setEndCount(Math.max(1, Math.min(12, Number(e.target.value) || 1)))}
+                  style={{ width: 100 }}
+                />
                 <span style={{ alignSelf:"center", opacity:0.8 }}>occurrences (max 12)</span>
               </>
             )}
@@ -312,10 +328,12 @@ export default function CalendarPanel({ team }) {
         )}
 
         <Row>
-          <Button onClick={submitCreate} disabled={!title.trim() || !startDate || !startTime || !endTime}>Add</Button>
+          <Button onClick={submitCreate} disabled={!title.trim() || !startDate || !startTime || !endTime}>
+            Add
+          </Button>
         </Row>
         <p style={{ opacity: 0.6, fontSize: 12, marginTop: 8 }}>
-          Interval is fixed at 1. If you set an "until" date or a "count", we cap to 12 total occurrences.
+          Interval is fixed at 1. Recurring events must end by an <strong>Until</strong> date or <strong>After N</strong> (≤12) occurrences.
         </p>
       </div>
 
@@ -336,19 +354,19 @@ export default function CalendarPanel({ team }) {
 
           {/* Start/end editors */}
           {(() => {
-            const s = splitLocal(ed.starts_at); const e = splitLocal(ed.ends_at);
+            const s = splitLocal(ed.starts_at); const e2 = splitLocal(ed.ends_at);
             return (
               <Row>
                 <Input type="date" value={s.date} onChange={(ev)=>{
-                  const { startIso, endIso } = composeStartEndISO(ev.target.value, s.time, e.time);
+                  const { startIso, endIso } = composeStartEndISO(ev.target.value, s.time, e2.time);
                   setEd({ ...ed, starts_at: startIso, ends_at: endIso });
                 }} />
                 <Input type="time" value={s.time} onChange={(ev)=>{
-                  const { startIso, endIso } = composeStartEndISO(s.date, ev.target.value, e.time);
+                  const { startIso, endIso } = composeStartEndISO(s.date, ev.target.value, e2.time);
                   setEd({ ...ed, starts_at: startIso, ends_at: endIso });
                 }} />
                 <span style={{ alignSelf:"center", opacity:0.7 }}>→</span>
-                <Input type="time" value={e.time} onChange={(ev)=>{
+                <Input type="time" value={e2.time} onChange={(ev)=>{
                   const { startIso, endIso } = composeStartEndISO(s.date, s.time, ev.target.value);
                   setEd({ ...ed, starts_at: startIso, ends_at: endIso });
                 }} />
@@ -399,7 +417,7 @@ export default function CalendarPanel({ team }) {
             )}
           </Row>
 
-          {/* End options on edit (simple fields) */}
+          {/* End options on edit (ONLY Until / Count) */}
           <Row>
             <Label>Until
               <Input
@@ -409,7 +427,14 @@ export default function CalendarPanel({ team }) {
               />
             </Label>
             <Label>Count (max 12)
-              <Input type="number" min={1} max={12} value={ed.recur_count || ""} onChange={(e2)=>setEd({ ...ed, recur_count: e2.target.value ? Math.max(1, Math.min(12, Number(e2.target.value) || 1)) : null })} style={{ width: 120 }} />
+              <Input
+                type="number"
+                min={1}
+                max={12}
+                value={ed.recur_count || ""}
+                onChange={(e2)=>setEd({ ...ed, recur_count: e2.target.value ? Math.max(1, Math.min(12, Number(e2.target.value) || 1)) : null })}
+                style={{ width: 120 }}
+              />
             </Label>
           </Row>
 
@@ -460,12 +485,11 @@ export default function CalendarPanel({ team }) {
                 <GhostButton onClick={() => openEditBase(occ.event_id)}>Edit series</GhostButton>
                 <GhostButton onClick={() => {
                   const s = splitLocal(occ.starts_at);
-                  const e = splitLocal(occ.ends_at);
-                  const newEnd = window.prompt("New end time (HH:MM)", e.time);
+                  const e2 = splitLocal(occ.ends_at);
+                  const newEnd = window.prompt("New end time (HH:MM)", e2.time);
                   if (!newEnd) return;
                   const sIso = combineLocal(s.date, s.time);
                   const { endIso } = composeStartEndISO(s.date, s.time, newEnd);
-                  // edit this single occurrence duration/time only
                   editOccurrence(occ.event_id, occ.base_start, { ends_at: endIso }).catch(err=>console.error(err));
                 }}>Edit occurrence</GhostButton>
                 {occ.overridden && <GhostButton onClick={() => clearOneOverride(occ)}>Clear override</GhostButton>}
