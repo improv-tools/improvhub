@@ -3,12 +3,13 @@ import { useEffect, useState, useMemo } from "react";
 import { useAuth } from "auth/AuthContext";
 
 import {
-  listMyTeams,
+  // Teams & members
+  listMyTeams,            // ← RPC-based
   createTeam,
   listTeamMembersRPC,
   setMemberRoleRPC,
-  addMemberByEmailRPC,     // must exist in teams.api (RPC that adds existing user by email)
-  removeMemberRPC,         // RPC to remove a member from team
+  addMemberByEmailRPC,
+  removeMemberRPC,
   renameTeamRPC,
   deleteTeamRPC,
   // Calendar API
@@ -43,7 +44,7 @@ export default function TeamsPanel() {
   const refreshTeams = async () => {
     setErr("");
     try {
-      const list = await listMyTeams(user.id);
+      const list = await listMyTeams(); // ← RPC call, no userId needed
       setTeams(list);
       setLoading(false);
       // keep selection in sync
@@ -287,7 +288,6 @@ function TeamDetail({ team, members, currentUserId, onChangeRole, onRenamed, onD
         ) : (
           <>
             <H1 style={{ margin: 0, lineHeight: 1.1 }}>{team.name}</H1>
-            {/* subtle pencil icon */}
             {team.role === "admin" && (
               <GhostButton onClick={()=>setEditing(true)} title="Rename team" aria-label="Rename team">✏️</GhostButton>
             )}
@@ -334,7 +334,7 @@ function TeamDetail({ team, members, currentUserId, onChangeRole, onRenamed, onD
                       <div style={{ display:"flex", alignItems:"center", gap:8 }}>
                         <span style={{ opacity: 0.8 }}>{m.role}</span>
 
-                        {/* Single role toggle button (don’t show both) */}
+                        {/* Single role toggle button */}
                         {team.role === "admin" && m.user_id !== currentUserId && (
                           m.role === "admin" ? (
                             <Button style={{ padding:"6px 10px" }} onClick={() => onChangeRole(m.user_id, "member")}>Make member</Button>
