@@ -12,6 +12,7 @@ import {
   renameTeamRPC,
   deleteTeamRPC,
 } from "./teams.api";
+import CalendarPanel from "./components/CalendarPanel";
 import {
   Card, H1, Label, Input, Button, GhostButton, DangerButton, ErrorText, InfoText, Row,
 } from "components/ui";
@@ -24,13 +25,15 @@ export default function TeamsPanel() {
   const [loading, setLoading] = useState(true);
   const [err, setErr] = useState("");
   const [msg, setMsg] = useState("");
-  const [selected, setSelected] = useState(null); // team
+
+  const [selected, setSelected] = useState(null); // current team object
   const [members, setMembers] = useState([]);
 
+  // create team UI
   const [newName, setNewName] = useState("");
   const [creating, setCreating] = useState(false);
 
-  // Invite UI
+  // invite UI (when team is open)
   const [showInvite, setShowInvite] = useState(false);
   const [inviteEmail, setInviteEmail] = useState("");
   const [inviteRole, setInviteRole] = useState("member");
@@ -47,7 +50,7 @@ export default function TeamsPanel() {
       setErr(""); setMsg(""); setLoading(true);
       try {
         const data = await listMyTeams();
-        setTeams(data);
+        setTeams(data || []);
       } catch (e) {
         setErr(e.message || "Failed to load teams");
       } finally {
@@ -87,6 +90,7 @@ export default function TeamsPanel() {
     setCreating(true); setErr(""); setMsg("");
     try {
       const t = await createTeam(newName.trim());
+      // ensure role visible in list (server usually returns with role:'admin' for creator)
       setTeams((ts) => [t, ...ts]);
       setNewName("");
       await openTeam(t);
@@ -121,6 +125,19 @@ export default function TeamsPanel() {
       setMsg("Team deleted.");
     } catch (e) {
       setErr(e.message || "Failed to delete team");
+    }
+  };
+
+  const leaveTeam = async () => {
+    if (!window.confirm("Leave this team?")) return;
+    setErr(""); setMsg("");
+    try {
+      await removeMemberRPC(selected.id, currentUserId);
+      setTeams((ts) => ts.filter((t) => t.id !== selected.id));
+      backToList();
+      setMsg("You left the team.");
+    } catch (e) {
+      setErr(e.message || "Failed to leave team");
     }
   };
 
@@ -161,19 +178,6 @@ export default function TeamsPanel() {
       setMsg("Member removed.");
     } catch (e) {
       setErr(e.message || "Failed to remove member");
-    }
-  };
-
-  const leaveTeam = async () => {
-    if (!window.confirm("Leave this team?")) return;
-    setErr(""); setMsg("");
-    try {
-      await removeMemberRPC(selected.id, currentUserId);
-      setTeams((ts) => ts.filter((t) => t.id !== selected.id));
-      backToList();
-      setMsg("You left the team.");
-    } catch (e) {
-      setErr(e.message || "Failed to leave team");
     }
   };
 
@@ -284,7 +288,13 @@ export default function TeamsPanel() {
                     <Button disabled={inviting || !inviteEmail.trim()} onClick={inviteMember}>
                       {inviting ? "Adding…" : "Add"}
                     </Button>
-                    <GhostButton onClick={() => { setShowInvite(false); setInviteEmail(""); setInviteRole("member"); }}>
+                    <GhostButton
+                      onClick={() => {
+                        setShowInvite(false);
+                        setInviteEmail("");
+                        setInviteRole("member");
+                      }}
+                    >
                       Cancel
                     </GhostButton>
                   </Row>
@@ -344,6 +354,9 @@ export default function TeamsPanel() {
                 })}
               </ul>
             )}
+
+            {/* Calendar mounted below members */}
+            <CalendarPanel team={selected} />
           </div>
         </>
       )}
