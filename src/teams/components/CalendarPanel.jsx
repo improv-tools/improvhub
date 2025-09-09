@@ -2,7 +2,7 @@
 import { useMemo, useState } from "react";
 import { Button, GhostButton, DangerButton, Label, Input, ErrorText, InfoText, Row } from "components/ui";
 import useCalendarData from "../hooks/useCalendarData";
-import { composeStartEndISO, splitLocal, fmtRangeLocal, browserTZ, combineLocal } from "../utils/datetime";
+import { composeStartEndISO, splitLocal, fmtRangeLocal, browserTZ } from "../utils/datetime";
 
 const CATEGORIES = ["rehearsal", "social", "performance"];
 const FREQUENCIES = ["none", "daily", "weekly", "monthly"];
@@ -62,6 +62,7 @@ export default function CalendarPanel({ team }) {
   const [msg, setMsg] = useState("");
   const [errMsg, setErrMsg] = useState("");
 
+  // ✅ Declare `upcoming` once
   const upcoming = useMemo(() => occurrences, [occurrences]);
 
   const toggleDay = (d) => {
@@ -83,7 +84,7 @@ export default function CalendarPanel({ team }) {
     const { startIso, endIso } = composeStartEndISO(startDate, startTime, endTime);
     if (!startIso || !endIso) return setErrMsg("Invalid date/time");
 
-    // Enforce end rule for recurring series: must have UNTIL or COUNT (<=12).
+    // Enforce end rule for recurring series: must have UNTIL or COUNT (≤12).
     let recur_until = null, recur_count = null;
     if (recurFreq !== "none") {
       if (endMode === "until") {
@@ -214,14 +215,12 @@ export default function CalendarPanel({ team }) {
     if (!occ.overridden) return;
     setMsg(""); setErrMsg("");
     try {
-      await clearOccurrenceOverride(occ.event_id, occ.base_start);
+    await clearOccurrenceOverride(occ.event_id, occ.base_start);
       setMsg("Occurrence override cleared.");
     } catch (er) {
       setErrMsg(er.message || "Failed to clear override");
     }
   };
-
-  const upcoming = useMemo(() => occurrences, [occurrences]);
 
   return (
     <div style={{ marginTop: 16 }}>
@@ -247,11 +246,7 @@ export default function CalendarPanel({ team }) {
           startDate={startDate}
           startTime={startTime}
           endTime={endTime}
-          onChange={(p)=>{
-            if (p.startDate !== undefined) setStartDate(p.startDate);
-            if (p.startTime !== undefined) setStartTime(p.startTime);
-            if (p.endTime !== undefined) setEndTime(p.endTime);
-          }}
+          onChange={handleDateTimeChange}
         />
 
         {/* Recurrence */}
@@ -297,7 +292,7 @@ export default function CalendarPanel({ team }) {
           )}
         </Row>
 
-        {/* End options (ONLY Until / Count (<=12)) */}
+        {/* End options (ONLY Until / Count (≤12)) */}
         {recurFreq !== "none" && (
           <Row>
             <label style={{ display:"inline-flex", gap:8, alignItems:"center" }}>
@@ -488,7 +483,6 @@ export default function CalendarPanel({ team }) {
                   const e2 = splitLocal(occ.ends_at);
                   const newEnd = window.prompt("New end time (HH:MM)", e2.time);
                   if (!newEnd) return;
-                  const sIso = combineLocal(s.date, s.time);
                   const { endIso } = composeStartEndISO(s.date, s.time, newEnd);
                   editOccurrence(occ.event_id, occ.base_start, { ends_at: endIso }).catch(err=>console.error(err));
                 }}>Edit occurrence</GhostButton>
