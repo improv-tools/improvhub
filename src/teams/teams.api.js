@@ -2,9 +2,10 @@
 import { supabase } from "lib/supabaseClient";
 
 
-export async function listMyTeams(/* userId */) {
+export async function listMyTeamsRPC() {
   const { data, error } = await supabase.rpc("list_my_teams");
   if (error) throw new Error(error.message);
+  // Shape: [{ id, name, display_id, role }]
   return data || [];
 }
 
