@@ -14,11 +14,13 @@ export function toLocalInput(date) {
   return `${yyyy}-${mm}-${dd}T${hh}:${mi}`;
 }
 
-/** Split "YYYY-MM-DDTHH:mm" into [date, time] */
-export function splitLocal(localT) {
-  if (!localT) return ["",""];
-  const [date, time] = localT.split("T");
-  return [date || "", time || ""];
+export function splitLocal(iso) {
+  if (!iso) return { date: "", time: "" };
+  const d = new Date(iso);
+  const pad = (n) => String(n).padStart(2, "0");
+  const date = `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+  const time = `${pad(d.getHours())}:${pad(d.getMinutes())}`;
+  return { date, time };
 }
 
 /** "13:05" -> "1:05 PM" based on local locale */
@@ -28,35 +30,29 @@ export function fmtTime(date) {
 }
 
 /** Combine a local date+time in a target IANA tz and return ISO UTC string */
-export function combineLocal(dateStr, timeStr, tz) {
+export function combineLocal(dateStr, timeStr) {
   if (!dateStr || !timeStr) return null;
-  const [y, m, d] = dateStr.split("-").map(Number);
-  const [hh, mm] = timeStr.split(":").map(Number);
+  const iso = `${dateStr}T${timeStr}:00`;
+  const d = new Date(iso); // interpreted in user's local tz
+  return Number.isNaN(d.getTime()) ? null : d.toISOString();
+}
 
-  // Build a Date as if in the provided timezone.
-  // Trick: format that wall time in the target tz and extract the UTC parts via Intl.
-  const dt = new Date(Date.UTC(y, (m-1), d, hh, mm, 0));
-
-  // We need the offset for the target tz at that moment.
-  const parts = new Intl.DateTimeFormat("en-GB", {
-    timeZone: tz || Intl.DateTimeFormat().resolvedOptions().timeZone,
-    year: "numeric", month: "2-digit", day: "2-digit",
-    hour: "2-digit", minute: "2-digit", second: "2-digit",
-    hour12: false,
-  }).formatToParts(dt).reduce((acc,p) => (acc[p.type]=p.value, acc), {});
-
-  // Construct a string "YYYY-MM-DDTHH:mm:ss" as seen in that tz, then parse as if UTC.
-  const localLike = `${parts.year}-${parts.month}-${parts.day}T${parts.hour}:${parts.minute}:${parts.second}Z`;
-  // Now parse back to Date to get accurate UTC instant corresponding to the local wall time
-  const asUtc = new Date(localLike);
-  return asUtc.toISOString();
+export function fmtRangeLocal(startIso, endIso, tzLabel) {
+  const s = new Date(startIso);
+  const e = new Date(endIso);
+  const d = s.toLocaleDateString();
+  const st = s.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+  const et = e.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+  return `${d} ${st}–${et}${tzLabel ? ` (${tzLabel})` : ""}`;
 }
 
 /** Minutes between two ISO/Date */
-export function minutesBetween(a, b) {
-  const A = (a instanceof Date) ? a : new Date(a);
-  const B = (b instanceof Date) ? b : new Date(b);
-  return Math.round((B - A) / 60000);
+export function minutesBetween(aIso, bIso) {
+  return Math.round((new Date(bIso) - new Date(aIso)) / 60000);
+}
+
+export function browserTZ() {
+  return Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
 }
 
 /** Find the nth weekday of a month in UTC (month 0-11, weekday 0-6) */
