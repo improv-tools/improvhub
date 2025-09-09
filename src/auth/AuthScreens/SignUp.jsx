@@ -15,17 +15,12 @@ export default function SignUp() {
 
   const submit = async (e) => {
     e.preventDefault();
-    setMsg(""); setErr(""); setSubmitting(true);
-    try {
-      localStorage.setItem("pending_full_name", name);
-      const { data, error } = await signUp(email, password, name, DEFAULT_REDIRECT);
-      if (error) throw error;
-      setMsg(data.session ? "Account created and signed in." : "Check your email to confirm your account, then return here.");
-    } catch (e2) {
-      setErr(e2.message || "Sign up failed");
-    } finally {
-      setSubmitting(false);
-    }
+    setErr(""); setMsg("");
+    setSubmitting(true);
+    const { error } = await signUp(email, password, name, DEFAULT_REDIRECT);
+    setSubmitting(false);
+    if (error) setErr(error.message || "Failed to create account");
+    else setMsg("Check your inbox to confirm your email.");
   };
 
   return (
