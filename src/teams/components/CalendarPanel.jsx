@@ -25,83 +25,100 @@ const styles = {
   panel: { border: "1px solid rgba(255,255,255,0.1)", borderRadius: 10, padding: 12, marginBottom: 16 },
   titleLink: { cursor: "pointer", textDecoration: "underline", fontWeight: 600 },
 };
+const cap = (s) => (s ? s.charAt(0).toUpperCase() + s.slice(1) : s);
 
-function cap(s){ return s ? s.charAt(0).toUpperCase()+s.slice(1) : s; }
+/* ------------------------------- Estimators ------------------------------- */
+/** Estimate number of occurrences from a local start (date+time) until local end date (inclusive), interval=1. */
+function estimateUntilCount({ recurFreq, startDate, startTime, untilDate, byday, byMonthday, weekOfMonth }) {
+  if (!untilDate || !startDate || !startTime) return null;
+  const pad = (n)=> String(n).padStart(2,"0");
+  const start = new Date(`${startDate}T${startTime}:00`);      // local
+  const until = new Date(`${untilDate}T23:59:59`);             // inclusive
+  if (Number.isNaN(start) || Number.isNaN(until)) return null;
+  if (until < start) return 0;
 
-/* ----------- Occurrence estimator (caps at 13 to short-circuit) ----------- */
-function dowStrToNum(s){ return ["SU","MO","TU","WE","TH","FR","SA"].indexOf(s); }
-function lastDayOfMonth(y,m){ return new Date(y, m+1, 0).getDate(); }
-function weekOfMonth(date){ return Math.floor((date.getDate()-1)/7)+1; }
-function isLastWeekOfMonth(date){ return date.getDate()+7>lastDayOfMonth(date.getFullYear(), date.getMonth()); }
-/** Returns {count, capped} where capped=true if we hit >12 and stopped early. */
-function estimateUntilOccurrences({ startDate, recur_freq, byday, bymonthday, weekOfMonthNth }, untilDate){
-  if (!startDate || !untilDate) return { count: 0, capped: false };
-  const start = new Date(startDate+"T00:00:00"); // local
-  const end = new Date(untilDate+"T23:59:59");
-  if (isNaN(start) || isNaN(end) || end < start) return { count: 0, capped: false };
+  const dayMs = 24*60*60*1000;
+
+  const DOW = ["SU","MO","TU","WE","TH","FR","SA"];
+  const nthWeekdayOfMonth = (y, m, weekday, nth) => {
+    if (nth > 0) {
+      const first = new Date(y, m, 1);
+      const delta = (weekday - first.getDay() + 7) % 7;
+      const day = 1 + delta + (nth - 1)*7;
+      return new Date(y, m, day);
+    }
+    const last = new Date(y, m + 1, 0);
+    const delta = (last.getDay() - weekday + 7) % 7;
+    const day = last.getDate() - delta;
+    return new Date(y, m, day);
+  };
 
   let count = 0;
-  const targetWeekdays = new Set((byday||[]).map(dowStrToNum).filter(n=>n>=0));
-  const limit = 13; // we stop once >12
+  const bailIfTooMany = () => count > 12;
 
-  for (let d = new Date(start); d <= end; d.setDate(d.getDate()+1)) {
-    let match = false;
-    if (recur_freq === "daily") {
-      match = true;
-    } else if (recur_freq === "weekly") {
-      match = targetWeekdays.has(d.getDay());
-    } else if (recur_freq === "monthly") {
-      if (bymonthday) {
-        match = d.getDate() === Number(bymonthday);
-      } else if (weekOfMonthNth && targetWeekdays.size === 1) {
-        const tgt = [...targetWeekdays][0];
-        if (d.getDay() === tgt) {
-          if (weekOfMonthNth === -1) {
-            match = isLastWeekOfMonth(d);
-          } else {
-            match = weekOfMonth(d) === Number(weekOfMonthNth);
-          }
-        }
-      }
-    } else {
-      // none: base event only
-      match = d.getTime() === start.getTime();
-    }
-    if (match) {
-      count += 1;
-      if (count >= limit) return { count, capped: true };
-    }
+  if (recurFreq === "daily") {
+    count = Math.floor((Date.UTC(until.getFullYear(), until.getMonth(), until.getDate()) -
+                        Date.UTC(start.getFullYear(), start.getMonth(), start.getDate())) / dayMs) + 1;
+    return count;
   }
-  return { count, capped: false };
+
+  if (recurFreq === "weekly") {
+    const set = new Set((Array.isArray(byday) && byday.length ? byday : [DOW[start.getDay()] ]));
+    const cur = new Date(start);
+    while (cur <= until) {
+      if (set.has(DOW[cur.getDay()])) {
+        // same clock time as 'start'
+        const occ = new Date(cur);
+        occ.setHours(start.getHours(), start.getMinutes(), start.getSeconds(), 0);
+        if (occ >= start && occ <= until) { count++; if (bailIfTooMany()) return count; }
+      }
+      cur.setDate(cur.getDate() + 1);
+    }
+    return count;
+  }
+
+  if (recurFreq === "monthly") {
+    const startMonthStart = new Date(start.getFullYear(), start.getMonth(), 1);
+    const endMonthStart = new Date(until.getFullYear(), until.getMonth(), 1);
+    const monthsSpan = (endMonthStart.getFullYear() - startMonthStart.getFullYear()) * 12 +
+                       (endMonthStart.getMonth() - startMonthStart.getMonth());
+    for (let i=0; i<=monthsSpan; i++) {
+      const y = startMonthStart.getFullYear() + Math.floor((startMonthStart.getMonth() + i)/12);
+      const m = (startMonthStart.getMonth() + i) % 12;
+
+      let occDate = null;
+      if (byMonthday) {
+        const last = new Date(y, m + 1, 0).getDate();
+        occDate = new Date(y, m, Math.min(Number(byMonthday), last));
+      } else if (weekOfMonth && Array.isArray(byday) && byday.length === 1) {
+        const wd = DOW.indexOf(byday[0]);
+        if (wd >= 0) occDate = nthWeekdayOfMonth(y, m, wd, Number(weekOfMonth));
+      } else {
+        // default same day-of-month as start
+        occDate = new Date(y, m, start.getDate());
+      }
+
+      if (occDate) {
+        const occ = new Date(occDate);
+        occ.setHours(start.getHours(), start.getMinutes(), start.getSeconds(), 0);
+        if (occ >= start && occ <= until) { count++; if (bailIfTooMany()) return count; }
+      }
+    }
+    return count;
+  }
+
+  // "none" or unknown
+  return 1;
 }
 
-/* -------------------------------- Validators ------------------------------ */
-function validateTimes({ title, startDate, startTime, endTime }) {
-  const errs = [];
-  if (!title?.trim()) errs.push("Title is required.");
-  if (!startDate) errs.push("Start date is required.");
-  if (!startTime) errs.push("Start time is required.");
-  if (!endTime) errs.push("End time is required.");
-  return errs;
-}
-function validateRecurrence({ recurrenceMode, recurFreq, endUntilDate, endCount, recurByday, recurByMonthday, recurWeekOfMonth, startDate }) {
+/* ------------------------------ Validators ------------------------------ */
+function validateRecurrence({ recurrenceMode, recurFreq, endUntilDate, endCount, recurByday, recurByMonthday, recurWeekOfMonth, occEstimate }) {
   const errs = [];
   if (recurrenceMode === "none") return errs;
 
   if (recurrenceMode === "until") {
     if (!endUntilDate) errs.push("Please choose an 'Until' date.");
-    // Live cap: if “until” would create >12, error now.
-    if (endUntilDate) {
-      const { count, capped } = estimateUntilOccurrences({
-        startDate,
-        recur_freq: recurFreq,
-        byday: recurByday,
-        bymonthday: recurByMonthday || null,
-        weekOfMonthNth: recurWeekOfMonth || null,
-      }, endUntilDate);
-      if (count === 0) errs.push("Chosen 'Until' date produces 0 occurrences.");
-      if (capped) errs.push("This 'Until' date would create more than 12 occurrences. Please shorten the range or use Count (≤12).");
-    }
+    if (occEstimate != null && occEstimate > 12) errs.push(`The chosen "Until" date generates ${occEstimate} occurrences (max 12). Choose an earlier date or switch to Count.`);
   } else if (recurrenceMode === "count") {
     const n = Number(endCount);
     if (!n || n < 1 || n > 12) errs.push("Count must be between 1 and 12.");
@@ -110,11 +127,21 @@ function validateRecurrence({ recurrenceMode, recurFreq, endUntilDate, endCount,
   if (recurFreq === "weekly" && (!Array.isArray(recurByday) || recurByday.length === 0)) {
     errs.push("Pick at least one weekday for weekly recurrence.");
   }
+
   if (recurFreq === "monthly") {
     const byDayOk = !!(recurByMonthday && Number(recurByMonthday) >= 1 && Number(recurByMonthday) <= 31);
     const womOk = !!(recurWeekOfMonth && Number(recurWeekOfMonth) >= -1 && Number(recurWeekOfMonth) <= 4 && Array.isArray(recurByday) && recurByday.length === 1);
     if (!byDayOk && !womOk) errs.push("For monthly recurrence, set a month-day or a week-of-month with one weekday.");
   }
+
+  return errs;
+}
+function validateTimes({ title, startDate, startTime, endTime }) {
+  const errs = [];
+  if (!title?.trim()) errs.push("Title is required.");
+  if (!startDate) errs.push("Start date is required.");
+  if (!startTime) errs.push("Start time is required.");
+  if (!endTime) errs.push("End time is required.");
   return errs;
 }
 
@@ -143,6 +170,7 @@ export default function CalendarPanel({ team }) {
   const defaultStartDate = `${now.getFullYear()}-${pad(now.getMonth()+1)}-${pad(now.getDate())}`;
   const defaultStartTime = `${pad(now.getHours())}:${pad(now.getMinutes())}`;
   const defaultEndTime   = `${pad((now.getHours()+1)%24)}:${pad(now.getMinutes())}`;
+  const mapsHref = (loc) => `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(loc)}`;
 
   /* -------------------------------- Create -------------------------------- */
   const [cTitle, setCTitle] = useState("");
@@ -161,16 +189,21 @@ export default function CalendarPanel({ team }) {
   const [cUntilDate, setCUntilDate] = useState("");
   const [cCount, setCCount] = useState(6);
 
-  const cTimeErrors = useMemo(() => validateTimes({
-    title: cTitle, startDate: cStartDate, startTime: cStartTime, endTime: cEndTime,
-  }), [cTitle, cStartDate, cStartTime, cEndTime]);
+  const cUntilEstimate = useMemo(() => cFreq === "none" || cEndMode !== "until" ? null : estimateUntilCount({
+    recurFreq: cFreq, startDate: cStartDate, startTime: cStartTime, untilDate: cUntilDate,
+    byday: cByday, byMonthday: cByMonthday, weekOfMonth: cWeekOfMonth,
+  }), [cFreq, cEndMode, cStartDate, cStartTime, cUntilDate, cByday, cByMonthday, cWeekOfMonth]);
 
   const cRecurrenceErrors = useMemo(() => validateRecurrence({
     recurrenceMode: cFreq === "none" ? "none" : (cEndMode === "until" ? "until" : "count"),
     recurFreq: cFreq, endUntilDate: cUntilDate, endCount: cCount,
     recurByday: cByday, recurByMonthday: cByMonthday, recurWeekOfMonth: cWeekOfMonth,
-    startDate: cStartDate,
-  }), [cFreq, cEndMode, cUntilDate, cCount, cByday, cByMonthday, cWeekOfMonth, cStartDate]);
+    occEstimate: cUntilEstimate,
+  }), [cFreq, cEndMode, cUntilDate, cCount, cByday, cByMonthday, cWeekOfMonth, cUntilEstimate]);
+
+  const cTimeErrors = useMemo(() => validateTimes({
+    title: cTitle, startDate: cStartDate, startTime: cStartTime, endTime: cEndTime,
+  }), [cTitle, cStartDate, cStartTime, cEndTime]);
 
   const canSaveCreate = useMemo(() => {
     if (cTimeErrors.length) return false;
@@ -188,17 +221,8 @@ export default function CalendarPanel({ team }) {
       const { startIso, endIso } = composeStartEndISO(cStartDate, cStartTime, cEndTime);
       let recur_until = null, recur_count = null;
       if (cFreq !== "none") {
-        if (cEndMode === "until") {
-          // Final guard: block >12 on submit too
-          const { capped } = estimateUntilOccurrences({
-            startDate: cStartDate, recur_freq: cFreq, byday: cByday,
-            bymonthday: cByMonthday || null, weekOfMonthNth: cWeekOfMonth || null,
-          }, cUntilDate);
-          if (capped) { setBannerErr("This 'Until' would create more than 12 occurrences. Please shorten the range or use Count (≤12)."); return; }
-          recur_until = new Date(`${cUntilDate}T23:59:59`).toISOString();
-        } else {
-          recur_count = Math.max(1, Math.min(Number(cCount) || 1, 12));
-        }
+        if (cEndMode === "until") recur_until = new Date(`${cUntilDate}T23:59:59`).toISOString();
+        else recur_count = Math.max(1, Math.min(Number(cCount) || 1, 12));
       }
       await createBase({
         title: cTitle.trim(),
@@ -234,7 +258,7 @@ export default function CalendarPanel({ team }) {
     const e = events.find((x) => x.id === eventId);
     if (!e) { setBannerErr("Could not load event."); return; }
 
-    // Make weekly/monthly valid defaults
+    // sane defaults
     let recur_byday = e.recur_byday;
     if (e.recur_freq === "weekly" && (!Array.isArray(recur_byday) || recur_byday.length === 0)) {
       const DOW = ["SU","MO","TU","WE","TH","FR","SA"];
@@ -245,7 +269,6 @@ export default function CalendarPanel({ team }) {
     if (e.recur_freq === "monthly" && !recur_bymonthday && !recur_week_of_month) {
       recur_bymonthday = new Date(e.starts_at).getUTCDate();
     }
-
     const mode = (e.recur_freq === "none") ? "none" : (e.recur_until ? "until" : "count");
 
     setSEd({
@@ -262,6 +285,20 @@ export default function CalendarPanel({ team }) {
   };
   const cancelEditSeries = () => { setSEd(null); setMode("list"); };
 
+  const sUntilEstimate = useMemo(() => {
+    if (!sEd || sRecurrenceMode !== "until") return null;
+    const untilDate = sEd.recur_until ? splitLocal(sEd.recur_until).date : "";
+    return estimateUntilCount({
+      recurFreq: sEd.recur_freq || "none",
+      startDate: sEd._s.date,
+      startTime: sEd._s.time,
+      untilDate,
+      byday: sEd.recur_byday,
+      byMonthday: sEd.recur_bymonthday,
+      weekOfMonth: sEd.recur_week_of_month,
+    });
+  }, [sEd, sRecurrenceMode]);
+
   const sTimeErrors = useMemo(() => {
     if (!sEd) return [];
     return validateTimes({ title: sEd.title, startDate: sEd._s.date, startTime: sEd._s.time, endTime: sEd._e.time });
@@ -269,20 +306,18 @@ export default function CalendarPanel({ team }) {
 
   const sRecurrenceErrors = useMemo(() => {
     if (!sEd) return [];
-    const untilDate = sRecurrenceMode === "until" ? (sEd.recur_until ? splitLocal(sEd.recur_until).date : "") : "";
-    const countVal = sRecurrenceMode === "count" ? (sEd.recur_count || "") : "";
-    const freq = sRecurrenceMode === "none" ? "none" : (sEd.recur_freq === "none" ? "weekly" : sEd.recur_freq);
+    const untilDate = sEd?.recur_until ? splitLocal(sEd.recur_until).date : "";
     return validateRecurrence({
       recurrenceMode: sRecurrenceMode,
-      recurFreq: freq,
+      recurFreq: sEd.recur_freq || "none",
       endUntilDate: untilDate,
-      endCount: countVal,
+      endCount: sEd.recur_count || "",
       recurByday: sEd.recur_byday,
       recurByMonthday: sEd.recur_bymonthday,
       recurWeekOfMonth: sEd.recur_week_of_month,
-      startDate: sEd._s.date,
+      occEstimate: sUntilEstimate,
     });
-  }, [sEd, sRecurrenceMode]);
+  }, [sEd, sRecurrenceMode, sUntilEstimate]);
 
   const canSaveSeries = useMemo(() => {
     if (!sEd) return false;
@@ -291,69 +326,46 @@ export default function CalendarPanel({ team }) {
     return true;
   }, [sEd, sTimeErrors, sRecurrenceMode, sRecurrenceErrors]);
 
-  const switchRecurrenceMode = (mode) => {
-    setSRecurrenceMode(mode);
-    setSEd(prev => {
-      const next = { ...prev };
-      if (mode === "none") {
-        next.recur_freq = "none";
-        next.recur_until = null;
-        next.recur_count = null;
-        next.recur_byday = null;
-        next.recur_bymonthday = null;
-        next.recur_week_of_month = null;
-      } else if (mode === "until") {
-        next.recur_count = null; // clear count
-        if (next.recur_freq === "none") next.recur_freq = "weekly";
-      } else if (mode === "count") {
-        next.recur_until = null; // clear until
-        if (next.recur_freq === "none") next.recur_freq = "weekly";
-      }
-      return next;
-    });
-  };
-
   const saveEditSeries = async () => {
     if (!canSaveSeries || !sEd) return;
     setBanner(""); setBannerErr("");
     try {
-      const { startIso, endIso } = composeStartEndISO(sEd._s.date, sEd._s.time, sEd._e.time);
-
-      // Build recurrence patch per selected mode; enforce until<=12
-      let recur_freq = sEd.recur_freq;
+      // Map UI mode to payload
+      let recur_freq = sEd.recur_freq || "none";
       let recur_until = null;
       let recur_count = null;
       let recur_byday = null, recur_bymonthday = null, recur_week_of_month = null;
 
       if (sRecurrenceMode === "none") {
         recur_freq = "none";
-      } else {
-        if (recur_freq === "none") recur_freq = "weekly";
-        if (sRecurrenceMode === "until") {
-          const untilDate = sEd.recur_until ? splitLocal(sEd.recur_until).date : null;
-          if (!untilDate) { setBannerErr("Choose an 'Until' date."); return; }
-          const { capped } = estimateUntilOccurrences({
-            startDate: sEd._s.date, recur_freq, byday: sEd.recur_byday,
-            bymonthday: sEd.recur_bymonthday || null, weekOfMonthNth: sEd.recur_week_of_month || null,
-          }, untilDate);
-          if (capped) { setBannerErr("This 'Until' would create more than 12 occurrences. Please shorten the range or use Count (≤12)."); return; }
-          recur_until = new Date(`${untilDate}T23:59:59`).toISOString();
-        } else if (sRecurrenceMode === "count") {
-          const n = Math.max(1, Math.min(Number(sEd.recur_count) || 1, 12));
-          if (n <= 1) {
-            // 4) Count 1 -> make non-recurring
-            recur_freq = "none";
-          } else {
-            recur_count = n;
-          }
-        }
+      } else if (sRecurrenceMode === "until") {
+        recur_freq = recur_freq === "none" ? "weekly" : recur_freq;
+        // keep user's chosen rule fields
+        recur_until = sEd.recur_until || null;
         if (recur_freq === "weekly") recur_byday = Array.isArray(sEd.recur_byday) ? sEd.recur_byday : [];
         if (recur_freq === "monthly") {
           recur_bymonthday = sEd.recur_bymonthday || null;
           recur_week_of_month = sEd.recur_week_of_month || null;
           recur_byday = Array.isArray(sEd.recur_byday) ? sEd.recur_byday : [];
         }
+      } else if (sRecurrenceMode === "count") {
+        // If count <= 1 => remove recurrence entirely
+        const n = Math.max(1, Math.min(Number(sEd.recur_count) || 1, 12));
+        if (n <= 1) {
+          recur_freq = "none";
+        } else {
+          recur_freq = recur_freq === "none" ? "weekly" : recur_freq;
+          recur_count = n;
+          if (recur_freq === "weekly") recur_byday = Array.isArray(sEd.recur_byday) ? sEd.recur_byday : [];
+          if (recur_freq === "monthly") {
+            recur_bymonthday = sEd.recur_bymonthday || null;
+            recur_week_of_month = sEd.recur_week_of_month || null;
+            recur_byday = Array.isArray(sEd.recur_byday) ? sEd.recur_byday : [];
+          }
+        }
       }
+
+      const { startIso, endIso } = composeStartEndISO(sEd._s.date, sEd._s.time, sEd._e.time);
 
       await updateBase(sEd.id, {
         title: sEd.title ?? "",
@@ -371,8 +383,9 @@ export default function CalendarPanel({ team }) {
         recur_until,
         recur_count,
       });
+
       cancelEditSeries();
-      setBanner(recur_freq === "none" ? "Event updated (made non-recurring)." : "Event updated.");
+      setBanner(recur_freq === "none" ? "Event updated (recurrence removed)." : "Event updated.");
     } catch (e) {
       setBannerErr(e.message || "Failed to update event");
     }
@@ -415,12 +428,7 @@ export default function CalendarPanel({ team }) {
     if (!oEd) return [];
     return validateTimes({ title: oEd.title, startDate: oEd._sDate, startTime: oEd._sTime, endTime: oEd._eTime });
   }, [oEd]);
-
-  const canSaveOccurrence = useMemo(() => {
-    if (!oEd) return false;
-    if (oTimeErrors.length) return false;
-    return true;
-  }, [oEd, oTimeErrors]);
+  const canSaveOccurrence = useMemo(() => !oEd ? false : oTimeErrors.length === 0, [oEd, oTimeErrors]);
 
   const saveEditOccurrence = async () => {
     if (!canSaveOccurrence || !oEd) return;
@@ -470,7 +478,6 @@ export default function CalendarPanel({ team }) {
       return next;
     });
   };
-  const mapsHref = (loc) => `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(loc)}`;
 
   /* -------------------------------- Render --------------------------------- */
   return (
@@ -480,7 +487,7 @@ export default function CalendarPanel({ team }) {
       {bannerErr && <ErrorText>{bannerErr}</ErrorText>}
       {banner && <InfoText>{banner}</InfoText>}
 
-      {/* New event button: only in list mode (hidden while editing) */}
+      {/* New event: only show in list mode (hidden while editing) */}
       {mode === "list" && (
         <Row style={{ marginBottom: 8 }}>
           <Button onClick={() => { setBanner(""); setBannerErr(""); setMode("create"); }}>New event</Button>
@@ -591,23 +598,23 @@ export default function CalendarPanel({ team }) {
         <div style={styles.panel}>
           <h4 style={{ margin: "0 0 10px", fontSize: 14 }}>Edit event</h4>
 
-          {/* Switch between None / Until / Count */}
+          {/* Switch: No recurrence / Until / Count */}
           <Row>
             <label style={{ display:"inline-flex", gap:8, alignItems:"center" }}>
-              <input type="radio" name="s_recmod" checked={sRecurrenceMode==="none"} onChange={()=>switchRecurrenceMode("none")} />
+              <input type="radio" name="s_recmod" checked={sRecurrenceMode==="none"} onChange={()=>setSRecurrenceMode("none")} />
               <span>No recurrence</span>
             </label>
             <label style={{ display:"inline-flex", gap:8, alignItems:"center" }}>
-              <input type="radio" name="s_recmod" checked={sRecurrenceMode==="until"} onChange={()=>switchRecurrenceMode("until")} />
+              <input type="radio" name="s_recmod" checked={sRecurrenceMode==="until"} onChange={()=>setSRecurrenceMode("until")} />
               <span>Recurring · Until</span>
             </label>
             <label style={{ display:"inline-flex", gap:8, alignItems:"center" }}>
-              <input type="radio" name="s_recmod" checked={sRecurrenceMode==="count"} onChange={()=>switchRecurrenceMode("count")} />
+              <input type="radio" name="s_recmod" checked={sRecurrenceMode==="count"} onChange={()=>setSRecurrenceMode("count")} />
               <span>Recurring · Count</span>
             </label>
           </Row>
 
-          {/* Validation messages */}
+          {/* Validation */}
           { (sTimeErrors.length || (sRecurrenceMode!=="none" && sRecurrenceErrors.length)) > 0 && (
             <ErrorText>
               {[...sTimeErrors, ...(sRecurrenceMode!=="none" ? sRecurrenceErrors : [])].map((e,i)=><div key={i}>• {e}</div>)}
@@ -632,7 +639,6 @@ export default function CalendarPanel({ team }) {
             <Input type="time" value={sEd._e.time} onChange={(ev)=>setSEd({ ...sEd, _e: { ...sEd._e, time: ev.target.value } })} />
           </Row>
 
-          {/* Recurrence rules only when recurring */}
           {sRecurrenceMode !== "none" && (
             <>
               <Row>
@@ -692,7 +698,6 @@ export default function CalendarPanel({ team }) {
                 )}
               </Row>
 
-              {/* Until / Count inputs */}
               <Row>
                 {sRecurrenceMode === "until" && (
                   <Label>Until
@@ -708,17 +713,8 @@ export default function CalendarPanel({ team }) {
                     <Input
                       type="number"
                       min={1} max={12}
-                      value={sEd.recur_count ?? 6}
-                      onChange={(e2)=>{
-                        const val = Math.max(1, Math.min(12, Number(e2.target.value) || 1));
-                        if (val <= 1) {
-                          // 4) Count reduced to 1 -> remove recurrence immediately
-                          setBanner("Count set to 1 — converted to non-recurring.");
-                          switchRecurrenceMode("none");
-                        } else {
-                          setSEd({ ...sEd, recur_count: val });
-                        }
-                      }}
+                      value={sEd.recur_count || 6}
+                      onChange={(e2)=>setSEd({ ...sEd, recur_count: Math.max(1, Math.min(12, Number(e2.target.value) || 1)) })}
                       style={{ width: 120 }}
                     />
                   </Label>
@@ -765,7 +761,7 @@ export default function CalendarPanel({ team }) {
 
           <Row>
             <Button onClick={saveEditOccurrence} disabled={!canSaveOccurrence}>Save occurrence</Button>
-            {/* 1) Clear override ONLY here */}
+            {/* Clear override visible ONLY here */}
             {oEd.overridden && <GhostButton onClick={clearOneOverride}>Clear override</GhostButton>}
             <DangerButton onClick={cancelOne}>Cancel occurrence</DangerButton>
             <GhostButton onClick={cancelEditOccurrence}>Close</GhostButton>
@@ -807,13 +803,16 @@ export default function CalendarPanel({ team }) {
                         {typeMeta.icon}
                       </span>
                       <div>
-                        <div style={styles.titleLink} onClick={() => {
-                          setOpenDescKeys(prev => {
-                            const next = new Set(prev);
-                            if (next.has(key)) next.delete(key); else next.add(key);
-                            return next;
-                          });
-                        }}>
+                        <div
+                          style={styles.titleLink}
+                          onClick={() => {
+                            setOpenDescKeys(prev => {
+                              const next = new Set(prev);
+                              next.has(key) ? next.delete(key) : next.add(key);
+                              return next;
+                            });
+                          }}
+                        >
                           {occ.title || "(untitled)"}{" "}
                           <span style={{ opacity: 0.7, fontSize: 12 }}>· {cap(occ.category || "rehearsal")}</span>
                           {occ.overridden && <span style={{ marginLeft: 8, fontSize: 12, opacity: 0.7 }}>(edited)</span>}
@@ -830,7 +829,9 @@ export default function CalendarPanel({ team }) {
                           )}
                         </div>
                         {openDescKeys.has(key) && occ.description && (
-                          <div style={{ marginTop: 6, opacity: 0.9 }}>{occ.description}</div>
+                          <div style={{ marginTop: 6, opacity: 0.9 }}>
+                            {occ.description}
+                          </div>
                         )}
                       </div>
                     </div>
@@ -840,11 +841,13 @@ export default function CalendarPanel({ team }) {
                         <>
                           <GhostButton onClick={() => openEditSeries(occ.event_id)}>Edit series</GhostButton>
                           <GhostButton onClick={() => openEditOccurrence(occ)}>Edit occurrence</GhostButton>
-                          {/* Clear override & cancel are NOT shown in list anymore */}
+                          {/* Clear override removed from list */}
+                          {/* Cancel occurrence moved to edit occurrence */}
                         </>
                       ) : (
                         <>
                           <GhostButton onClick={() => openEditSeries(occ.event_id)}>Edit event</GhostButton>
+                          {/* Delete event lives in edit panel */}
                         </>
                       )}
                     </Row>
