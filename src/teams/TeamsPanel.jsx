@@ -13,8 +13,9 @@ import {
   deleteTeamRPC,
 } from "./teams.api";
 import CalendarPanel from "./components/CalendarPanel";
+import TeamMembers from "./components/TeamMembers";
 import {
-  Card, H1, Label, Input, Button, GhostButton, DangerButton, ErrorText, InfoText, Row,
+  Card, H1, Label, Input, Button, GhostButton, DangerButton, ErrorText, InfoText, Row, Tabs, Tab,
 } from "components/ui";
 
 export default function TeamsPanel() {
@@ -28,6 +29,7 @@ export default function TeamsPanel() {
 
   const [selected, setSelected] = useState(null); // current team object
   const [members, setMembers] = useState([]);
+  const [teamTab, setTeamTab] = useState("members"); // 'members' | 'calendar'
 
   // create team UI
   const [newName, setNewName] = useState("");
@@ -74,6 +76,7 @@ export default function TeamsPanel() {
   const openTeam = async (team) => {
     setSelected(team);
     setMembers([]);
+    setTeamTab("members");
     await loadMembers(team);
   };
 
@@ -158,6 +161,7 @@ export default function TeamsPanel() {
     }
   };
 
+  // Handlers for TeamMembers component (accept teamId explicitly)
   const changeRole = async (userId, role) => {
     setErr(""); setMsg("");
     try {
@@ -167,6 +171,15 @@ export default function TeamsPanel() {
     } catch (e) {
       setErr(e.message || "Failed to update role");
     }
+  };
+
+  const handleChangeRole = async (teamId, userId, role) => {
+    setErr(""); setMsg("");
+    try {
+      await setMemberRoleRPC(teamId, userId, role);
+      if (selected?.id === teamId) await loadMembers(selected);
+      setMsg("Role updated.");
+    } catch (e) { setErr(e.message || "Failed to update role"); }
   };
 
   const removeMember = async (userId) => {
@@ -181,11 +194,57 @@ export default function TeamsPanel() {
     }
   };
 
+  const handleAddMember = async (teamId, email, role) => {
+    setErr(""); setMsg("");
+    try {
+      await addMemberByEmailRPC(teamId, email, role);
+      if (selected?.id === teamId) await loadMembers(selected);
+      setMsg("Member added.");
+    } catch (e) { setErr(e.message || "Failed to add member"); }
+  };
+
+  const handleRemoveMember = async (teamId, userId) => {
+    if (!window.confirm("Remove this member from the team?")) return;
+    setErr(""); setMsg("");
+    try {
+      await removeMemberRPC(teamId, userId);
+      if (selected?.id === teamId) await loadMembers(selected);
+      setMsg("Member removed.");
+    } catch (e) { setErr(e.message || "Failed to remove member"); }
+  };
+
+  const handleLeaveTeam = async (teamId, userId) => {
+    if (!window.confirm("Leave this team?")) return;
+    setErr(""); setMsg("");
+    try {
+      await removeMemberRPC(teamId, userId);
+      // If it's me and the current team, navigate back
+      if (userId === currentUserId && selected?.id === teamId) {
+        setTeams((ts) => ts.filter((t) => t.id !== teamId));
+        backToList();
+      } else if (selected?.id === teamId) {
+        await loadMembers(selected);
+      }
+      setMsg(userId === currentUserId ? "You left the team." : "Member removed.");
+    } catch (e) { setErr(e.message || "Failed to leave team"); }
+  };
+
+  const handleDeleteTeam = async (teamId) => {
+    if (!window.confirm("Delete team? This cannot be undone.")) return;
+    setErr(""); setMsg("");
+    try {
+      await deleteTeamRPC(teamId);
+      setTeams((ts) => ts.filter((t) => t.id !== teamId));
+      if (selected?.id === teamId) backToList();
+      setMsg("Team deleted.");
+    } catch (e) { setErr(e.message || "Failed to delete team"); }
+  };
+
   if (loading) return <p style={{ opacity: 0.8 }}>Loading teams…</p>;
 
   return (
     <Card style={{ marginTop: 16 }}>
-      <H1>Teams</H1>
+      {!selected && <H1>Teams</H1>}
       {err && <ErrorText>{err}</ErrorText>}
       {msg && <InfoText>{msg}</InfoText>}
 
@@ -242,121 +301,47 @@ export default function TeamsPanel() {
         </>
       ) : (
         <>
-          <Row>
-            <GhostButton onClick={backToList}>← Back</GhostButton>
-            <div style={{ flex: 1 }} />
-            {isAdmin ? (
-              <>
-                <GhostButton onClick={renameTeam}>Rename</GhostButton>
-                <DangerButton onClick={deleteTeam}>Delete team</DangerButton>
-              </>
-            ) : (
-              <DangerButton onClick={leaveTeam}>Leave team</DangerButton>
-            )}
+          <Row style={{ marginTop: -6, marginBottom: 6 }}>
+            <div style={{ display: "flex", alignItems: "center", gap: 10, fontSize: 20 }}>
+              <GhostButton onClick={backToList} style={{ padding: "6px 10px", fontSize: 16 }}>Teams</GhostButton>
+              <span style={{ opacity: 0.6 }}>→</span>
+              <span style={{ fontWeight: 800, fontSize: 22 }}>{selected.name}</span>
+            </div>
           </Row>
 
           <div style={{ marginTop: 16 }}>
-            <h3 style={{ margin: "0 0 4px", fontSize: 18 }}>{selected.name}</h3>
-            <div style={{ opacity: 0.7, fontSize: 12, marginBottom: 12 }}>
-              {selected.display_id}
-            </div>
 
-            <h3 style={{ margin: "12px 0 8px", fontSize: 16 }}>Members</h3>
-
-            {/* Invite box (admins only) */}
-            {isAdmin && (
-              <>
-                {!showInvite ? (
-                  <GhostButton onClick={() => setShowInvite(true)}>Invite member</GhostButton>
-                ) : (
-                  <Row>
-                    <Input
-                      placeholder="email@example.com"
-                      type="email"
-                      value={inviteEmail}
-                      onChange={(e) => setInviteEmail(e.target.value)}
-                      style={{ minWidth: 260 }}
-                    />
-                    <select
-                      value={inviteRole}
-                      onChange={(e) => setInviteRole(e.target.value)}
-                      style={styles.select}
-                    >
-                      <option value="member">Member</option>
-                      <option value="admin">Admin</option>
-                    </select>
-                    <Button disabled={inviting || !inviteEmail.trim()} onClick={inviteMember}>
-                      {inviting ? "Adding…" : "Add"}
-                    </Button>
-                    <GhostButton
-                      onClick={() => {
-                        setShowInvite(false);
-                        setInviteEmail("");
-                        setInviteRole("member");
-                      }}
-                    >
-                      Cancel
-                    </GhostButton>
-                  </Row>
-                )}
-              </>
-            )}
-
-            {members.length === 0 ? (
-              <p style={{ opacity: 0.8, marginTop: 10 }}>No members yet.</p>
-            ) : (
-              <ul style={{ listStyle: "none", padding: 0, margin: "10px 0 0" }}>
-                {members.map((m) => {
-                  const isSelf = m.user_id === currentUserId;
-                  const canEdit = isAdmin && !isSelf;
-                  const display = m.display_name || m.email || m.user_id;
-
-                  return (
-                    <li
-                      key={m.user_id}
-                      style={{
-                        border: "1px solid rgba(255,255,255,0.1)",
-                        borderRadius: 10,
-                        padding: 12,
-                        marginBottom: 10,
-                        display: "flex",
-                        justifyContent: "space-between",
-                        alignItems: "center",
-                      }}
-                    >
-                      <div>
-                        <div style={{ fontWeight: 600 }}>
-                          {display} {isSelf ? <span style={{ opacity: 0.6 }}>(you)</span> : null}
-                        </div>
-                        <div style={{ opacity: 0.7, fontSize: 12 }}>{m.role}</div>
-                      </div>
-
-                      <Row>
-                        {canEdit && (
-                          <>
-                            <select
-                              value={m.role}
-                              onChange={(e) => changeRole(m.user_id, e.target.value)}
-                              style={styles.select}
-                            >
-                              <option value="member">Member</option>
-                              <option value="admin">Admin</option>
-                            </select>
-                            <DangerButton onClick={() => removeMember(m.user_id)}>Remove</DangerButton>
-                          </>
-                        )}
-                        {!isAdmin && isSelf && (
-                          <DangerButton onClick={leaveTeam}>Leave</DangerButton>
-                        )}
-                      </Row>
-                    </li>
-                  );
-                })}
-              </ul>
-            )}
-
-            {/* Calendar mounted below members */}
-            <CalendarPanel team={selected} />
+            <Tabs value={teamTab} onChange={setTeamTab} style={{ marginTop: 8, marginBottom: 16 }}>
+              <Tab value="members" label="Members">
+                <TeamMembers
+                  team={selected}
+                  members={members}
+                  currentUserId={currentUserId}
+                  isAdmin={isAdmin}
+                  onChangeRole={handleChangeRole}
+                  onAddMember={handleAddMember}
+                  onRemoveMember={handleRemoveMember}
+                  onLeaveTeam={handleLeaveTeam}
+                  onDeleteTeam={handleDeleteTeam}
+                  showDeleteTeamControl={false}
+                />
+              </Tab>
+              <Tab value="calendar" label="Calendar">
+                <CalendarPanel team={selected} />
+              </Tab>
+              {isAdmin && (
+                <Tab value="admin" label="Admin">
+                  <div style={{ display: "grid", gap: 12 }}>
+                    <h3 style={{ margin: "16px 0 6px", fontSize: 16 }}>Team administration</h3>
+                    <div style={{ borderTop: "1px solid rgba(255,255,255,0.1)", margin: "6px 0 12px" }} />
+                    <Row>
+                      <GhostButton onClick={renameTeam}>Rename team</GhostButton>
+                      <DangerButton onClick={deleteTeam}>Delete team</DangerButton>
+                    </Row>
+                  </div>
+                </Tab>
+              )}
+            </Tabs>
           </div>
         </>
       )}

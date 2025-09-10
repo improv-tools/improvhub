@@ -5,6 +5,7 @@ import { Button, GhostButton, Input, DangerButton, InfoText, ErrorText } from "c
 export default function TeamMembers({
   team, members, currentUserId, isAdmin,
   onChangeRole, onAddMember, onRemoveMember, onLeaveTeam, onDeleteTeam,
+  showDeleteTeamControl = true,
 }) {
   const [err, setErr] = useState("");
   const [msg, setMsg] = useState("");
@@ -41,7 +42,37 @@ export default function TeamMembers({
 
   return (
     <>
-      <h3 style={{ margin: "8px 0 8px", fontSize: 16 }}>Members</h3>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginTop: 24, marginBottom: 6 }}>
+        <h3 style={{ margin: 0, fontSize: 16 }}>Members</h3>
+        {isAdmin && !showInvite && (
+          <GhostButton style={{ padding: "6px 10px" }} onClick={() => setShowInvite(true)}>+ Add member</GhostButton>
+        )}
+      </div>
+      <div style={{ borderTop: "1px solid rgba(255,255,255,0.1)", margin: "6px 0 12px" }} />
+
+      {/* Add member form (inline under header) */}
+      {isAdmin && showInvite && (
+        <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap", marginBottom: 8 }}>
+          <Input
+            placeholder="user@example.com"
+            type="email"
+            value={inviteEmail}
+            onChange={(e) => setInviteEmail(e.target.value)}
+            onKeyDown={(e) => e.key === "Enter" && addMember()}
+            style={{ minWidth: 220 }}
+          />
+          <select value={inviteRole} onChange={(e) => setInviteRole(e.target.value)} style={styles.select}>
+            <option value="member">Member</option>
+            <option value="admin">Admin</option>
+          </select>
+          <Button onClick={addMember} disabled={inviting || !inviteEmail.trim()}>
+            {inviting ? "Adding…" : "Add"}
+          </Button>
+          <GhostButton onClick={() => { setShowInvite(false); setInviteEmail(""); setInviteRole("member"); }}>
+            Cancel
+          </GhostButton>
+        </div>
+      )}
       {err && <ErrorText>{err}</ErrorText>}
       {msg && <InfoText>{msg}</InfoText>}
 
@@ -91,37 +122,9 @@ export default function TeamMembers({
         </ul>
       )}
 
-      {/* Add member (toggle) */}
-      {isAdmin && (
-        <div style={{ marginTop: 12 }}>
-          {!showInvite ? (
-            <GhostButton onClick={() => setShowInvite(true)}>+ Add member</GhostButton>
-          ) : (
-            <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
-              <Input
-                placeholder="user@example.com"
-                type="email"
-                value={inviteEmail}
-                onChange={(e) => setInviteEmail(e.target.value)}
-                onKeyDown={(e) => e.key === "Enter" && addMember()}
-                style={{ minWidth: 220 }}
-              />
-              <select value={inviteRole} onChange={(e) => setInviteRole(e.target.value)} style={styles.select}>
-                <option value="member">Member</option>
-                <option value="admin">Admin</option>
-              </select>
-              <Button onClick={addMember} disabled={inviting || !inviteEmail.trim()}>
-                {inviting ? "Adding…" : "Add"}
-              </Button>
-              <GhostButton onClick={() => { setShowInvite(false); setInviteEmail(""); setInviteRole("member"); }}>
-                Cancel
-              </GhostButton>
-            </div>
-          )}
-        </div>
-      )}
+      {/* (invite toggle moved to header) */}
 
-      {isAdmin && (
+      {isAdmin && showDeleteTeamControl && (
         <div style={{ marginTop: 18 }}>
           <DangerButton onClick={() => onDeleteTeam(team.id)}>Delete team</DangerButton>
         </div>

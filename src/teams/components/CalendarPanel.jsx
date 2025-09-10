@@ -527,17 +527,20 @@ export default function CalendarPanel({ team }) {
   /* -------------------------------- Render --------------------------------- */
   return (
     <div style={{ marginTop: 16 }}>
-      <h3 style={{ margin: "8px 0 8px", fontSize: 16 }}>Calendar</h3>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginTop: 24, marginBottom: 6 }}>
+        <h3 style={{ margin: 0, fontSize: 16 }}>Calendar</h3>
+        {mode === "list" && (
+          <GhostButton onClick={() => { setBanner(""); setBannerErr(""); setMode("create"); }} style={{ padding: "6px 10px" }}>
+            + New event
+          </GhostButton>
+        )}
+      </div>
+      <div style={{ borderTop: "1px solid rgba(255,255,255,0.1)", margin: "6px 0 12px" }} />
       {err && <ErrorText>{err}</ErrorText>}
       {bannerErr && <ErrorText>{bannerErr}</ErrorText>}
       {banner && <InfoText>{banner}</InfoText>}
 
-      {/* New event: only show in list mode (hidden while editing) */}
-      {mode === "list" && (
-        <Row style={{ marginBottom: 8 }}>
-          <Button onClick={() => { setBanner(""); setBannerErr(""); setMode("create"); }}>New event</Button>
-        </Row>
-      )}
+      {/* New event button moved to header */}
 
       {/* CREATE */}
       {mode === "create" && (
