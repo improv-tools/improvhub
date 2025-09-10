@@ -679,6 +679,7 @@ as $$
 declare
   v_team_id uuid;
   v_row public.team_events;
+  v_patch jsonb := coalesce(p_patch, '{}'::jsonb);
 begin
   select team_id into v_team_id from public.team_events where id = p_event_id;
   if v_team_id is null then
@@ -689,25 +690,47 @@ begin
   end if;
 
   update public.team_events
-  set title              = coalesce(p_patch->>'title', title),
-      description        = coalesce(p_patch->>'description', description),
-      location           = coalesce(p_patch->>'location', location),
-      category           = coalesce((p_patch->>'category')::event_category, category),
-      tz                 = coalesce(p_patch->>'tz', tz),
-      starts_at          = coalesce((p_patch->>'starts_at')::timestamptz, starts_at),
-      ends_at            = coalesce((p_patch->>'ends_at')::timestamptz, ends_at),
-      recur_freq         = coalesce((p_patch->>'recur_freq')::recur_freq, recur_freq),
-      recur_interval     = 1,
-      recur_byday        = coalesce(
-                              (select case when p_patch ? 'recur_byday'
-                                           then array(select jsonb_array_elements_text(p_patch->'recur_byday'))
-                                      end),
-                              recur_byday
-                            ),
-      recur_bymonthday   = coalesce((p_patch->>'recur_bymonthday')::int, recur_bymonthday),
-      recur_week_of_month= coalesce((p_patch->>'recur_week_of_month')::int, recur_week_of_month),
-      recur_until        = coalesce((p_patch->>'recur_until')::timestamptz, recur_until),
-      recur_count        = coalesce((p_patch->>'recur_count')::int, recur_count)
+  set title        = coalesce(v_patch->>'title', title),
+      description  = coalesce(v_patch->>'description', description),
+      location     = coalesce(v_patch->>'location', location),
+      category     = coalesce((v_patch->>'category')::event_category, category),
+      tz           = coalesce(v_patch->>'tz', tz),
+      starts_at    = coalesce((v_patch->>'starts_at')::timestamptz, starts_at),
+      ends_at      = coalesce((v_patch->>'ends_at')::timestamptz, ends_at),
+
+      -- enums/interval
+      recur_freq   = coalesce((v_patch->>'recur_freq')::recur_freq, recur_freq),
+      recur_interval = 1,
+
+      -- text[]: accept ["MO","WE"] or "MO"
+      recur_byday = case
+        when v_patch ? 'recur_byday' then
+          case jsonb_typeof(v_patch->'recur_byday')
+            when 'array'  then (select coalesce(array_agg(value::text), '{}') from jsonb_array_elements_text(v_patch->'recur_byday'))
+            when 'string' then array[(v_patch->>'recur_byday')]
+            when 'null'   then null
+            else recur_byday
+          end
+        else recur_byday
+      end,
+
+      -- int[]: accept [1,15] or 15
+      recur_bymonthday = case
+        when v_patch ? 'recur_bymonthday' then
+          case jsonb_typeof(v_patch->'recur_bymonthday')
+            when 'array'  then (select coalesce(array_agg((e.value)::int), '{}') from jsonb_array_elements(v_patch->'recur_bymonthday') e)
+            when 'number' then array[(v_patch->>'recur_bymonthday')::int]
+            when 'null'   then null
+            else recur_bymonthday
+          end
+        else recur_bymonthday
+      end,
+
+      -- plain integers
+      recur_week_of_month = case when v_patch ? 'recur_week_of_month' then (v_patch->>'recur_week_of_month')::int else recur_week_of_month end,
+      recur_until         = coalesce((v_patch->>'recur_until')::timestamptz, recur_until),
+      recur_count         = case when v_patch ? 'recur_count' then (v_patch->>'recur_count')::int else recur_count end
+
   where id = p_event_id
   returning * into v_row;
 
@@ -716,6 +739,8 @@ end$$;
 
 alter function public.edit_team_event(uuid, jsonb) owner to postgres;
 grant execute on function public.edit_team_event(uuid, jsonb) to authenticated;
+notify pgrst, 'reload schema';
+
 
  
 
