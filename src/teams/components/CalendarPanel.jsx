@@ -1,6 +1,6 @@
 // src/teams/components/CalendarPanel.jsx
 import { useMemo, useState, useEffect } from "react";
-import { Button, GhostButton, DangerButton, Label, Input, ErrorText, InfoText, Row } from "components/ui";
+import { Button, GhostButton, DangerButton, Label, Input, Textarea, ErrorText, InfoText, Row } from "components/ui";
 import { useAuth } from "auth/AuthContext";
 import useCalendarData from "../hooks/useCalendarData";
 import { composeStartEndISO, splitLocal, fmtRangeLocal, browserTZ } from "../utils/datetime";
@@ -558,7 +558,7 @@ export default function CalendarPanel({ team }) {
             </select>
           </Row>
           <Row>
-            <Input placeholder="Description" value={cDescription} onChange={(e)=>setCDescription(e.target.value)} style={{ minWidth: 500 }} />
+            <Textarea placeholder="Description" value={cDescription} onChange={(e)=>setCDescription(e.target.value)} maxLength={500} rows={3} style={{ minWidth: 500 }} />
           </Row>
 
           <Row>
@@ -674,7 +674,7 @@ export default function CalendarPanel({ team }) {
             </select>
           </Row>
           <Row>
-            <Input placeholder="Description" value={sEd.description || ""} onChange={(e)=>setSEd({ ...sEd, description: e.target.value })} style={{ minWidth: 500 }} />
+            <Textarea placeholder="Description" value={sEd.description || ""} onChange={(e)=>setSEd({ ...sEd, description: e.target.value })} maxLength={500} rows={3} style={{ minWidth: 500 }} />
           </Row>
 
           <Row>
@@ -795,7 +795,7 @@ export default function CalendarPanel({ team }) {
             </select>
           </Row>
           <Row>
-            <Input placeholder="Description" value={oEd.description} onChange={(e)=>setOEd({ ...oEd, description: e.target.value })} style={{ minWidth: 500 }} />
+            <Textarea placeholder="Description" value={oEd.description} onChange={(e)=>setOEd({ ...oEd, description: e.target.value })} maxLength={500} rows={3} style={{ minWidth: 500 }} />
           </Row>
           <Row>
             <Input type="date" value={oEd._sDate} onChange={(e)=>setOEd({ ...oEd, _sDate: e.target.value })} />

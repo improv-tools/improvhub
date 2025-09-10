@@ -142,6 +142,28 @@ export const Input = forwardRef(function Input({ style, ...props }, ref) {
   );
 });
 
+export const Textarea = forwardRef(function Textarea({ style, rows = 3, ...props }, ref) {
+  return (
+    <textarea
+      ref={ref}
+      rows={rows}
+      style={merge(
+        {
+          background: tokens.color.bg,
+          color: tokens.color.text,
+          border: `1px solid ${tokens.color.borderMuted}`,
+          borderRadius: tokens.radius.md,
+          padding: "10px 12px",
+          outline: "none",
+          resize: "vertical",
+        },
+        style
+      )}
+      {...props}
+    />
+  );
+});
+
 export function Button({ children, style, ...props }) {
   return (
     <button
