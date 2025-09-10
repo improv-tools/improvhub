@@ -82,6 +82,9 @@ export default function TeamsPanel() {
   };
 
   const openTeam = async (team) => {
+    // Clear any prior banners when opening a team
+    setErr("");
+    setMsg("");
     setSelected(team);
     setMembers([]);
     setTeamTab("members");
@@ -97,6 +100,9 @@ export default function TeamsPanel() {
   };
 
   const backToList = () => {
+    // Clear banners when leaving a team
+    setErr("");
+    setMsg("");
     setSelected(null);
     setMembers([]);
     setShowInvite(false);
@@ -196,11 +202,10 @@ export default function TeamsPanel() {
   };
 
   const handleChangeRole = async (teamId, userId, role) => {
-    setErr(""); setMsg("");
+    setErr("");
     try {
       await setMemberRoleRPC(teamId, userId, role);
       if (selected?.id === teamId) await loadMembers(selected);
-      setMsg("Role updated.");
     } catch (e) { setErr(e.message || "Failed to update role"); }
   };
 
@@ -217,32 +222,37 @@ export default function TeamsPanel() {
   };
 
   const cancelInvite = async (teamId, userId) => {
-    setErr(""); setMsg("");
+    setErr("");
     try {
       const { cancelInvitation, listTeamInvitations } = await import('./teams.api');
       await cancelInvitation(teamId, userId);
       const inv = await listTeamInvitations(teamId);
       setInvites(inv);
-      setMsg("Invitation canceled.");
     } catch (e) { setErr(e.message || "Failed to cancel invitation"); }
   };
 
   const handleAddMember = async (teamId, email, role) => {
-    setErr(""); setMsg("");
+    setErr("");
     try {
       await addMemberByEmailRPC(teamId, email, role);
       if (selected?.id === teamId) await loadMembers(selected);
-      setMsg("Member added.");
+      // Refresh invites immediately so pending invitation appears without tab change
+      try {
+        const { listTeamInvitations } = await import('./teams.api');
+        const inv = await listTeamInvitations(teamId);
+        setInvites(inv);
+      } catch (e) {
+        console.warn('Failed to refresh invitations', e?.message || e);
+      }
     } catch (e) { setErr(e.message || "Failed to add member"); }
   };
 
   const handleRemoveMember = async (teamId, userId) => {
     if (!window.confirm("Remove this member from the team?")) return;
-    setErr(""); setMsg("");
+    setErr("");
     try {
       await removeMemberRPC(teamId, userId);
       if (selected?.id === teamId) await loadMembers(selected);
-      setMsg("Member removed.");
     } catch (e) { setErr(e.message || "Failed to remove member"); }
   };
 
@@ -278,8 +288,8 @@ export default function TeamsPanel() {
   return (
     <Card style={{ marginTop: 16 }}>
       {!selected && <H1>Teams</H1>}
-      {err && <ErrorText>{err}</ErrorText>}
-      {msg && <InfoText>{msg}</InfoText>}
+      {err && <ErrorText style={{ marginBottom: 8 }}>{err}</ErrorText>}
+      {msg && <InfoText style={{ marginBottom: 8 }}>{msg}</InfoText>}
 
       {!selected ? (
         <>
@@ -334,7 +344,7 @@ export default function TeamsPanel() {
         </>
       ) : (
         <>
-          <Row style={{ marginTop: -6, marginBottom: 6 }}>
+          <Row style={{ marginTop: 0, marginBottom: 6 }}>
             <div style={{ display: "flex", alignItems: "center", gap: 10, fontSize: 20 }}>
               <GhostButton onClick={backToList} style={{ padding: "6px 10px", fontSize: 16 }}>Teams</GhostButton>
               <span style={{ opacity: 0.6 }}>→</span>
@@ -344,7 +354,11 @@ export default function TeamsPanel() {
 
           <div style={{ marginTop: 16 }}>
 
-            <Tabs value={teamTab} onChange={setTeamTab} style={{ marginTop: 8, marginBottom: 16 }}>
+            <Tabs
+              value={teamTab}
+              onChange={(v) => { setTeamTab(v); setErr(""); setMsg(""); }}
+              style={{ marginTop: 8, marginBottom: 16 }}
+            >
               <Tab value="members" label="Members">
                 <TeamMembers
                   team={selected}

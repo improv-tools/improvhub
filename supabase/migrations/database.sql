@@ -911,6 +911,155 @@ grant select on public.team_invitations_with_names to authenticated;
 
 notify pgrst, 'reload schema';
 
+-- ====================================================
+-- 8) User notifications (removed from team, etc.)
+-- ====================================================
+
+create table if not exists public.user_notifications (
+  id          uuid primary key default gen_random_uuid(),
+  user_id     uuid not null references auth.users(id) on delete cascade,
+  kind        text not null, -- e.g., 'removed_from_team'
+  team_id     uuid references public.teams(id) on delete cascade,
+  payload     jsonb not null default '{}'::jsonb,
+  read_at     timestamptz,
+  deleted_at  timestamptz,
+  created_at  timestamptz not null default now()
+);
+
+create index if not exists user_notifications_user_created_idx
+  on public.user_notifications (user_id, created_at desc);
+
+alter table public.user_notifications enable row level security;
+
+drop policy if exists "notifications select own" on public.user_notifications;
+create policy "notifications select own"
+on public.user_notifications for select
+to authenticated
+using (user_id = auth.uid());
+
+drop policy if exists "notifications update own" on public.user_notifications;
+create policy "notifications update own"
+on public.user_notifications for update
+to authenticated
+using (user_id = auth.uid())
+with check (user_id = auth.uid());
+
+-- RPC: list my notifications (excluding deleted)
+drop function if exists public.list_my_notifications();
+create or replace function public.list_my_notifications()
+returns table (
+  id uuid,
+  kind text,
+  team_id uuid,
+  team_name text,
+  display_id text,
+  payload jsonb,
+  read_at timestamptz,
+  created_at timestamptz
+)
+language sql
+stable
+security definer
+set search_path = public
+as $$
+  select n.id, n.kind, n.team_id, t.name as team_name, t.display_id, n.payload, n.read_at, n.created_at
+  from public.user_notifications n
+  left join public.teams t on t.id = n.team_id
+  where n.user_id = auth.uid() and n.deleted_at is null
+  order by n.created_at desc;
+$$;
+grant execute on function public.list_my_notifications() to authenticated;
+
+-- RPCs: mark read / delete (soft)
+drop function if exists public.mark_notification_read(p_id uuid);
+create or replace function public.mark_notification_read(p_id uuid)
+returns void
+language plpgsql
+volatile
+security definer
+set search_path = public
+as $$
+begin
+  update public.user_notifications
+  set read_at = coalesce(read_at, now())
+  where id = p_id and user_id = auth.uid();
+end;
+$$;
+grant execute on function public.mark_notification_read(uuid) to authenticated;
+
+drop function if exists public.delete_notification(p_id uuid);
+create or replace function public.delete_notification(p_id uuid)
+returns void
+language plpgsql
+volatile
+security definer
+set search_path = public
+as $$
+begin
+  update public.user_notifications
+  set deleted_at = now()
+  where id = p_id and user_id = auth.uid();
+end;
+$$;
+grant execute on function public.delete_notification(uuid) to authenticated;
+
+-- Hook notification into remove_member
+drop function if exists public.remove_member(p_team_id uuid, p_user_id uuid);
+create or replace function public.remove_member(p_team_id uuid, p_user_id uuid)
+returns void
+language plpgsql
+volatile
+security definer
+set search_path = public
+as $$
+declare
+  v_is_admin boolean;
+  v_self boolean;
+  v_target_admin boolean;
+  v_admin_count int;
+begin
+  v_self := (p_user_id = auth.uid());
+
+  -- caller admin?
+  select exists (
+    select 1 from public.team_members m
+    where m.team_id = p_team_id and m.user_id = auth.uid() and m.role = 'admin'
+  ) into v_is_admin;
+
+  if not v_self and not v_is_admin then
+    raise exception 'Only admins can remove other members';
+  end if;
+
+  -- If target is admin, ensure not last admin
+  select (role = 'admin') from public.team_members
+  where team_id = p_team_id and user_id = p_user_id
+  into v_target_admin;
+
+  if coalesce(v_target_admin,false) then
+    select count(*) from public.team_members
+    where team_id = p_team_id and role = 'admin'
+    into v_admin_count;
+
+    if v_admin_count <= 1 then
+      raise exception 'Cannot remove the last admin';
+    end if;
+  end if;
+
+  delete from public.team_members
+  where team_id = p_team_id and user_id = p_user_id;
+
+  -- Notify the removed user (if not self-removal)
+  if not v_self then
+    insert into public.user_notifications (user_id, kind, team_id, payload)
+    values (p_user_id, 'removed_from_team', p_team_id, '{}'::jsonb);
+  end if;
+end;
+$$;
+
+grant execute on function public.remove_member(uuid, uuid) to authenticated;
+
+notify pgrst, 'reload schema';
+
 -- Attendance for team events
 create table if not exists public.team_event_attendance (
   event_id    uuid not null references public.team_events(id) on delete cascade,

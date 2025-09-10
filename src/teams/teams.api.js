@@ -206,3 +206,20 @@ export async function cancelInvitation(teamId, userId) {
     .eq('status', 'invited');
   if (error) throw new Error(error.message);
 }
+
+/* ------------------------------- Notifications ------------------------------ */
+export async function listMyNotifications() {
+  const { data, error } = await supabase.rpc('list_my_notifications');
+  if (error) throw new Error(error.message);
+  return data || [];
+}
+
+export async function markNotificationRead(id) {
+  const { error } = await supabase.rpc('mark_notification_read', { p_id: id });
+  if (error) throw new Error(error.message);
+}
+
+export async function deleteNotification(id) {
+  const { error } = await supabase.rpc('delete_notification', { p_id: id });
+  if (error) throw new Error(error.message);
+}

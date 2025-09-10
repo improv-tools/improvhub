@@ -32,7 +32,10 @@ export default function TeamMembers({
   const remove = async (m) => {
     if (m.role === "admin" && adminCount === 1) { alert("You cannot remove the last admin from the team."); return; }
     if (!window.confirm("Remove this member from the team?")) return;
-    await onRemoveMember(team.id, m.user_id);
+    try {
+      await onRemoveMember(team.id, m.user_id);
+      setMsg("Member removed ✓"); setTimeout(() => setMsg(""), 1500);
+    } catch (e) { setErr(e.message || "Remove failed"); }
   };
 
   const leave = async (m) => {
@@ -104,7 +107,12 @@ export default function TeamMembers({
                           <>
                             <Button
                               style={{ padding: "6px 10px" }}
-                              onClick={() => onChangeRole(team.id, m.user_id, m.role === "admin" ? "member" : "admin")}
+                              onClick={async () => {
+                                try {
+                                  await onChangeRole(team.id, m.user_id, m.role === "admin" ? "member" : "admin");
+                                  setMsg("Role updated ✓"); setTimeout(() => setMsg(""), 1500);
+                                } catch (e) { setErr(e.message || "Role update failed"); }
+                              }}
                             >
                               {m.role === "admin" ? "Make member" : "Make admin"}
                             </Button>
@@ -125,7 +133,7 @@ export default function TeamMembers({
 
       {/* Invited (pending) */}
       {Array.isArray(invites) && invites.filter(i => i.status === 'invited').length > 0 && (
-        <div style={{ marginTop: 18 }}>
+        <div style={{ marginTop: 28 }}>
           <h4 style={{ margin: '0 0 6px', fontSize: 14, opacity: 0.85 }}>Pending invitations</h4>
           <ul style={{ listStyle: 'none', padding: 0, margin: 0 }}>
             {invites.filter(i => i.status === 'invited').map((inv) => (
@@ -143,7 +151,13 @@ export default function TeamMembers({
                   <div style={{ opacity: 0.7, fontSize: 12 }}>{inv.role} · invited</div>
                 </div>
                 {isAdmin && (
-                  <GhostButton style={{ padding: '6px 10px' }} onClick={() => onCancelInvite?.(team.id, inv.user_id)}>
+                  <GhostButton
+                    style={{ padding: '6px 10px' }}
+                    onClick={async () => {
+                      try { await onCancelInvite?.(team.id, inv.user_id); setMsg("Invitation canceled ✓"); setTimeout(()=>setMsg(""),1500); }
+                      catch (e) { setErr(e.message || 'Cancel invite failed'); }
+                    }}
+                  >
                     Cancel invite
                   </GhostButton>
                 )}

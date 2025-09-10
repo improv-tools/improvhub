@@ -3,7 +3,7 @@ import { useState, useEffect } from "react";
 import { useAuth } from "auth/AuthContext";
 import ProfilePanel from "profiles/ProfilePanel";
 import TeamsPanel from "teams/TeamsPanel";
-import { listMyInvitations, acceptInvitation, declineInvitation } from "teams/teams.api";
+import { listMyInvitations, acceptInvitation, declineInvitation, listMyNotifications, deleteNotification } from "teams/teams.api";
 import { signOut } from "auth/auth.api";
 import { CenterWrap, Card, H1, Tabs, Tab, GhostButton, Button, ErrorText, Row } from "components/ui";
 
@@ -13,6 +13,9 @@ export default function Dashboard() {
   const [invites, setInvites] = useState([]);
   const [invitesLoading, setInvitesLoading] = useState(true);
   const [invErr, setInvErr] = useState("");
+  const [notifs, setNotifs] = useState([]);
+  const [notifsLoading, setNotifsLoading] = useState(true);
+  const [notifsErr, setNotifsErr] = useState("");
 
   const loadInvites = async () => {
     setInvErr(""); setInvitesLoading(true);
@@ -23,7 +26,16 @@ export default function Dashboard() {
     finally { setInvitesLoading(false); }
   };
 
-  useEffect(() => { loadInvites(); }, []);
+  const loadNotifs = async () => {
+    setNotifsErr(""); setNotifsLoading(true);
+    try {
+      const rows = await listMyNotifications();
+      setNotifs(rows || []);
+    } catch (e) { setNotifsErr(e.message || "Failed to load notifications"); }
+    finally { setNotifsLoading(false); }
+  };
+
+  useEffect(() => { loadInvites(); loadNotifs(); }, []);
 
   return (
     <CenterWrap>
@@ -72,6 +84,40 @@ export default function Dashboard() {
                   ))}
                 </ul>
               ))}
+              {/* Other notifications */}
+              <div style={{ marginTop: 12 }}>
+                {notifsErr && <ErrorText>{notifsErr}</ErrorText>}
+                {notifsLoading ? (
+                  <p style={{ opacity: 0.8 }}>Loading…</p>
+                ) : (notifs.length === 0 ? null : (
+                  <ul style={{ listStyle: "none", padding: 0, margin: 0 }}>
+                    {notifs.map((n) => (
+                      <li key={n.id} style={{
+                        border: "1px solid rgba(255,255,255,0.1)",
+                        borderRadius: 10,
+                        padding: 12,
+                        marginBottom: 10,
+                        display: "flex",
+                        justifyContent: "space-between",
+                        alignItems: "center",
+                        opacity: n.read_at ? 0.8 : 1,
+                      }}>
+                        <div>
+                          {n.kind === 'removed_from_team' ? (
+                            <div style={{ fontWeight: 600 }}>Removed from team: {n.team_name || n.display_id || n.team_id}</div>
+                          ) : (
+                            <div style={{ fontWeight: 600 }}>{n.kind}</div>
+                          )}
+                          <div style={{ opacity: 0.7, fontSize: 12 }}>{new Date(n.created_at).toLocaleString()}</div>
+                        </div>
+                        <Row>
+                          <GhostButton onClick={async ()=> { await deleteNotification(n.id); await loadNotifs(); }}>Dismiss</GhostButton>
+                        </Row>
+                      </li>
+                    ))}
+                  </ul>
+                ))}
+              </div>
             </div>
             <GhostButton onClick={() => setTab("teams")} style={{ marginTop: 12 }}>
               Go to Teams →

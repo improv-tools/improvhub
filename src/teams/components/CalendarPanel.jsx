@@ -177,7 +177,14 @@ export default function CalendarPanel({ team }) {
        .forEach(r => {
          const k = `${r.event_id}|${new Date(r.occ_start).toISOString()}`;
          const arr = map.get(k) || [];
-         const n = r._is_me && displayName ? displayName : (r.full_name || "Unknown");
+         // Prefer auth display name for self; otherwise fall back to server-provided name.
+         // If the server provided an email-like string, show the part before '@' (avoid full emails).
+         let n = r.full_name || "Unknown";
+         if (r._is_me && displayName) {
+           n = displayName;
+         } else if (typeof n === 'string' && n.includes('@')) {
+           n = n.split('@')[0];
+         }
          arr.push({ name: n, isMe: !!r._is_me });
          map.set(k, arr);
        });
@@ -929,7 +936,12 @@ export default function CalendarPanel({ team }) {
         <div style={{ display: "flex", gap: 8, flexWrap: "wrap", opacity: 0.9 }}>
           {arr.map((a, i) => (
             <span key={i}
-              style={{ border: "1px solid rgba(255,255,255,0.2)", padding: "2px 6px", borderRadius: 6 }}>
+              style={{
+                border: "1px solid rgba(255,255,255,0.2)",
+                padding: "2px 6px",
+                borderRadius: 6,
+                fontSize: 12,
+              }}>
               {a.name}{a.isMe ? " (you)" : ""}
             </span>
           ))}
