@@ -28,16 +28,6 @@ const styles = {
 };
 const cap = (s) => (s ? s.charAt(0).toUpperCase() + s.slice(1) : s);
 
-
-const onPanelKeyDown = (e, cancelButtonId) => {
-  if (e.key === "Enter") {
-    e.preventDefault();
-    const btn = document.getElementById(cancelButtonId);
-    if (btn) btn.click();
-  }
-};
-
-
 /* ------------------------------- Estimators ------------------------------- */
 /** Estimate number of occurrences from a local start (date+time) until local end date (inclusive), interval=1. */
 function estimateUntilCount({ recurFreq, startDate, startTime, untilDate, byday, byMonthday, weekOfMonth }) {
@@ -156,51 +146,12 @@ function validateTimes({ title, startDate, startTime, endTime }) {
   return errs;
 }
 
-const toggleAttendance = async (occ) => {
-  try {
-    const key = `${occ.event_id}|${occ.base_start}`;
-    const arr = attendanceMap.get(key) || [];
-    const mine = arr.some(a => a.isMe);
-    await setAttendance(occ.event_id, occ.base_start, !mine);
-    await loadAttendance();
-  } catch (e) {
-    console.error("attendance toggle failed:", e);
-  }
-};
-
 /* -------------------------------- Component ------------------------------- */
 export default function CalendarPanel({ team }) {
   const tz = browserTZ();
   const today = new Date();
   const windowStartIso = new Date(today.getFullYear(), today.getMonth(), today.getDate()).toISOString();
-  const windowEndIso = new Date(today.getFullYear(), today.getMonth(), today.getDate() + 120).toISOString();
-
- // Attendance cache keyed by `${event_id}|${occ_start ISO}`
- const [attendanceMap, setAttendanceMap] = useState(new Map());
- 
- const loadAttendance = async () => {
-   if (!team?.id) return;
-   try {
-     const rows = await listAttendance(team.id, windowStartIso, windowEndIso);
-     const map = new Map();
-     (rows || [])
-       .filter(r => r.attending)
-       .forEach(r => {
-         const k = `${r.event_id}|${new Date(r.occ_start).toISOString()}`;
-         const arr = map.get(k) || [];
-         arr.push({ name: r.full_name || "Unknown", isMe: !!r._is_me });
-         map.set(k, arr);
-       });
-     setAttendanceMap(map);
-   } catch (e) {
-     console.error("attendance load failed:", e);
-   }
- };
- 
- // (Re)load when window/team changes or occurrences list changes size
- useEffect(() => { loadAttendance(); },
-   [team?.id, windowStartIso, windowEndIso, occurrences?.length]);
-
+  const windowEndIso   = new Date(today.getFullYear(), today.getMonth(), today.getDate() + 120).toISOString();
 
   const {
     loading, err, occurrences, events,
@@ -209,6 +160,47 @@ export default function CalendarPanel({ team }) {
   } = useCalendarData(team?.id, windowStartIso, windowEndIso);
 
   const upcoming = useMemo(() => occurrences, [occurrences]);
+
+  // ---------- Attendance (safe integration) ----------
+  // Map key: `${event_id}|${occ_start ISO}` -> [{ name, isMe }]
+  const [attendanceMap, setAttendanceMap] = useState(new Map());
+
+  const loadAttendance = async () => {
+    if (!team?.id) return;
+    try {
+      const rows = await listAttendance(team.id, windowStartIso, windowEndIso);
+      const map = new Map();
+      (rows || [])
+        .filter(r => r.attending)
+        .forEach(r => {
+          const k = `${r.event_id}|${new Date(r.occ_start).toISOString()}`;
+          const arr = map.get(k) || [];
+          arr.push({ name: r.full_name || "Unknown", isMe: !!r._is_me });
+          map.set(k, arr);
+        });
+      setAttendanceMap(map);
+    } catch (e) {
+      // Don't break the page if the view isn't ready
+      console.warn("attendance load failed:", e?.message || e);
+      setAttendanceMap(new Map());
+    }
+  };
+
+  useEffect(() => { loadAttendance(); },
+    [team?.id, windowStartIso, windowEndIso, occurrences?.length]);
+
+  const toggleAttendance = async (occ) => {
+    try {
+      const key = `${occ.event_id}|${occ.base_start}`;
+      const arr = attendanceMap.get(key) || [];
+      const mine = arr.some(a => a.isMe);
+      await setAttendance(occ.event_id, occ.base_start, !mine);
+      await loadAttendance();
+    } catch (e) {
+      console.warn("attendance toggle failed:", e?.message || e);
+    }
+  };
+  // ---------------------------------------------------
 
   const [mode, setMode] = useState("list"); // 'list' | 'create' | 'editSeries' | 'editOcc'
   const [banner, setBanner] = useState("");
@@ -235,7 +227,6 @@ export default function CalendarPanel({ team }) {
   const [cByday, setCByday] = useState(["MO"]);
   const [cByMonthday, setCByMonthday] = useState(0);
   const [cWeekOfMonth, setCWeekOfMonth] = useState(0);
-  const [cMonthlyMode, setCMonthlyMode] = useState("monthday"); // 'monthday' | 'week'
   const [cEndMode, setCEndMode] = useState("count"); // 'until'|'count'
   const [cUntilDate, setCUntilDate] = useState("");
   const [cCount, setCCount] = useState(6);
@@ -285,11 +276,9 @@ export default function CalendarPanel({ team }) {
         ends_at: endIso,
         recur_freq: cFreq,
         recur_interval: 1,
-        recur_byday: cFreq === "weekly"
-           ? cByday
-           : (cFreq === "monthly" && cMonthlyMode === "week" ? cByday : null),
-        recur_bymonthday: cFreq === "monthly" && cMonthlyMode === "monthday" && Number(cByMonthday) ? Number(cByMonthday) : null,
-        recur_week_of_month: cFreq === "monthly" && cMonthlyMode === "week" && Number(cWeekOfMonth) ? Number(cWeekOfMonth) : null,
+        recur_byday: cFreq === "weekly" ? cByday : null,
+        recur_bymonthday: cFreq === "monthly" && cByMonthday ? Number(cByMonthday) : null,
+        recur_week_of_month: cFreq === "monthly" && cWeekOfMonth ? Number(cWeekOfMonth) : null,
         recur_until,
         recur_count,
       });
@@ -306,8 +295,7 @@ export default function CalendarPanel({ team }) {
   /* ------------------------------ Edit Series ------------------------------ */
   const [sEd, setSEd] = useState(null);
   const [sRecurrenceMode, setSRecurrenceMode] = useState("none"); // 'none'|'until'|'count'
-  const [sMonthlyMode, setSMonthlyMode] = useState("monthday");   // 'monthday' | 'week'
-  
+
   const openEditSeries = (eventId) => {
     const e = events.find((x) => x.id === eventId);
     if (!e) { setBannerErr("Could not load event."); return; }
@@ -324,9 +312,7 @@ export default function CalendarPanel({ team }) {
       recur_bymonthday = new Date(e.starts_at).getUTCDate();
     }
     const mode = (e.recur_freq === "none") ? "none" : (e.recur_until ? "until" : "count");
-    const initMonthlyMode = e.recur_freq === "monthly"
-      ? (recur_bymonthday ? "monthday" : "week")
-      : "monthday";
+
     setSEd({
       ...e,
       recur_byday,
@@ -336,7 +322,6 @@ export default function CalendarPanel({ team }) {
       _e: splitLocal(e.ends_at),
     });
     setSRecurrenceMode(mode);
-    setSMonthlyMode(initMonthlyMode);
     setBanner(""); setBannerErr("");
     setMode("editSeries");
   };
@@ -420,17 +405,6 @@ export default function CalendarPanel({ team }) {
             recur_byday = Array.isArray(sEd.recur_byday) ? sEd.recur_byday : [];
           }
         }
-      }
-       // Normalize monthly choice so only one rule is saved
-       if (recur_freq === "monthly") {
-       if (sMonthlyMode === "monthday") {
-         recur_bymonthday = Number(sEd.recur_bymonthday) || null;
-         recur_week_of_month = null;
-       } else {
-         recur_week_of_month = Number(sEd.recur_week_of_month) || null;
-         recur_bymonthday = null;
-         recur_byday = Array.isArray(sEd.recur_byday) ? sEd.recur_byday.slice(0,1) : null;
-         }
       }
 
       const { startIso, endIso } = composeStartEndISO(sEd._s.date, sEd._s.time, sEd._e.time);
@@ -564,7 +538,7 @@ export default function CalendarPanel({ team }) {
 
       {/* CREATE */}
       {mode === "create" && (
-        <div style={styles.panel} onKeyDown={(e)=>onPanelKeyDown(e, "create_cancel_btn")}>
+        <div style={styles.panel}>
           <h4 style={{ margin: "0 0 10px", fontSize: 14, opacity: 0.8 }}>Create event</h4>
 
           {cTimeErrors.concat(cFreq !== "none" ? cRecurrenceErrors : []).length > 0 && (
@@ -616,40 +590,19 @@ export default function CalendarPanel({ team }) {
             {cFreq === "monthly" && (
               <Row>
                 <Label>
-                  Mode
-                  <select value={cMonthlyMode} onChange={(e)=> {
-                    const v = e.target.value;
-                    setCMonthlyMode(v);
-                    // Clear inactive fields to avoid conflicts
-                    if (v === "monthday") { setCWeekOfMonth(0); setCByday(["MO"]); }
-                    if (v === "week")     { setCByMonthday(0); }
-                  }} style={styles.select}>
-                    <option value="monthday">By month-day</option>
-                    <option value="week">Week of month</option>
+                  By month-day
+                  <Input type="number" min={1} max={31} value={cByMonthday} onChange={(e)=>setCByMonthday(e.target.value)} style={{ width: 120 }} />
+                </Label>
+                <Label>
+                  or week-of-month (1..4, -1=last)
+                  <Input type="number" min={-1} max={4} value={cWeekOfMonth} onChange={(e)=>setCWeekOfMonth(e.target.value)} style={{ width: 140 }} />
+                </Label>
+                <Label>
+                  Weekday
+                  <select value={cByday[0] || "MO"} onChange={(e)=>setCByday([e.target.value])} style={styles.select}>
+                    {BYDAY.map((d)=> <option key={d} value={d}>{d}</option>)}
                   </select>
                 </Label>
-
-                {cMonthlyMode === "monthday" ? (
-                  <Label>
-                    By month-day
-                    <Input type="number" min={1} max={31} value={Number(cByMonthday)||0}
-                           onChange={(e)=>setCByMonthday(Number(e.target.value)||0)} style={{ width: 120 }} />
-                  </Label>
-                ) : (
-                  <>
-                    <Label>
-                      Week-of-month (1..4, -1=last)
-                      <Input type="number" min={-1} max={4} value={Number(cWeekOfMonth)||0}
-                             onChange={(e)=>setCWeekOfMonth(Number(e.target.value)||0)} style={{ width: 140 }} />
-                    </Label>
-                    <Label>
-                      Weekday
-                      <select value={cByday[0] || "MO"} onChange={(e)=>setCByday([e.target.value])} style={styles.select}>
-                        {BYDAY.map((d)=> <option key={d} value={d}>{d}</option>)}
-                      </select>
-                    </Label>
-                  </>
-                )}
               </Row>
             )}
           </Row>
@@ -677,14 +630,14 @@ export default function CalendarPanel({ team }) {
 
           <Row>
             <Button onClick={submitCreate} disabled={!canSaveCreate}>Create</Button>
-            <GhostButton id="create_cancel_btn" onClick={cancelCreate}>Cancel</GhostButton>
+            <GhostButton onClick={cancelCreate}>Cancel</GhostButton>
           </Row>
         </div>
       )}
 
       {/* EDIT SERIES */}
       {mode === "editSeries" && sEd && (
-        <div style={styles.panel} onKeyDown={(e)=>onPanelKeyDown(e, "series_cancel_btn")}>
+        <div style={styles.panel}>
           <h4 style={{ margin: "0 0 10px", fontSize: 14 }}>Edit event</h4>
 
           {/* Switch: No recurrence / Until / Count */}
@@ -765,44 +718,26 @@ export default function CalendarPanel({ team }) {
                 )}
 
                 {sEd.recur_freq === "monthly" && (
-                   <Row>
-                     <Label>
-                       Mode
-                       <select value={sMonthlyMode} onChange={(e)=>{
-                         const v=e.target.value; setSMonthlyMode(v);
-                         // Clear inactive fields
-                         if (v==="monthday") setSEd({ ...sEd, recur_week_of_month: null, recur_byday: Array.isArray(sEd.recur_byday)? sEd.recur_byday : ["MO"] });
-                         if (v==="week")     setSEd({ ...sEd, recur_bymonthday: null });
-                       }} style={styles.select}>
-                         <option value="monthday">By month-day</option>
-                         <option value="week">Week of month</option>
-                       </select>
-                     </Label>
- 
-                     {sMonthlyMode === "monthday" ? (
-                       <Label>Month-day
-                         <Input type="number" min={1} max={31} value={sEd.recur_bymonthday || 0}
-                                onChange={(e2)=>setSEd({ ...sEd, recur_bymonthday: Number(e2.target.value) || null, recur_week_of_month: null })} style={{ width: 120 }} />
-                       </Label>
-                     ) : (
-                       <>
-                         <Label>Week-of-month (1..4, -1=last)
-                           <Input type="number" min={-1} max={4} value={sEd.recur_week_of_month || 0}
-                                  onChange={(e2)=>setSEd({ ...sEd, recur_week_of_month: Number(e2.target.value) || null, recur_bymonthday: null })} style={{ width: 140 }} />
-                         </Label>
-                         <Label>Weekday
-                           <select
-                             value={(Array.isArray(sEd.recur_byday) && sEd.recur_byday[0]) || "MO"}
-                             onChange={(e2)=>setSEd({ ...sEd, recur_byday: [e2.target.value] })}
-                             style={styles.select}
-                           >
-                             {BYDAY.map((d)=> <option key={d} value={d}>{d}</option>)}
-                           </select>
-                       </Label>
-                       </>
-                    )}
-                   </Row>
-                 )}
+                  <Row>
+                    <Label>By month-day
+                      <Input type="number" min={1} max={31} value={sEd.recur_bymonthday || 0}
+                             onChange={(e2)=>setSEd({ ...sEd, recur_bymonthday: Number(e2.target.value) || null })} style={{ width: 120 }} />
+                    </Label>
+                    <Label>or week-of-month (1..4, -1=last)
+                      <Input type="number" min={-1} max={4} value={sEd.recur_week_of_month || 0}
+                             onChange={(e2)=>setSEd({ ...sEd, recur_week_of_month: Number(e2.target.value) || null })} style={{ width: 140 }} />
+                    </Label>
+                    <Label>Weekday
+                      <select
+                        value={(Array.isArray(sEd.recur_byday) && sEd.recur_byday[0]) || "MO"}
+                        onChange={(e2)=>setSEd({ ...sEd, recur_byday: [e2.target.value] })}
+                        style={styles.select}
+                      >
+                        {BYDAY.map((d)=> <option key={d} value={d}>{d}</option>)}
+                      </select>
+                    </Label>
+                  </Row>
+                )}
               </Row>
 
               <Row>
@@ -832,7 +767,7 @@ export default function CalendarPanel({ team }) {
 
           <Row>
             <Button onClick={saveEditSeries} disabled={!canSaveSeries}>Save</Button>
-            <GhostButton id="series_cancel_btn" onClick={cancelEditSeries}>Cancel</GhostButton>
+            <GhostButton onClick={cancelEditSeries}>Cancel</GhostButton>
             <DangerButton onClick={deleteSeries}>
               {sRecurrenceMode === "none" ? "Delete event" : "Delete series"}
             </DangerButton>
@@ -842,7 +777,7 @@ export default function CalendarPanel({ team }) {
 
       {/* EDIT OCCURRENCE */}
       {mode === "editOcc" && oEd && (
-        <div style={styles.panel} onKeyDown={(e)=>onPanelKeyDown(e, "occ_close_btn")}>
+        <div style={styles.panel}>
           <h4 style={{ margin: "0 0 10px", fontSize: 14 }}>Edit single occurrence</h4>
 
           {oTimeErrors.length > 0 && (
@@ -871,7 +806,7 @@ export default function CalendarPanel({ team }) {
             {/* Clear override visible ONLY here */}
             {oEd.overridden && <GhostButton onClick={clearOneOverride}>Clear override</GhostButton>}
             <DangerButton onClick={cancelOne}>Cancel occurrence</DangerButton>
-            <GhostButton id="occ_close_btn" onClick={cancelEditOccurrence}>Close</GhostButton>
+            <GhostButton onClick={cancelEditOccurrence}>Close</GhostButton>
           </Row>
         </div>
       )}
@@ -921,11 +856,7 @@ export default function CalendarPanel({ team }) {
                           }}
                         >
                           {occ.title || "(untitled)"}{" "}
-   {Number.isFinite(occ.occ_index) && Number.isFinite(occ.occ_total) && occ.occ_total > 0 && (
-     <span style={{ opacity: 0.7, fontSize: 12 }}>
-       · {occ.occ_index + 1} of {occ.occ_total}
-     </span>
-  )}
+                          <span style={{ opacity: 0.7, fontSize: 12 }}>· {cap(occ.category || "rehearsal")}</span>
                           {occ.overridden && <span style={{ marginLeft: 8, fontSize: 12, opacity: 0.7 }}>(edited)</span>}
                         </div>
                         <div style={{ opacity: 0.8, fontSize: 12 }}>
@@ -939,31 +870,34 @@ export default function CalendarPanel({ team }) {
                             </>
                           )}
                         </div>
+
+                        {/* Attendance UI */}
                         {(() => {
-  const ak = `${occ.event_id}|${occ.base_start}`;
-  const arr = attendanceMap.get(ak) || [];
-  const mine = arr.some(a => a.isMe);
-  const names = arr.map(a => a.name);
+                          const ak = `${occ.event_id}|${occ.base_start}`;
+                          const arr = attendanceMap.get(ak) || [];
+                          const mine = arr.some(a => a.isMe);
+                          const names = arr.map(a => a.name);
 
-  return (
-    <div style={{ marginTop: 6, display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
-      <Button onClick={() => toggleAttendance(occ)}>
-        {mine ? "Cancel my attendance" : "I’m attending"}
-      </Button>
+                          return (
+                            <div style={{ marginTop: 6, display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+                              <Button onClick={() => toggleAttendance(occ)}>
+                                {mine ? "Cancel my attendance" : "I’m attending"}
+                              </Button>
 
-      {names.length > 0 && (
-        <div style={{ display: "flex", gap: 8, flexWrap: "wrap", opacity: 0.9 }}>
-          {names.map((n, i) => (
-            <span key={i}
-              style={{ border: "1px solid rgba(255,255,255,0.2)", padding: "2px 6px", borderRadius: 6 }}>
-              {n}
-            </span>
-          ))}
-        </div>
-      )}
-    </div>
-  );
-})()}
+                              {names.length > 0 && (
+                                <div style={{ display: "flex", gap: 8, flexWrap: "wrap", opacity: 0.9 }}>
+                                  {names.map((n, i) => (
+                                    <span key={i}
+                                      style={{ border: "1px solid rgba(255,255,255,0.2)", padding: "2px 6px", borderRadius: 6 }}>
+                                      {n}
+                                    </span>
+                                  ))}
+                                </div>
+                              )}
+                            </div>
+                          );
+                        })()}
+
                         {openDescKeys.has(key) && occ.description && (
                           <div style={{ marginTop: 6, opacity: 0.9 }}>
                             {occ.description}
