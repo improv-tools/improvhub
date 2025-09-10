@@ -620,7 +620,54 @@ $$;
 
 grant execute on function public.delete_team(uuid) to authenticated;
 
+alter table public.team_event_overrides enable row level security;
 
+-- Clean slate
+do $$
+declare r record;
+begin
+  for r in (
+    select policyname from pg_policies
+    where schemaname = 'public' and tablename = 'team_event_overrides'
+  ) loop
+    execute format('drop policy if exists %I on public.team_event_overrides', r.policyname);
+  end loop;
+end$$;
+
+-- Read: anyone in the team
+create policy teo_select_in_my_teams
+on public.team_event_overrides
+for select
+to authenticated
+using (
+  exists (
+    select 1 from public.team_events e
+    where e.id = team_event_overrides.event_id
+      and public.is_team_member(e.team_id)
+  )
+);
+
+-- Insert/Update/Delete: admins only
+create policy teo_write_admin_only
+on public.team_event_overrides
+for all
+to authenticated
+using (
+  exists (
+    select 1 from public.team_events e
+    where e.id = team_event_overrides.event_id
+      and public.is_team_admin(e.team_id)
+  )
+)
+with check (
+  exists (
+    select 1 from public.team_events e
+    where e.id = team_event_overrides.event_id
+      and public.is_team_admin(e.team_id)
+  )
+);
+
+notify pgrst, 'reload schema';
 -- =============================================================================
 -- 6) PGRST schema reload (make new RPCs visible immediately)
 -- =============================================================================
