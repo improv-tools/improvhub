@@ -789,18 +789,25 @@ to authenticated
 using (auth.uid() = user_id)
 with check (auth.uid() = user_id);
 
-create or replace view public.team_event_attendance_with_names as
+drop view if exists public.team_event_attendance_with_names;
+
+create view public.team_event_attendance_with_names as
 select
   tea.event_id,
   tea.occ_start,
   tea.user_id,
   tea.attending,
   e.team_id,
-  p.full_name,
+  coalesce(
+    au.raw_user_meta_data->>'full_name',  -- preferred
+    au.raw_user_meta_data->>'name',       -- common alt
+    au.email,                             -- fallback
+    'Unknown'
+  ) as full_name,
   (tea.user_id = auth.uid()) as _is_me
 from public.team_event_attendance tea
 join public.team_events e on e.id = tea.event_id
-left join public.profiles p on p.id = tea.user_id;
+left join auth.users au on au.id = tea.user_id;
 
 grant select on public.team_event_attendance_with_names to authenticated;
 
