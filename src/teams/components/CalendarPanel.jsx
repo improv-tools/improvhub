@@ -179,16 +179,36 @@ export default function CalendarPanel({ team }) {
   /* ------------------------------- Edit series ------------------------------ */
   const [sEd, setSEd] = useState(null); // full event row being edited (series)
   const openEditSeries = (eventId) => {
-    const e = events.find((x) => x.id === eventId);
-    if (!e) { setBannerErr("Could not load series."); return; }
-    setBanner(""); setBannerErr("");
-    setSEd({
-      ...e,
-      _s: splitLocal(e.starts_at),
-      _e: splitLocal(e.ends_at),
-    });
-    setMode("editSeries");
-  };
+  const e = events.find((x) => x.id === eventId);
+  if (!e) { setBannerErr("Could not load series."); return; }
+
+  // Defaults to keep the form valid
+  let recur_byday = e.recur_byday;
+  if (e.recur_freq === "weekly" && (!Array.isArray(recur_byday) || recur_byday.length === 0)) {
+    const DOW = ["SU","MO","TU","WE","TH","FR","SA"];
+    const dow = DOW[new Date(e.starts_at).getDay()];
+    recur_byday = [dow];
+  }
+
+  // For monthly, if both are empty, default to base day-of-month
+  let recur_bymonthday = e.recur_bymonthday;
+  let recur_week_of_month = e.recur_week_of_month;
+  if (e.recur_freq === "monthly" && !recur_bymonthday && !recur_week_of_month) {
+    recur_bymonthday = new Date(e.starts_at).getUTCDate();
+  }
+
+  setBanner(""); setBannerErr("");
+  setSEd({
+    ...e,
+    recur_byday,
+    recur_bymonthday,
+    recur_week_of_month,
+    _s: splitLocal(e.starts_at),
+    _e: splitLocal(e.ends_at),
+  });
+  setMode("editSeries");
+};
+
   const cancelEditSeries = () => { setSEd(null); setMode("list"); };
 
   const sRecurrenceErrors = useMemo(() => {
@@ -647,18 +667,27 @@ export default function CalendarPanel({ team }) {
                     </div>
                     <Row>
                       {isRecurring ? (
-                        <>
-                          <GhostButton onClick={() => openEditSeries(occ.event_id)} disabled={mode !== "list"}>Edit series</GhostButton>
-                          <GhostButton onClick={() => openEditOccurrence(occ)} disabled={mode !== "list"}>Edit occurrence</GhostButton>
-                          {occ.overridden && <GhostButton onClick={() => clearOneOverride(occ)} disabled={mode !== "list"}>Clear override</GhostButton>}
-                          <DangerButton onClick={() => cancelOne(occ)} disabled={mode !== "list"}>Cancel occurrence</DangerButton>
-                        </>
-                      ) : (
-                        <>
-                          <GhostButton onClick={() => openEditSeries(occ.event_id)} disabled={mode !== "list"}>Edit event</GhostButton>
-                          <DangerButton onClick={() => openEditSeries(occ.event_id)} disabled={mode !== "list"}>Delete event</DangerButton>
-                        </>
-                      )}
+  <>
+    <GhostButton onClick={() => openEditSeries(occ.event_id)} disabled={mode !== "list"}>Edit series</GhostButton>
+    <GhostButton onClick={() => openEditOccurrence(occ)} disabled={mode !== "list"}>Edit occurrence</GhostButton>
+    {occ.overridden && <GhostButton onClick={() => clearOneOverride(occ)} disabled={mode !== "list"}>Clear override</GhostButton>}
+    <DangerButton onClick={() => cancelOne(occ)} disabled={mode !== "list"}>Cancel occurrence</DangerButton>
+  </>
+) : (
+  <>
+    <GhostButton onClick={() => openEditSeries(occ.event_id)} disabled={mode !== "list"}>Edit event</GhostButton>
+    <DangerButton
+      onClick={async () => {
+        setBanner(""); setBannerErr("");
+        try { await deleteBase(occ.event_id); setBanner("Event deleted."); }
+        catch (e) { setBannerErr(e.message || "Failed to delete event"); }
+      }}
+      disabled={mode !== "list"}
+    >
+      Delete event
+    </DangerButton>
+  </>
+)}
                     </Row>
                   </li>
                 );
