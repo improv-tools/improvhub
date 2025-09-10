@@ -950,16 +950,14 @@ select
   tea.attending,
   e.team_id,
   coalesce(
-    to_jsonb(p)->>'full_name',            -- profiles.full_name, if present
-    au.raw_user_meta_data->>'full_name',  -- auth metadata
-    au.raw_user_meta_data->>'name',       -- common alternative
-    au.email,                             -- fallback
+    au.raw_user_meta_data->>'full_name',
+    au.raw_user_meta_data->>'name',
+    au.email,
     'Unknown'
   ) as full_name,
   (tea.user_id = auth.uid()) as _is_me
 from public.team_event_attendance tea
 join public.team_events e on e.id = tea.event_id
-left join public.profiles p on p.id = tea.user_id
 left join auth.users au on au.id = tea.user_id;
 
 grant select on public.team_event_attendance_with_names to authenticated;
