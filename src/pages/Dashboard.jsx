@@ -4,13 +4,15 @@ import { useAuth } from "auth/AuthContext";
 import ProfilePanel from "profiles/ProfilePanel";
 import TeamsPanel from "teams/TeamsPanel";
 import CoachingPanel from "coaching/CoachingPanel";
+import ShowrunnerPanel from "showrunner/ShowrunnerPanel";
 import { listMyInvitations, acceptInvitation, declineInvitation, listMyNotifications, deleteNotification } from "teams/teams.api";
 import { signOut } from "auth/auth.api";
 import { CenterWrap, Card, H1, Tabs, Tab, GhostButton, Button, ErrorText, Row } from "components/ui";
 
 export default function Dashboard() {
-  const { session, displayName } = useAuth();
-  const isCoach = !!useAuth().user?.user_metadata?.coach;
+  const { session, displayName, user } = useAuth();
+  const isCoach = !!user?.user_metadata?.coach;
+  const isShowrunner = !!user?.user_metadata?.showrunner;
   const [tab, setTab] = useState("home"); // 'home' | 'teams' | 'profile'
   const [invites, setInvites] = useState([]);
   const [invitesLoading, setInvitesLoading] = useState(true);
@@ -166,6 +168,12 @@ export default function Dashboard() {
           {isCoach && (
             <Tab value="coaching" label="Coaching">
               <CoachingPanel />
+            </Tab>
+          )}
+
+          {isShowrunner && (
+            <Tab value="showrunner" label="Showrunner">
+              <ShowrunnerPanel />
             </Tab>
           )}
 

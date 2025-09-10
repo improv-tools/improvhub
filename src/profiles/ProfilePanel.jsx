@@ -18,6 +18,7 @@ export default function ProfilePanel() {
   const [err, setErr] = useState("");
   const [msg, setMsg] = useState("");
   const [coach, setCoach] = useState(!!user?.user_metadata?.coach);
+  const [showrunner, setShowrunner] = useState(!!user?.user_metadata?.showrunner);
 
   // Email change UI
   const [email, setEmail] = useState(user?.email || "");
@@ -36,11 +37,12 @@ export default function ProfilePanel() {
     setName(currentDisplayName);
     setEmail(user?.email || "");
     setCoach(!!user?.user_metadata?.coach);
+    setShowrunner(!!user?.user_metadata?.showrunner);
   }, [currentDisplayName]);
 
   const save = async () => {
     setErr(""); setMsg(""); setSaving(true);
-    const { error } = await supabase.auth.updateUser({ data: { display_name: name.trim(), coach: !!coach } });
+    const { error } = await supabase.auth.updateUser({ data: { display_name: name.trim(), coach: !!coach, showrunner: !!showrunner } });
     setSaving(false);
     if (error) setErr(error.message || "Failed to save");
     else { setMsg("Saved!"); await refreshUser(); }
@@ -100,6 +102,11 @@ export default function ProfilePanel() {
       <label style={{ display: "inline-flex", alignItems: "center", gap: 8 }}>
         <input type="checkbox" checked={!!coach} onChange={(e)=>setCoach(e.target.checked)} />
         <span>I am a coach</span>
+      </label>
+
+      <label style={{ display: "inline-flex", alignItems: "center", gap: 8 }}>
+        <input type="checkbox" checked={!!showrunner} onChange={(e)=>setShowrunner(e.target.checked)} />
+        <span>I am a showrunner</span>
       </label>
 
       <Button onClick={save} disabled={saving || !name.trim()}>
