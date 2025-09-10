@@ -89,14 +89,13 @@ export async function createTeamEvent(teamId, event) {
 }
 
 export async function updateTeamEvent(eventId, patch) {
-  const { data, error } = await supabase
-    .from("team_events")
-    .update(patch)
-    .eq("id", eventId)
-    .select("*")
-    .limit(1);
+  const { data, error } = await supabase.rpc("edit_team_event", {
+    p_event_id: eventId,
+    p_patch: patch,
+  });
   if (error) throw new Error(error.message);
-  return data?.[0] ?? null;
+  // PostgREST may return a single row or a one-item array depending on settings:
+  return Array.isArray(data) ? data[0] : data;
 }
 
 export async function deleteTeamEvent(eventId) {
