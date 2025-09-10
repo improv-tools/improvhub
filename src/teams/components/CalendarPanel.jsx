@@ -8,6 +8,8 @@ const CATEGORIES = ["rehearsal", "social", "performance"];
 const FREQUENCIES = ["none", "daily", "weekly", "monthly"];
 const BYDAY = ["MO","TU","WE","TH","FR","SA","SU"];
 
+/* ------------------------------ Small widgets ------------------------------ */
+
 function DateTimeRow({ startDate, startTime, endTime, onChange }) {
   return (
     <Row>
@@ -18,6 +20,60 @@ function DateTimeRow({ startDate, startTime, endTime, onChange }) {
     </Row>
   );
 }
+
+const styles = {
+  select: {
+    background: "#0f0f14",
+    color: "white",
+    border: "1px solid rgba(255,255,255,0.2)",
+    borderRadius: 10,
+    padding: "10px 12px",
+    outline: "none",
+  },
+  panel: { border: "1px solid rgba(255,255,255,0.1)", borderRadius: 10, padding: 12, marginBottom: 16 },
+};
+
+/* -------------------------------- Validators ------------------------------- */
+
+function validateRecurrence({ recurFreq, endMode, endUntilDate, endCount, recurByday, recurByMonthday, recurWeekOfMonth }) {
+  const errs = [];
+  if (recurFreq === "none") return errs;
+
+  // End rule: MUST be until or count (<=12)
+  if (endMode === "until") {
+    if (!endUntilDate) errs.push("Please choose an 'Until' date.");
+  } else if (endMode === "count") {
+    const n = Number(endCount);
+    if (!n || n < 1 || n > 12) errs.push("Count must be between 1 and 12.");
+  } else {
+    errs.push("Recurring events must end by 'Until' date or 'After N occurrences'.");
+  }
+
+  // Weekly: require at least one day
+  if (recurFreq === "weekly" && (!Array.isArray(recurByday) || recurByday.length === 0)) {
+    errs.push("Pick at least one weekday for weekly recurrence.");
+  }
+
+  // Monthly: at least one of (month-day) or (week-of-month + weekday)
+  if (recurFreq === "monthly") {
+    const byDayOk = !!(recurByMonthday && Number(recurByMonthday) >= 1 && Number(recurByMonthday) <= 31);
+    const womOk = !!(recurWeekOfMonth && Number(recurWeekOfMonth) >= -1 && Number(recurWeekOfMonth) <= 4 && Array.isArray(recurByday) && recurByday.length === 1);
+    if (!byDayOk && !womOk) errs.push("For monthly recurrence, set a month-day or a week-of-month with one weekday.");
+  }
+
+  return errs;
+}
+
+function validateTimes({ title, startDate, startTime, endTime }) {
+  const errs = [];
+  if (!title?.trim()) errs.push("Title is required.");
+  if (!startDate) errs.push("Start date is required.");
+  if (!startTime) errs.push("Start time is required.");
+  if (!endTime) errs.push("End time is required.");
+  return errs;
+}
+
+/* --------------------------------- Component -------------------------------- */
 
 export default function CalendarPanel({ team }) {
   const tz = browserTZ();
@@ -31,363 +87,304 @@ export default function CalendarPanel({ team }) {
     editOccurrence, cancelOccurrence, clearOccurrenceOverride,
   } = useCalendarData(team?.id, windowStartIso, windowEndIso);
 
-  // Create form state
-  const [title, setTitle] = useState("");
-  const [description, setDescription] = useState("");
-  const [location, setLocation] = useState("");
-  const [category, setCategory] = useState("rehearsal");
+  const upcoming = useMemo(() => occurrences, [occurrences]);
+
+  /* ------------------------------ global state ------------------------------ */
+
+  // one of: 'list' | 'create' | 'editSeries' | 'editOcc'
+  const [mode, setMode] = useState("list");
 
   const now = new Date();
   const pad = (n)=> String(n).padStart(2,"0");
   const defaultStartDate = `${now.getFullYear()}-${pad(now.getMonth()+1)}-${pad(now.getDate())}`;
   const defaultStartTime = `${pad(now.getHours())}:${pad(now.getMinutes())}`;
-  const [startDate, setStartDate] = useState(defaultStartDate);
-  const [startTime, setStartTime] = useState(defaultStartTime);
-  const [endTime, setEndTime] = useState(pad((now.getHours()+1)%24)+":"+pad(now.getMinutes()));
+  const defaultEndTime   = `${pad((now.getHours()+1)%24)}:${pad(now.getMinutes())}`;
 
-  const [recurFreq, setRecurFreq] = useState("none");
-  const [recurByday, setRecurByday] = useState(["MO"]);
-  const [recurByMonthday, setRecurByMonthday] = useState(0);
-  const [recurWeekOfMonth, setRecurWeekOfMonth] = useState(0);
+  /* --------------------------------- Create -------------------------------- */
 
-  // End options: UNTIL or COUNT (max 12). No "Never".
-  const [endMode, setEndMode] = useState("count");       // 'until' | 'count'
-  const [endUntilDate, setEndUntilDate] = useState("");
-  const [endCount, setEndCount] = useState(6);
+  const [cTitle, setCTitle] = useState("");
+  const [cDescription, setCDescription] = useState("");
+  const [cLocation, setCLocation] = useState("");
+  const [cCategory, setCCategory] = useState("rehearsal");
+  const [cStartDate, setCStartDate] = useState(defaultStartDate);
+  const [cStartTime, setCStartTime] = useState(defaultStartTime);
+  const [cEndTime, setCEndTime]     = useState(defaultEndTime);
 
-  // Edit series panel
-  const [editing, setEditing] = useState(null);
-  const [ed, setEd] = useState(null);
+  const [cFreq, setCFreq] = useState("none");
+  const [cByday, setCByday] = useState(["MO"]);
+  const [cByMonthday, setCByMonthday] = useState(0);
+  const [cWeekOfMonth, setCWeekOfMonth] = useState(0);
+  const [cEndMode, setCEndMode] = useState("count"); // 'until'|'count'  (required when cFreq!=='none')
+  const [cUntilDate, setCUntilDate] = useState("");
+  const [cCount, setCCount] = useState(6);
 
-  const [msg, setMsg] = useState("");
-  const [errMsg, setErrMsg] = useState("");
+  const cRecurrenceErrors = useMemo(() => validateRecurrence({
+    recurFreq: cFreq,
+    endMode: cEndMode,
+    endUntilDate: cUntilDate,
+    endCount: cCount,
+    recurByday: cByday,
+    recurByMonthday: cByMonthday,
+    recurWeekOfMonth: cWeekOfMonth,
+  }), [cFreq, cEndMode, cUntilDate, cCount, cByday, cByMonthday, cWeekOfMonth]);
 
-  // ✅ Declare `upcoming` once
-  const upcoming = useMemo(() => occurrences, [occurrences]);
+  const cTimeErrors = useMemo(() => validateTimes({
+    title: cTitle,
+    startDate: cStartDate,
+    startTime: cStartTime,
+    endTime: cEndTime,
+  }), [cTitle, cStartDate, cStartTime, cEndTime]);
 
-  const toggleDay = (d) => {
-    setRecurByday((cur) => cur.includes(d) ? cur.filter(x=>x!==d) : [...cur, d].sort());
+  const canSaveCreate = useMemo(() => {
+    if (cTimeErrors.length) return false;
+    if (cFreq !== "none" && cRecurrenceErrors.length) return false;
+    return true;
+  }, [cTimeErrors, cRecurrenceErrors, cFreq]);
+
+  const startCreate = () => {
+    setMode("create"); // hide other editors
   };
 
-  const handleDateTimeChange = (patch) => {
-    if (patch.startDate !== undefined) setStartDate(patch.startDate);
-    if (patch.startTime !== undefined) setStartTime(patch.startTime);
-    if (patch.endTime !== undefined) setEndTime(patch.endTime);
+  const cancelCreate = () => {
+    setMode("list");
   };
 
   const submitCreate = async () => {
-    setMsg(""); setErrMsg("");
+    if (!canSaveCreate) return;
+    const { startIso, endIso } = composeStartEndISO(cStartDate, cStartTime, cEndTime);
 
-    if (!title.trim()) return setErrMsg("Title is required");
-    if (!startDate || !startTime || !endTime) return setErrMsg("Start and end time are required");
-
-    const { startIso, endIso } = composeStartEndISO(startDate, startTime, endTime);
-    if (!startIso || !endIso) return setErrMsg("Invalid date/time");
-
-    // Enforce end rule for recurring series: must have UNTIL or COUNT (≤12).
     let recur_until = null, recur_count = null;
-    if (recurFreq !== "none") {
-      if (endMode === "until") {
-        if (!endUntilDate) return setErrMsg("Choose an 'until' date for recurring events");
-        recur_until = new Date(`${endUntilDate}T23:59:59`).toISOString();
-      } else if (endMode === "count") {
-        const n = Math.max(1, Math.min(Number(endCount) || 1, 12));
-        recur_count = n;
-      } else {
-        return setErrMsg("Recurring events must end by 'Until' or 'After N occurrences'.");
+    if (cFreq !== "none") {
+      if (cEndMode === "until") {
+        recur_until = new Date(`${cUntilDate}T23:59:59`).toISOString();
+      } else if (cEndMode === "count") {
+        recur_count = Math.max(1, Math.min(Number(cCount) || 1, 12));
       }
     }
 
-    const payload = {
-      title: title.trim(),
-      description: description.trim(),
-      location: location.trim(),
-      category,
+    await createBase({
+      title: cTitle.trim(),
+      description: cDescription.trim(),
+      location: cLocation.trim(),
+      category: cCategory,
       tz,
       starts_at: startIso,
       ends_at: endIso,
-      recur_freq: recurFreq,
-      recur_interval: 1,              // fixed interval = 1
-      recur_byday: recurFreq === "weekly" ? recurByday : null,
-      recur_bymonthday: recurFreq === "monthly" && recurByMonthday ? Number(recurByMonthday) : null,
-      recur_week_of_month: recurFreq === "monthly" && recurWeekOfMonth ? Number(recurWeekOfMonth) : null,
+      recur_freq: cFreq,
+      recur_interval: 1,
+      recur_byday: cFreq === "weekly" ? cByday : null,
+      recur_bymonthday: cFreq === "monthly" && cByMonthday ? Number(cByMonthday) : null,
+      recur_week_of_month: cFreq === "monthly" && cWeekOfMonth ? Number(cWeekOfMonth) : null,
       recur_until,
       recur_count,
-    };
+    });
 
-    try {
-      await createBase(payload);
-      // reset
-      setTitle(""); setDescription(""); setLocation("");
-      setCategory("rehearsal");
-      setStartDate(defaultStartDate); setStartTime(defaultStartTime);
-      setEndTime(pad((now.getHours()+1)%24)+":"+pad(now.getMinutes()));
-      setRecurFreq("none"); setRecurByday(["MO"]); setRecurByMonthday(0); setRecurWeekOfMonth(0);
-      setEndMode("count"); setEndUntilDate(""); setEndCount(6);
-      setMsg("Event created.");
-    } catch (e) {
-      setErrMsg(e.message || "Failed to create event");
-    }
+    // reset & close
+    setCTitle(""); setCDescription(""); setCLocation(""); setCCategory("rehearsal");
+    setCStartDate(defaultStartDate); setCStartTime(defaultStartTime); setCEndTime(defaultEndTime);
+    setCFreq("none"); setCByday(["MO"]); setCByMonthday(0); setCWeekOfMonth(0);
+    setCEndMode("count"); setCUntilDate(""); setCCount(6);
+    setMode("list");
   };
 
-  const openEditBase = (eventId) => {
+  /* ------------------------------- Edit series ------------------------------ */
+
+  const [sEd, setSEd] = useState(null); // full event row being edited (series)
+  const openEditSeries = (eventId) => {
     const e = events.find((x) => x.id === eventId);
     if (!e) return;
-    setEditing(e);
-    setEd({ ...e });
+    setSEd({
+      ...e,
+      _s: splitLocal(e.starts_at),
+      _e: splitLocal(e.ends_at),
+    });
+    setMode("editSeries");
   };
+  const cancelEditSeries = () => { setSEd(null); setMode("list"); };
 
-  const saveEditBase = async () => {
-    const e = ed;
-    if (!e) return;
-    setMsg(""); setErrMsg("");
+  const sRecurrenceErrors = useMemo(() => {
+    if (!sEd) return [];
+    return validateRecurrence({
+      recurFreq: sEd.recur_freq || "none",
+      endMode: sEd.recur_until ? "until" : (sEd.recur_count ? "count" : "count"), // for validation display only
+      endUntilDate: sEd.recur_until ? splitLocal(sEd.recur_until).date : "",
+      endCount: sEd.recur_count || "",
+      recurByday: sEd.recur_byday,
+      recurByMonthday: sEd.recur_bymonthday,
+      recurWeekOfMonth: sEd.recur_week_of_month,
+    });
+  }, [sEd]);
 
-    // Enforce end rule on edit as well.
-    if (e.recur_freq && e.recur_freq !== "none") {
-      const hasUntil = !!e.recur_until;
-      const hasCount = e.recur_count != null && e.recur_count !== "";
-      if (!hasUntil && !hasCount) {
-        return setErrMsg("Recurring events must end by 'Until' date or 'After N occurrences' (≤12).");
-      }
-    }
+  const sTimeErrors = useMemo(() => {
+    if (!sEd) return [];
+    return validateTimes({
+      title: sEd.title,
+      startDate: sEd._s.date,
+      startTime: sEd._s.time,
+      endTime: sEd._e.time,
+    });
+  }, [sEd]);
 
-    const patch = {
-      title: e.title ?? "",
-      description: e.description ?? "",
-      location: e.location ?? "",
-      category: e.category ?? "rehearsal",
-      starts_at: e.starts_at,
-      ends_at: e.ends_at,
-      tz: e.tz || tz,
-      recur_freq: e.recur_freq || "none",
+  const canSaveSeries = useMemo(() => {
+    if (!sEd) return false;
+    if (sTimeErrors.length) return false;
+    if (sEd.recur_freq && sEd.recur_freq !== "none" && sRecurrenceErrors.length) return false;
+    return true;
+  }, [sEd, sTimeErrors, sRecurrenceErrors]);
+
+  const saveEditSeries = async () => {
+    if (!canSaveSeries || !sEd) return;
+    const { startIso, endIso } = composeStartEndISO(sEd._s.date, sEd._s.time, sEd._e.time);
+    await updateBase(sEd.id, {
+      title: sEd.title ?? "",
+      description: sEd.description ?? "",
+      location: sEd.location ?? "",
+      category: sEd.category ?? "rehearsal",
+      tz: sEd.tz || tz,
+      starts_at: startIso,
+      ends_at: endIso,
+      recur_freq: sEd.recur_freq || "none",
       recur_interval: 1,
-      recur_byday: e.recur_freq === "weekly" ? (Array.isArray(e.recur_byday) ? e.recur_byday : []) : null,
-      recur_bymonthday: e.recur_freq === "monthly" ? (e.recur_bymonthday || null) : null,
-      recur_week_of_month: e.recur_freq === "monthly" ? (e.recur_week_of_month || null) : null,
-      recur_until: e.recur_until || null,
-      recur_count: e.recur_count ? Math.min(Number(e.recur_count) || 1, 12) : null,
-    };
-
-    try {
-      await updateBase(e.id, patch);
-      setEditing(null); setEd(null);
-      setMsg("Event updated.");
-    } catch (er) {
-      setErrMsg(er.message || "Failed to update event");
-    }
+      recur_byday: sEd.recur_freq === "weekly" ? (Array.isArray(sEd.recur_byday) ? sEd.recur_byday : []) : null,
+      recur_bymonthday: sEd.recur_freq === "monthly" ? (sEd.recur_bymonthday || null) : null,
+      recur_week_of_month: sEd.recur_freq === "monthly" ? (sEd.recur_week_of_month || null) : null,
+      recur_until: sEd.recur_until || null,
+      recur_count: sEd.recur_count ? Math.min(Number(sEd.recur_count) || 1, 12) : null,
+    });
+    cancelEditSeries();
   };
 
-  const removeBase = async (eventId) => {
+  const deleteSeries = async () => {
+    if (!sEd) return;
     if (!window.confirm("Delete this entire event/series?")) return;
-    setMsg(""); setErrMsg("");
-    try {
-      await deleteBase(eventId);
-      setMsg("Event deleted.");
-    } catch (er) {
-      setErrMsg(er.message || "Failed to delete event");
-    }
+    await deleteBase(sEd.id);
+    cancelEditSeries();
   };
 
-  const editOne = async (occ) => {
-    const newTitle = window.prompt("Edit occurrence title", occ.title || "");
-    if (newTitle == null) return;
-    setMsg(""); setErrMsg("");
-    try {
-      await editOccurrence(occ.event_id, occ.base_start, { title: newTitle });
-      setMsg("Occurrence updated.");
-    } catch (er) {
-      setErrMsg(er.message || "Failed to update occurrence");
-    }
+  /* ---------------------------- Edit ONE occurrence ------------------------- */
+
+  const [oEd, setOEd] = useState(null); // { key, event_id, base_start, title, description, location, category, _sDate, _sTime, _eTime }
+  const openEditOccurrence = (occ) => {
+    const s = splitLocal(occ.starts_at);
+    const e = splitLocal(occ.ends_at);
+    setOEd({
+      event_id: occ.event_id,
+      base_start: occ.base_start,
+      title: occ.title || "",
+      description: occ.description || "",
+      location: occ.location || "",
+      category: occ.category || "rehearsal",
+      _sDate: s.date,
+      _sTime: s.time,
+      _eTime: e.time,
+    });
+    setMode("editOcc");
+  };
+  const cancelEditOccurrence = () => { setOEd(null); setMode("list"); };
+
+  const oTimeErrors = useMemo(() => {
+    if (!oEd) return [];
+    return validateTimes({
+      title: oEd.title,
+      startDate: oEd._sDate,
+      startTime: oEd._sTime,
+      endTime: oEd._eTime,
+    });
+  }, [oEd]);
+
+  const canSaveOccurrence = useMemo(() => {
+    if (!oEd) return false;
+    if (oTimeErrors.length) return false;
+    return true;
+  }, [oEd, oTimeErrors]);
+
+  const saveEditOccurrence = async () => {
+    if (!canSaveOccurrence || !oEd) return;
+    const { startIso, endIso } = composeStartEndISO(oEd._sDate, oEd._sTime, oEd._eTime);
+    await editOccurrence(oEd.event_id, oEd.base_start, {
+      title: oEd.title.trim(),
+      description: oEd.description.trim(),
+      location: oEd.location.trim(),
+      category: oEd.category,
+      tz,
+      starts_at: startIso,
+      ends_at: endIso,
+    });
+    cancelEditOccurrence();
   };
 
   const cancelOne = async (occ) => {
     if (!window.confirm("Cancel just this occurrence?")) return;
-    setMsg(""); setErrMsg("");
-    try {
-      await cancelOccurrence(occ.event_id, occ.base_start);
-      setMsg("Occurrence canceled.");
-    } catch (er) {
-      setErrMsg(er.message || "Failed to cancel occurrence");
-    }
+    await cancelOccurrence(occ.event_id, occ.base_start);
   };
 
   const clearOneOverride = async (occ) => {
-    if (!occ.overridden) return;
-    setMsg(""); setErrMsg("");
-    try {
     await clearOccurrenceOverride(occ.event_id, occ.base_start);
-      setMsg("Occurrence override cleared.");
-    } catch (er) {
-      setErrMsg(er.message || "Failed to clear override");
-    }
   };
+
+  /* ---------------------------------- UI ----------------------------------- */
 
   return (
     <div style={{ marginTop: 16 }}>
       <h3 style={{ margin: "8px 0 8px", fontSize: 16 }}>Calendar</h3>
       {err && <ErrorText>{err}</ErrorText>}
-      {errMsg && <ErrorText>{errMsg}</ErrorText>}
-      {msg && <InfoText>{msg}</InfoText>}
 
-      {/* Create event */}
-      <div style={{ border: "1px solid rgba(255,255,255,0.1)", borderRadius: 10, padding: 12, marginBottom: 16 }}>
-        <h4 style={{ margin: "0 0 10px", fontSize: 14, opacity: 0.8 }}>Create event</h4>
-        <Row>
-          <Input placeholder="Title" value={title} onChange={(e)=>setTitle(e.target.value)} style={{ minWidth: 200 }} />
-          <Input placeholder="Location" value={location} onChange={(e)=>setLocation(e.target.value)} style={{ minWidth: 160 }} />
-          <select value={category} onChange={(e)=>setCategory(e.target.value)} style={styles.select}>
-            {CATEGORIES.map((c)=> <option key={c} value={c}>{c}</option>)}
-          </select>
-        </Row>
-        <Row>
-          <Input placeholder="Description" value={description} onChange={(e)=>setDescription(e.target.value)} style={{ minWidth: 420 }} />
-        </Row>
-        <DateTimeRow
-          startDate={startDate}
-          startTime={startTime}
-          endTime={endTime}
-          onChange={handleDateTimeChange}
-        />
+      {/* Top actions */}
+      <Row style={{ marginBottom: 8 }}>
+        <Button onClick={() => (mode === "create" ? setMode("list") : startCreate())} disabled={mode === "editSeries" || mode === "editOcc"}>
+          {mode === "create" ? "Close new event" : "New event"}
+        </Button>
+      </Row>
 
-        {/* Recurrence */}
-        <Row>
-          <Label>
-            Frequency
-            <select value={recurFreq} onChange={(e)=>setRecurFreq(e.target.value)} style={styles.select}>
-              {FREQUENCIES.map((f)=> <option key={f} value={f}>{f}</option>)}
-            </select>
-          </Label>
+      {/* CREATE (visible only in create mode) */}
+      {mode === "create" && (
+        <div style={styles.panel}>
+          <h4 style={{ margin: "0 0 10px", fontSize: 14, opacity: 0.8 }}>Create event</h4>
 
-          {recurFreq === "weekly" && (
-            <div style={{ display:"flex", gap:6, flexWrap:"wrap", alignItems:"center" }}>
-              {BYDAY.map((d)=> {
-                const chk = recurByday.includes(d);
-                return (
-                  <label key={d} style={{ display:"inline-flex", gap:6, alignItems:"center" }}>
-                    <input type="checkbox" checked={chk} onChange={()=>toggleDay(d)} />
-                    <span>{d}</span>
-                  </label>
-                );
-              })}
-            </div>
+          {cTimeErrors.concat(cFreq !== "none" ? cRecurrenceErrors : []).length > 0 && (
+            <ErrorText>
+              {cTimeErrors.concat(cFreq !== "none" ? cRecurrenceErrors : []).map((e,i)=><div key={i}>• {e}</div>)}
+            </ErrorText>
           )}
 
-          {recurFreq === "monthly" && (
-            <Row>
-              <Label>
-                By month-day
-                <Input type="number" min={1} max={31} value={recurByMonthday} onChange={(e)=>setRecurByMonthday(e.target.value)} style={{ width: 120 }} />
-              </Label>
-              <Label>
-                or week-of-month (1..4, -1=last)
-                <Input type="number" min={-1} max={4} value={recurWeekOfMonth} onChange={(e)=>setRecurWeekOfMonth(e.target.value)} style={{ width: 140 }} />
-              </Label>
-              <Label>
-                Weekday
-                <select value={recurByday[0] || "MO"} onChange={(e)=>setRecurByday([e.target.value])} style={styles.select}>
-                  {BYDAY.map((d)=> <option key={d} value={d}>{d}</option>)}
-                </select>
-              </Label>
-            </Row>
-          )}
-        </Row>
-
-        {/* End options (ONLY Until / Count (≤12)) */}
-        {recurFreq !== "none" && (
           <Row>
-            <label style={{ display:"inline-flex", gap:8, alignItems:"center" }}>
-              <input type="radio" name="endmode" checked={endMode==="until"} onChange={()=>setEndMode("until")} />
-              <span>Until</span>
-            </label>
-            {endMode==="until" && (
-              <Input type="date" value={endUntilDate} onChange={(e)=>setEndUntilDate(e.target.value)} />
-            )}
-            <label style={{ display:"inline-flex", gap:8, alignItems:"center" }}>
-              <input type="radio" name="endmode" checked={endMode==="count"} onChange={()=>setEndMode("count")} />
-              <span>After</span>
-            </label>
-            {endMode==="count" && (
-              <>
-                <Input
-                  type="number"
-                  min={1}
-                  max={12}
-                  value={endCount}
-                  onChange={(e)=>setEndCount(Math.max(1, Math.min(12, Number(e.target.value) || 1)))}
-                  style={{ width: 100 }}
-                />
-                <span style={{ alignSelf:"center", opacity:0.8 }}>occurrences (max 12)</span>
-              </>
-            )}
-          </Row>
-        )}
-
-        <Row>
-          <Button onClick={submitCreate} disabled={!title.trim() || !startDate || !startTime || !endTime}>
-            Add
-          </Button>
-        </Row>
-        <p style={{ opacity: 0.6, fontSize: 12, marginTop: 8 }}>
-          Interval is fixed at 1. Recurring events must end by an <strong>Until</strong> date or <strong>After N</strong> (≤12) occurrences.
-        </p>
-      </div>
-
-      {/* Edit series panel (inline) */}
-      {editing && ed && (
-        <div style={{ border: "1px solid rgba(255,255,255,0.2)", borderRadius: 12, padding: 12, marginBottom: 16 }}>
-          <h4 style={{ margin: "0 0 10px", fontSize: 14 }}>Edit event</h4>
-          <Row>
-            <Input value={ed.title || ""} onChange={(e)=>setEd({ ...ed, title: e.target.value })} />
-            <Input placeholder="Location" value={ed.location || ""} onChange={(e)=>setEd({ ...ed, location: e.target.value })} />
-            <select value={ed.category || "rehearsal"} onChange={(e)=>setEd({ ...ed, category: e.target.value })} style={styles.select}>
+            <Input placeholder="Title" value={cTitle} onChange={(e)=>setCTitle(e.target.value)} style={{ minWidth: 220 }} />
+            <Input placeholder="Location" value={cLocation} onChange={(e)=>setCLocation(e.target.value)} style={{ minWidth: 180 }} />
+            <select value={cCategory} onChange={(e)=>setCCategory(e.target.value)} style={styles.select}>
               {CATEGORIES.map((c)=> <option key={c} value={c}>{c}</option>)}
             </select>
           </Row>
           <Row>
-            <Input placeholder="Description" value={ed.description || ""} onChange={(e)=>setEd({ ...ed, description: e.target.value })} style={{ minWidth: 420 }} />
+            <Input placeholder="Description" value={cDescription} onChange={(e)=>setCDescription(e.target.value)} style={{ minWidth: 500 }} />
           </Row>
 
-          {/* Start/end editors */}
-          {(() => {
-            const s = splitLocal(ed.starts_at); const e2 = splitLocal(ed.ends_at);
-            return (
-              <Row>
-                <Input type="date" value={s.date} onChange={(ev)=>{
-                  const { startIso, endIso } = composeStartEndISO(ev.target.value, s.time, e2.time);
-                  setEd({ ...ed, starts_at: startIso, ends_at: endIso });
-                }} />
-                <Input type="time" value={s.time} onChange={(ev)=>{
-                  const { startIso, endIso } = composeStartEndISO(s.date, ev.target.value, e2.time);
-                  setEd({ ...ed, starts_at: startIso, ends_at: endIso });
-                }} />
-                <span style={{ alignSelf:"center", opacity:0.7 }}>→</span>
-                <Input type="time" value={e2.time} onChange={(ev)=>{
-                  const { startIso, endIso } = composeStartEndISO(s.date, s.time, ev.target.value);
-                  setEd({ ...ed, starts_at: startIso, ends_at: endIso });
-                }} />
-              </Row>
-            );
-          })()}
+          <DateTimeRow
+            startDate={cStartDate}
+            startTime={cStartTime}
+            endTime={cEndTime}
+            onChange={({startDate,startTime,endTime})=>{
+              if (startDate !== undefined) setCStartDate(startDate);
+              if (startTime !== undefined) setCStartTime(startTime);
+              if (endTime !== undefined) setCEndTime(endTime);
+            }}
+          />
 
+          {/* Recurrence */}
           <Row>
             <Label>
               Frequency
-              <select value={ed.recur_freq || "none"} onChange={(e2)=>setEd({ ...ed, recur_freq: e2.target.value })} style={styles.select}>
+              <select value={cFreq} onChange={(e)=>setCFreq(e.target.value)} style={styles.select}>
                 {FREQUENCIES.map((f)=> <option key={f} value={f}>{f}</option>)}
               </select>
             </Label>
 
-            {ed.recur_freq === "weekly" && (
+            {cFreq === "weekly" && (
               <div style={{ display:"flex", gap:6, flexWrap:"wrap", alignItems:"center" }}>
                 {BYDAY.map((d)=> {
-                  const cur = Array.isArray(ed.recur_byday) ? ed.recur_byday : [];
-                  const chk = cur.includes(d);
+                  const chk = cByday.includes(d);
                   return (
                     <label key={d} style={{ display:"inline-flex", gap:6, alignItems:"center" }}>
-                      <input type="checkbox" checked={chk} onChange={()=>{
-                        const next = chk ? cur.filter(x=>x!==d) : [...cur, d].sort();
-                        setEd({ ...ed, recur_byday: next });
-                      }} />
+                      <input type="checkbox" checked={chk} onChange={()=> setCByday(chk ? cByday.filter(x=>x!==d) : [...cByday, d].sort()) } />
                       <span>{d}</span>
                     </label>
                   );
@@ -395,16 +392,19 @@ export default function CalendarPanel({ team }) {
               </div>
             )}
 
-            {ed.recur_freq === "monthly" && (
+            {cFreq === "monthly" && (
               <Row>
-                <Label>By month-day
-                  <Input type="number" min={1} max={31} value={ed.recur_bymonthday || 0} onChange={(e2)=>setEd({ ...ed, recur_bymonthday: Number(e2.target.value) || null })} style={{ width: 120 }} />
+                <Label>
+                  By month-day
+                  <Input type="number" min={1} max={31} value={cByMonthday} onChange={(e)=>setCByMonthday(e.target.value)} style={{ width: 120 }} />
                 </Label>
-                <Label>or week-of-month (1..4, -1=last)
-                  <Input type="number" min={-1} max={4} value={ed.recur_week_of_month || 0} onChange={(e2)=>setEd({ ...ed, recur_week_of_month: Number(e2.target.value) || null })} style={{ width: 140 }} />
+                <Label>
+                  or week-of-month (1..4, -1=last)
+                  <Input type="number" min={-1} max={4} value={cWeekOfMonth} onChange={(e)=>setCWeekOfMonth(e.target.value)} style={{ width: 140 }} />
                 </Label>
-                <Label>Weekday
-                  <select value={(Array.isArray(ed.recur_byday) && ed.recur_byday[0]) || "MO"} onChange={(e2)=>setEd({ ...ed, recur_byday: [e2.target.value] })} style={styles.select}>
+                <Label>
+                  Weekday
+                  <select value={cByday[0] || "MO"} onChange={(e)=>setCByday([e.target.value])} style={styles.select}>
                     {BYDAY.map((d)=> <option key={d} value={d}>{d}</option>)}
                   </select>
                 </Label>
@@ -412,13 +412,128 @@ export default function CalendarPanel({ team }) {
             )}
           </Row>
 
-          {/* End options on edit (ONLY Until / Count) */}
+          {/* End options: ONLY Until or Count (<=12) */}
+          {cFreq !== "none" && (
+            <Row>
+              <label style={{ display:"inline-flex", gap:8, alignItems:"center" }}>
+                <input type="radio" name="c_endmode" checked={cEndMode==="until"} onChange={()=>setCEndMode("until")} />
+                <span>Until</span>
+              </label>
+              {cEndMode==="until" && (
+                <Input type="date" value={cUntilDate} onChange={(e)=>setCUntilDate(e.target.value)} />
+              )}
+              <label style={{ display:"inline-flex", gap:8, alignItems:"center" }}>
+                <input type="radio" name="c_endmode" checked={cEndMode==="count"} onChange={()=>setCEndMode("count")} />
+                <span>After</span>
+              </label>
+              {cEndMode==="count" && (
+                <>
+                  <Input
+                    type="number"
+                    min={1}
+                    max={12}
+                    value={cCount}
+                    onChange={(e)=>setCCount(Math.max(1, Math.min(12, Number(e.target.value) || 1)))}
+                    style={{ width: 100 }}
+                  />
+                  <span style={{ alignSelf:"center", opacity:0.8 }}>occurrences (max 12)</span>
+                </>
+              )}
+            </Row>
+          )}
+
+          <Row>
+            <Button onClick={submitCreate} disabled={!canSaveCreate}>Create</Button>
+            <GhostButton onClick={cancelCreate}>Cancel</GhostButton>
+          </Row>
+          <p style={{ opacity: 0.6, fontSize: 12, marginTop: 8 }}>
+            Interval is fixed at 1. Recurring events must end by an <strong>Until</strong> date or <strong>After N</strong> (≤12) occurrences.
+          </p>
+        </div>
+      )}
+
+      {/* EDIT SERIES (visible only in editSeries mode) */}
+      {mode === "editSeries" && sEd && (
+        <div style={styles.panel}>
+          <h4 style={{ margin: "0 0 10px", fontSize: 14 }}>Edit event (series)</h4>
+
+          {sTimeErrors.concat((sEd.recur_freq && sEd.recur_freq !== "none") ? sRecurrenceErrors : []).length > 0 && (
+            <ErrorText>
+              {sTimeErrors.concat((sEd.recur_freq && sEd.recur_freq !== "none") ? sRecurrenceErrors : []).map((e,i)=><div key={i}>• {e}</div>)}
+            </ErrorText>
+          )}
+
+          <Row>
+            <Input value={sEd.title || ""} onChange={(e)=>setSEd({ ...sEd, title: e.target.value })} />
+            <Input placeholder="Location" value={sEd.location || ""} onChange={(e)=>setSEd({ ...sEd, location: e.target.value })} />
+            <select value={sEd.category || "rehearsal"} onChange={(e)=>setSEd({ ...sEd, category: e.target.value })} style={styles.select}>
+              {CATEGORIES.map((c)=> <option key={c} value={c}>{c}</option>)}
+            </select>
+          </Row>
+          <Row>
+            <Input placeholder="Description" value={sEd.description || ""} onChange={(e)=>setSEd({ ...sEd, description: e.target.value })} style={{ minWidth: 500 }} />
+          </Row>
+
+          <Row>
+            <Input type="date" value={sEd._s.date} onChange={(ev)=>setSEd({ ...sEd, _s: { ...sEd._s, date: ev.target.value } })} />
+            <Input type="time" value={sEd._s.time} onChange={(ev)=>setSEd({ ...sEd, _s: { ...sEd._s, time: ev.target.value } })} />
+            <span style={{ alignSelf:"center", opacity:0.7 }}>→</span>
+            <Input type="time" value={sEd._e.time} onChange={(ev)=>setSEd({ ...sEd, _e: { ...sEd._e, time: ev.target.value } })} />
+          </Row>
+
+          <Row>
+            <Label>
+              Frequency
+              <select value={sEd.recur_freq || "none"} onChange={(e2)=>setSEd({ ...sEd, recur_freq: e2.target.value })} style={styles.select}>
+                {FREQUENCIES.map((f)=> <option key={f} value={f}>{f}</option>)}
+              </select>
+            </Label>
+
+            {sEd.recur_freq === "weekly" && (
+              <div style={{ display:"flex", gap:6, flexWrap:"wrap", alignItems:"center" }}>
+                {BYDAY.map((d)=> {
+                  const cur = Array.isArray(sEd.recur_byday) ? sEd.recur_byday : [];
+                  const chk = cur.includes(d);
+                  return (
+                    <label key={d} style={{ display:"inline-flex", gap:6, alignItems:"center" }}>
+                      <input
+                        type="checkbox"
+                        checked={chk}
+                        onChange={()=>{
+                          const next = chk ? cur.filter(x=>x!==d) : [...cur, d].sort();
+                          setSEd({ ...sEd, recur_byday: next });
+                        }}
+                      />
+                      <span>{d}</span>
+                    </label>
+                  );
+                })}
+              </div>
+            )}
+
+            {sEd.recur_freq === "monthly" && (
+              <Row>
+                <Label>By month-day
+                  <Input type="number" min={1} max={31} value={sEd.recur_bymonthday || 0} onChange={(e2)=>setSEd({ ...sEd, recur_bymonthday: Number(e2.target.value) || null })} style={{ width: 120 }} />
+                </Label>
+                <Label>or week-of-month (1..4, -1=last)
+                  <Input type="number" min={-1} max={4} value={sEd.recur_week_of_month || 0} onChange={(e2)=>setSEd({ ...sEd, recur_week_of_month: Number(e2.target.value) || null })} style={{ width: 140 }} />
+                </Label>
+                <Label>Weekday
+                  <select value={(Array.isArray(sEd.recur_byday) && sEd.recur_byday[0]) || "MO"} onChange={(e2)=>setSEd({ ...sEd, recur_byday: [e2.target.value] })} style={styles.select}>
+                    {BYDAY.map((d)=> <option key={d} value={d}>{d}</option>)}
+                  </select>
+                </Label>
+              </Row>
+            )}
+          </Row>
+
           <Row>
             <Label>Until
               <Input
                 type="date"
-                value={ed.recur_until ? splitLocal(ed.recur_until).date : ""}
-                onChange={(e2)=>setEd({ ...ed, recur_until: e2.target.value ? new Date(`${e2.target.value}T23:59:59`).toISOString() : null })}
+                value={sEd.recur_until ? splitLocal(sEd.recur_until).date : ""}
+                onChange={(e2)=>setSEd({ ...sEd, recur_until: e2.target.value ? new Date(`${e2.target.value}T23:59:59`).toISOString() : null })}
               />
             </Label>
             <Label>Count (max 12)
@@ -426,84 +541,108 @@ export default function CalendarPanel({ team }) {
                 type="number"
                 min={1}
                 max={12}
-                value={ed.recur_count || ""}
-                onChange={(e2)=>setEd({ ...ed, recur_count: e2.target.value ? Math.max(1, Math.min(12, Number(e2.target.value) || 1)) : null })}
+                value={sEd.recur_count || ""}
+                onChange={(e2)=>setSEd({ ...sEd, recur_count: e2.target.value ? Math.max(1, Math.min(12, Number(e2.target.value) || 1)) : null })}
                 style={{ width: 120 }}
               />
             </Label>
           </Row>
 
           <Row>
-            <Button onClick={saveEditBase}>Save</Button>
-            <GhostButton onClick={()=>{ setEditing(null); setEd(null); }}>Cancel</GhostButton>
-            <DangerButton onClick={()=>removeBase(ed.id)}>Delete series</DangerButton>
+            <Button onClick={saveEditSeries} disabled={!canSaveSeries}>Save</Button>
+            <GhostButton onClick={cancelEditSeries}>Cancel</GhostButton>
+            <DangerButton onClick={deleteSeries}>Delete series</DangerButton>
           </Row>
         </div>
       )}
 
-      {/* Occurrence list */}
-      {loading ? (
-        <p style={{ opacity: 0.8 }}>Loading calendar…</p>
-      ) : upcoming.length === 0 ? (
-        <p style={{ opacity: 0.8 }}>No upcoming events.</p>
-      ) : (
-        <ul style={{ listStyle: "none", padding: 0, margin: 0 }}>
-          {upcoming.map((occ) => (
-            <li
-              key={`${occ.event_id}|${occ.base_start}`}
-              style={{
-                border: "1px solid rgba(255,255,255,0.1)",
-                borderRadius: 10,
-                padding: 12,
-                marginBottom: 10,
-                display: "flex",
-                justifyContent: "space-between",
-                alignItems: "center",
-              }}
-            >
-              <div>
-                <div style={{ fontWeight: 600 }}>
-                  {occ.title || "(untitled)"}{" "}
-                  <span style={{ opacity: 0.7, fontSize: 12 }}>· {occ.category || "rehearsal"}</span>
-                  {occ.overridden && <span style={{ marginLeft: 8, fontSize: 12, opacity: 0.7 }}>(edited)</span>}
-                </div>
-                <div style={{ opacity: 0.8, fontSize: 12 }}>
-                  {fmtRangeLocal(occ.starts_at, occ.ends_at, occ.tz)}
-                </div>
-                {occ.location && (
-                  <div style={{ opacity: 0.8, fontSize: 12 }}>
-                    📍 {occ.location}
+      {/* EDIT OCCURRENCE (visible only in editOcc mode) */}
+      {mode === "editOcc" && oEd && (
+        <div style={styles.panel}>
+          <h4 style={{ margin: "0 0 10px", fontSize: 14 }}>Edit single occurrence</h4>
+
+          {oTimeErrors.length > 0 && (
+            <ErrorText>
+              {oTimeErrors.map((e,i)=><div key={i}>• {e}</div>)}
+            </ErrorText>
+          )}
+
+          <Row>
+            <Input value={oEd.title} onChange={(e)=>setOEd({ ...oEd, title: e.target.value })} />
+            <Input placeholder="Location" value={oEd.location} onChange={(e)=>setOEd({ ...oEd, location: e.target.value })} />
+            <select value={oEd.category} onChange={(e)=>setOEd({ ...oEd, category: e.target.value })} style={styles.select}>
+              {CATEGORIES.map((c)=> <option key={c} value={c}>{c}</option>)}
+            </select>
+          </Row>
+          <Row>
+            <Input placeholder="Description" value={oEd.description} onChange={(e)=>setOEd({ ...oEd, description: e.target.value })} style={{ minWidth: 500 }} />
+          </Row>
+          <DateTimeRow
+            startDate={oEd._sDate}
+            startTime={oEd._sTime}
+            endTime={oEd._eTime}
+            onChange={({startDate,startTime,endTime})=>{
+              if (startDate !== undefined) setOEd({ ...oEd, _sDate: startDate });
+              if (startTime !== undefined) setOEd({ ...oEd, _sTime: startTime });
+              if (endTime !== undefined) setOEd({ ...oEd, _eTime: endTime });
+            }}
+          />
+          <Row>
+            <Button onClick={saveEditOccurrence} disabled={!canSaveOccurrence}>Save occurrence</Button>
+            <GhostButton onClick={cancelEditOccurrence}>Cancel</GhostButton>
+          </Row>
+        </div>
+      )}
+
+      {/* LIST (hidden when any editor is open) */}
+      {mode === "list" && (
+        <>
+          {loading ? (
+            <p style={{ opacity: 0.8 }}>Loading calendar…</p>
+          ) : upcoming.length === 0 ? (
+            <p style={{ opacity: 0.8 }}>No upcoming events.</p>
+          ) : (
+            <ul style={{ listStyle: "none", padding: 0, margin: 0 }}>
+              {upcoming.map((occ) => (
+                <li
+                  key={`${occ.event_id}|${occ.base_start}`}
+                  style={{
+                    border: "1px solid rgba(255,255,255,0.1)",
+                    borderRadius: 10,
+                    padding: 12,
+                    marginBottom: 10,
+                    display: "flex",
+                    justifyContent: "space-between",
+                    alignItems: "center",
+                  }}
+                >
+                  <div>
+                    <div style={{ fontWeight: 600 }}>
+                      {occ.title || "(untitled)"}{" "}
+                      <span style={{ opacity: 0.7, fontSize: 12 }}>· {occ.category || "rehearsal"}</span>
+                      {occ.overridden && <span style={{ marginLeft: 8, fontSize: 12, opacity: 0.7 }}>(edited)</span>}
+                    </div>
+                    <div style={{ opacity: 0.8, fontSize: 12 }}>
+                      {fmtRangeLocal(occ.starts_at, occ.ends_at, occ.tz)}
+                    </div>
+                    {occ.location && (
+                      <div style={{ opacity: 0.8, fontSize: 12 }}>
+                        📍 {occ.location}
+                      </div>
+                    )}
                   </div>
-                )}
-              </div>
-              <Row>
-                <GhostButton onClick={() => openEditBase(occ.event_id)}>Edit series</GhostButton>
-                <GhostButton onClick={() => {
-                  const s = splitLocal(occ.starts_at);
-                  const e2 = splitLocal(occ.ends_at);
-                  const newEnd = window.prompt("New end time (HH:MM)", e2.time);
-                  if (!newEnd) return;
-                  const { endIso } = composeStartEndISO(s.date, s.time, newEnd);
-                  editOccurrence(occ.event_id, occ.base_start, { ends_at: endIso }).catch(err=>console.error(err));
-                }}>Edit occurrence</GhostButton>
-                {occ.overridden && <GhostButton onClick={() => clearOneOverride(occ)}>Clear override</GhostButton>}
-                <DangerButton onClick={() => cancelOne(occ)}>Cancel occurrence</DangerButton>
-              </Row>
-            </li>
-          ))}
-        </ul>
+                  <Row>
+                    <GhostButton onClick={() => openEditSeries(occ.event_id)} disabled={mode !== "list"}>Edit series</GhostButton>
+                    <GhostButton onClick={() => openEditOccurrence(occ)} disabled={mode !== "list"}>Edit occurrence</GhostButton>
+                    {occ.overridden && <GhostButton onClick={() => clearOneOverride(occ)} disabled={mode !== "list"}>Clear override</GhostButton>}
+                    <DangerButton onClick={() => cancelOne(occ)} disabled={mode !== "list"}>Cancel occurrence</DangerButton>
+                  </Row>
+                </li>
+              ))}
+            </ul>
+          )}
+        </>
       )}
     </div>
   );
 }
-
-const styles = {
-  select: {
-    background: "#0f0f14",
-    color: "white",
-    border: "1px solid rgba(255,255,255,0.2)",
-    borderRadius: 10,
-    padding: "10px 12px",
-    outline: "none",
-  },
-};
