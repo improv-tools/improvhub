@@ -741,6 +741,68 @@ alter function public.edit_team_event(uuid, jsonb) owner to postgres;
 grant execute on function public.edit_team_event(uuid, jsonb) to authenticated;
 notify pgrst, 'reload schema';
 
+-- Attendance for team events
+create table if not exists public.team_event_attendance (
+  event_id    uuid not null references public.team_events(id) on delete cascade,
+  occ_start   timestamptz not null,
+  user_id     uuid not null default auth.uid(),
+  attending   boolean not null default true,
+  created_at  timestamptz not null default now(),
+  primary key (event_id, occ_start, user_id)
+);
+
+create index if not exists team_event_attendance_event_time_idx
+  on public.team_event_attendance (event_id, occ_start);
+
+alter table public.team_event_attendance enable row level security;
+
+drop policy if exists "attendance select if team member" on public.team_event_attendance;
+create policy "attendance select if team member"
+on public.team_event_attendance for select
+to authenticated
+using (
+  exists (
+    select 1 from public.team_events e
+    join public.team_members m on m.team_id = e.team_id
+    where e.id = team_event_attendance.event_id
+      and m.user_id = auth.uid()
+  )
+);
+
+drop policy if exists "attendance upsert own if member" on public.team_event_attendance;
+create policy "attendance upsert own if member"
+on public.team_event_attendance for insert
+to authenticated
+with check (
+  auth.uid() = user_id and exists (
+    select 1 from public.team_events e
+    join public.team_members m on m.team_id = e.team_id
+    where e.id = team_event_attendance.event_id
+      and m.user_id = auth.uid()
+  )
+);
+
+drop policy if exists "attendance update own if member" on public.team_event_attendance;
+create policy "attendance update own if member"
+on public.team_event_attendance for update
+to authenticated
+using (auth.uid() = user_id)
+with check (auth.uid() = user_id);
+
+create or replace view public.team_event_attendance_with_names as
+select
+  tea.event_id,
+  tea.occ_start,
+  tea.user_id,
+  tea.attending,
+  e.team_id,
+  p.full_name,
+  (tea.user_id = auth.uid()) as _is_me
+from public.team_event_attendance tea
+join public.team_events e on e.id = tea.event_id
+left join public.profiles p on p.id = tea.user_id;
+
+grant select on public.team_event_attendance_with_names to authenticated;
 
  
 
