@@ -169,3 +169,40 @@ export async function listAttendance(teamId, windowStartIso, windowEndIso) {
   if (error) throw new Error(error.message);
   return data || [];
 }
+
+/* ------------------------------- Invitations -------------------------------- */
+export async function listMyInvitations() {
+  const { data, error } = await supabase.rpc("list_my_invitations");
+  if (error) throw new Error(error.message);
+  return data || [];
+}
+
+export async function acceptInvitation(teamId) {
+  const { error } = await supabase.rpc("accept_invitation", { p_team_id: teamId });
+  if (error) throw new Error(error.message);
+}
+
+export async function declineInvitation(teamId) {
+  const { error } = await supabase.rpc("decline_invitation", { p_team_id: teamId });
+  if (error) throw new Error(error.message);
+}
+
+export async function listTeamInvitations(teamId) {
+  const { data, error } = await supabase
+    .from('team_invitations_with_names')
+    .select('*')
+    .eq('team_id', teamId)
+    .order('created_at', { ascending: false });
+  if (error) throw new Error(error.message);
+  return data || [];
+}
+
+export async function cancelInvitation(teamId, userId) {
+  const { error } = await supabase
+    .from('team_invitations')
+    .update({ status: 'canceled' })
+    .eq('team_id', teamId)
+    .eq('user_id', userId)
+    .eq('status', 'invited');
+  if (error) throw new Error(error.message);
+}

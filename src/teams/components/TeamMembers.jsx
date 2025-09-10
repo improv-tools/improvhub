@@ -3,8 +3,9 @@ import { useMemo, useState } from "react";
 import { Button, GhostButton, Input, DangerButton, InfoText, ErrorText } from "components/ui";
 
 export default function TeamMembers({
-  team, members, currentUserId, isAdmin,
+  team, members, invites = [], currentUserId, isAdmin,
   onChangeRole, onAddMember, onRemoveMember, onLeaveTeam, onDeleteTeam,
+  onCancelInvite,
   showDeleteTeamControl = true,
 }) {
   const [err, setErr] = useState("");
@@ -120,6 +121,36 @@ export default function TeamMembers({
             );
           })}
         </ul>
+      )}
+
+      {/* Invited (pending) */}
+      {Array.isArray(invites) && invites.filter(i => i.status === 'invited').length > 0 && (
+        <div style={{ marginTop: 18 }}>
+          <h4 style={{ margin: '0 0 6px', fontSize: 14, opacity: 0.85 }}>Pending invitations</h4>
+          <ul style={{ listStyle: 'none', padding: 0, margin: 0 }}>
+            {invites.filter(i => i.status === 'invited').map((inv) => (
+              <li key={`${inv.team_id}|${inv.user_id}`} style={{
+                border: '1px solid rgba(255,255,255,0.1)',
+                borderRadius: 10,
+                padding: 12,
+                marginBottom: 10,
+                display: 'flex',
+                justifyContent: 'space-between',
+                alignItems: 'center'
+              }}>
+                <div>
+                  <div style={{ fontWeight: 600 }}>{inv.display_name || inv.email || inv.user_id}</div>
+                  <div style={{ opacity: 0.7, fontSize: 12 }}>{inv.role} · invited</div>
+                </div>
+                {isAdmin && (
+                  <GhostButton style={{ padding: '6px 10px' }} onClick={() => onCancelInvite?.(team.id, inv.user_id)}>
+                    Cancel invite
+                  </GhostButton>
+                )}
+              </li>
+            ))}
+          </ul>
+        </div>
       )}
 
       {/* (invite toggle moved to header) */}

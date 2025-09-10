@@ -29,6 +29,7 @@ export default function TeamsPanel() {
 
   const [selected, setSelected] = useState(null); // current team object
   const [members, setMembers] = useState([]);
+  const [invites, setInvites] = useState([]);
   const [teamTab, setTeamTab] = useState("members"); // 'members' | 'calendar'
 
   // create team UI
@@ -73,11 +74,26 @@ export default function TeamsPanel() {
     }
   };
 
+  const loadInvites = async (team) => {
+    if (!team?.id) return;
+    try {
+      const rows = await (await import('./teams.api')).then(m => m);
+    } catch {}
+  };
+
   const openTeam = async (team) => {
     setSelected(team);
     setMembers([]);
     setTeamTab("members");
     await loadMembers(team);
+    try {
+      const { listTeamInvitations } = await import('./teams.api');
+      const inv = await listTeamInvitations(team.id);
+      setInvites(inv);
+    } catch (e) {
+      console.warn('Failed to load invitations', e?.message || e);
+      setInvites([]);
+    }
   };
 
   const backToList = () => {
@@ -153,6 +169,12 @@ export default function TeamsPanel() {
       setInviteRole("member");
       setShowInvite(false);
       await loadMembers(selected);
+      // Refresh invites list
+      try {
+        const { listTeamInvitations } = await import('./teams.api');
+        const inv = await listTeamInvitations(selected.id);
+        setInvites(inv);
+      } catch {}
       setMsg("Invitation added.");
     } catch (e) {
       setErr(e.message || "Failed to add member");
@@ -192,6 +214,17 @@ export default function TeamsPanel() {
     } catch (e) {
       setErr(e.message || "Failed to remove member");
     }
+  };
+
+  const cancelInvite = async (teamId, userId) => {
+    setErr(""); setMsg("");
+    try {
+      const { cancelInvitation, listTeamInvitations } = await import('./teams.api');
+      await cancelInvitation(teamId, userId);
+      const inv = await listTeamInvitations(teamId);
+      setInvites(inv);
+      setMsg("Invitation canceled.");
+    } catch (e) { setErr(e.message || "Failed to cancel invitation"); }
   };
 
   const handleAddMember = async (teamId, email, role) => {
@@ -316,6 +349,7 @@ export default function TeamsPanel() {
                 <TeamMembers
                   team={selected}
                   members={members}
+                  invites={invites}
                   currentUserId={currentUserId}
                   isAdmin={isAdmin}
                   onChangeRole={handleChangeRole}
@@ -323,6 +357,7 @@ export default function TeamsPanel() {
                   onRemoveMember={handleRemoveMember}
                   onLeaveTeam={handleLeaveTeam}
                   onDeleteTeam={handleDeleteTeam}
+                  onCancelInvite={cancelInvite}
                   showDeleteTeamControl={false}
                 />
               </Tab>

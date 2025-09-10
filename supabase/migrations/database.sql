@@ -417,8 +417,9 @@ grant execute on function public.create_team(text) to authenticated;
 
 -- add_member_by_email ---------------------------------------------------------
 drop function if exists public.add_member_by_email(p_team_id uuid, p_email text);
+drop function if exists public.add_member_by_email(p_team_id uuid, p_email text, p_role text);
 
-create or replace function public.add_member_by_email(p_team_id uuid, p_email text)
+create or replace function public.add_member_by_email(p_team_id uuid, p_email text, p_role text default 'member')
 returns void
 language plpgsql
 volatile
@@ -428,15 +429,16 @@ as $$
 declare
   v_user uuid;
   v_is_admin boolean;
+  v_role public.team_role := coalesce(p_role, 'member')::public.team_role;
 begin
-  -- Only team admins can add
+  -- Only team admins can invite
   select exists (
     select 1 from public.team_members m
     where m.team_id = p_team_id and m.user_id = auth.uid() and m.role = 'admin'
   ) into v_is_admin;
 
   if not v_is_admin then
-    raise exception 'Only team admins can add members';
+    raise exception 'Only team admins can invite members';
   end if;
 
   select id into v_user from auth.users where lower(email) = lower(p_email);
@@ -445,13 +447,18 @@ begin
     raise exception 'User with that email does not exist';
   end if;
 
-  insert into public.team_members (team_id, user_id, role)
-  values (p_team_id, v_user, 'member')
-  on conflict (team_id, user_id) do nothing;
+  -- Create or update invitation instead of direct membership
+  insert into public.team_invitations (team_id, user_id, role, status, invited_by)
+  values (p_team_id, v_user, v_role, 'invited', auth.uid())
+  on conflict (team_id, user_id) do update
+    set role = excluded.role,
+        status = 'invited',
+        invited_by = auth.uid(),
+        created_at = now();
 end;
 $$;
 
-grant execute on function public.add_member_by_email(uuid, text) to authenticated;
+grant execute on function public.add_member_by_email(uuid, text, text) to authenticated;
 
 
 -- remove_member ---------------------------------------------------------------
@@ -739,6 +746,169 @@ end$$;
 
 alter function public.edit_team_event(uuid, jsonb) owner to postgres;
 grant execute on function public.edit_team_event(uuid, jsonb) to authenticated;
+notify pgrst, 'reload schema';
+
+-- ====================================================
+-- 7) Team Invitations: table, policies, RPCs
+-- ====================================================
+
+-- Table for team invitations
+create table if not exists public.team_invitations (
+  id          uuid primary key default gen_random_uuid(),
+  team_id     uuid not null references public.teams(id) on delete cascade,
+  user_id     uuid not null references auth.users(id) on delete cascade,
+  role        team_role not null default 'member',
+  status      text not null default 'invited', -- invited|accepted|declined|canceled
+  invited_by  uuid references auth.users(id),
+  created_at  timestamptz not null default now(),
+  unique (team_id, user_id)
+);
+
+alter table public.team_invitations enable row level security;
+
+-- Visibility: invitee or team admins can see
+drop policy if exists "invites select if invitee or admin" on public.team_invitations;
+create policy "invites select if invitee or admin"
+on public.team_invitations for select
+to authenticated
+using (
+  user_id = auth.uid() or exists (
+    select 1 from public.team_members m
+    where m.team_id = team_invitations.team_id and m.user_id = auth.uid() and m.role = 'admin'
+  )
+);
+
+-- Inserts via RPC (definer), but restrict direct inserts to admins
+drop policy if exists "invites insert if admin" on public.team_invitations;
+create policy "invites insert if admin"
+on public.team_invitations for insert
+to authenticated
+with check (
+  exists (
+    select 1 from public.team_members m
+    where m.team_id = team_invitations.team_id and m.user_id = auth.uid() and m.role = 'admin'
+  )
+);
+
+-- Updates: invitee can update their own record (accept/decline); admins can cancel
+drop policy if exists "invites update invitee or admin" on public.team_invitations;
+create policy "invites update invitee or admin"
+on public.team_invitations for update
+to authenticated
+using (
+  user_id = auth.uid() or exists (
+    select 1 from public.team_members m
+    where m.team_id = team_invitations.team_id and m.user_id = auth.uid() and m.role = 'admin'
+  )
+)
+with check (
+  user_id = auth.uid() or exists (
+    select 1 from public.team_members m
+    where m.team_id = team_invitations.team_id and m.user_id = auth.uid() and m.role = 'admin'
+  )
+);
+
+-- RPC: list invitations for current user
+drop function if exists public.list_my_invitations();
+create or replace function public.list_my_invitations()
+returns table (
+  id uuid,
+  team_id uuid,
+  team_name text,
+  display_id text,
+  role team_role,
+  status text,
+  invited_by uuid,
+  created_at timestamptz
+)
+language sql
+stable
+security definer
+set search_path = public
+as $$
+  select i.id, i.team_id, t.name as team_name, t.display_id, i.role, i.status, i.invited_by, i.created_at
+  from public.team_invitations i
+  join public.teams t on t.id = i.team_id
+  where i.user_id = auth.uid()
+  order by i.created_at desc;
+$$;
+grant execute on function public.list_my_invitations() to authenticated;
+
+-- RPC: accept invitation for current user
+drop function if exists public.accept_invitation(p_team_id uuid);
+create or replace function public.accept_invitation(p_team_id uuid)
+returns void
+language plpgsql
+volatile
+security definer
+set search_path = public
+as $$
+declare
+  v_role team_role;
+begin
+  select role into v_role
+  from public.team_invitations
+  where team_id = p_team_id and user_id = auth.uid() and status = 'invited';
+
+  if v_role is null then
+    raise exception 'No pending invitation for this team';
+  end if;
+
+  -- mark accepted
+  update public.team_invitations
+  set status = 'accepted'
+  where team_id = p_team_id and user_id = auth.uid();
+
+  -- add membership
+  insert into public.team_members (team_id, user_id, role)
+  values (p_team_id, auth.uid(), v_role)
+  on conflict (team_id, user_id) do update set role = excluded.role;
+end;
+$$;
+grant execute on function public.accept_invitation(uuid) to authenticated;
+
+-- RPC: decline invitation for current user
+drop function if exists public.decline_invitation(p_team_id uuid);
+create or replace function public.decline_invitation(p_team_id uuid)
+returns void
+language plpgsql
+volatile
+security definer
+set search_path = public
+as $$
+begin
+  update public.team_invitations
+  set status = 'declined'
+  where team_id = p_team_id and user_id = auth.uid() and status = 'invited';
+end;
+$$;
+grant execute on function public.decline_invitation(uuid) to authenticated;
+
+notify pgrst, 'reload schema';
+
+-- Helper view to resolve invitee names/emails for listing invites per team
+drop view if exists public.team_invitations_with_names;
+create view public.team_invitations_with_names as
+select
+  i.team_id,
+  i.user_id,
+  i.role,
+  i.status,
+  i.invited_by,
+  i.created_at,
+  coalesce(
+    u.raw_user_meta_data->>'display_name',
+    u.raw_user_meta_data->>'full_name',
+    u.raw_user_meta_data->>'name',
+    split_part(u.email, '@', 1),
+    'Unknown'
+  ) as display_name,
+  u.email
+from public.team_invitations i
+left join auth.users u on u.id = i.user_id;
+
+grant select on public.team_invitations_with_names to authenticated;
+
 notify pgrst, 'reload schema';
 
 -- Attendance for team events
