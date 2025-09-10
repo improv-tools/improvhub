@@ -150,4 +150,23 @@ export async function deleteEventOverride(eventId, baseStartIso) {
 
   if (error) throw new Error(error.message);
 }
+/* ------------------------------- Attendance -------------------------------- */
+export async function setAttendance(eventId, baseStartIso, attending) {
+  const { error } = await supabase
+    .from("team_event_attendance")
+    .upsert(
+      [{ event_id: eventId, occ_start: baseStartIso, attending }],
+      { onConflict: "event_id,occ_start,user_id" }
+    );
+  if (error) throw new Error(error.message);
+}
 
+export async function listAttendance(teamId, windowStartIso, windowEndIso) {
+  const { data, error } = await supabase
+    .from("team_event_attendance_with_names")
+    .select("event_id, occ_start, user_id, attending, full_name, _is_me")
+    .gte("occ_start", windowStartIso)
+    .lte("occ_start", windowEndIso);
+  if (error) throw new Error(error.message);
+  return data || [];
+}
