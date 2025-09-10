@@ -17,6 +17,7 @@ export default function ProfilePanel() {
   const [saving, setSaving] = useState(false);
   const [err, setErr] = useState("");
   const [msg, setMsg] = useState("");
+  const [coach, setCoach] = useState(!!user?.user_metadata?.coach);
 
   // Email change UI
   const [email, setEmail] = useState(user?.email || "");
@@ -34,11 +35,12 @@ export default function ProfilePanel() {
   useEffect(() => {
     setName(currentDisplayName);
     setEmail(user?.email || "");
+    setCoach(!!user?.user_metadata?.coach);
   }, [currentDisplayName]);
 
   const save = async () => {
     setErr(""); setMsg(""); setSaving(true);
-    const { error } = await supabase.auth.updateUser({ data: { display_name: name.trim() } });
+    const { error } = await supabase.auth.updateUser({ data: { display_name: name.trim(), coach: !!coach } });
     setSaving(false);
     if (error) setErr(error.message || "Failed to save");
     else { setMsg("Saved!"); await refreshUser(); }
@@ -94,6 +96,11 @@ export default function ProfilePanel() {
         Display name
         <Input value={name} onChange={(e)=>setName(e.target.value)} />
       </Label>
+
+      <label style={{ display: "inline-flex", alignItems: "center", gap: 8 }}>
+        <input type="checkbox" checked={!!coach} onChange={(e)=>setCoach(e.target.checked)} />
+        <span>I am a coach</span>
+      </label>
 
       <Button onClick={save} disabled={saving || !name.trim()}>
         {saving ? "Saving…" : "Save"}

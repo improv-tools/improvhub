@@ -3,12 +3,14 @@ import { useState, useEffect } from "react";
 import { useAuth } from "auth/AuthContext";
 import ProfilePanel from "profiles/ProfilePanel";
 import TeamsPanel from "teams/TeamsPanel";
+import CoachingPanel from "coaching/CoachingPanel";
 import { listMyInvitations, acceptInvitation, declineInvitation, listMyNotifications, deleteNotification } from "teams/teams.api";
 import { signOut } from "auth/auth.api";
 import { CenterWrap, Card, H1, Tabs, Tab, GhostButton, Button, ErrorText, Row } from "components/ui";
 
 export default function Dashboard() {
   const { session, displayName } = useAuth();
+  const isCoach = !!useAuth().user?.user_metadata?.coach;
   const [tab, setTab] = useState("home"); // 'home' | 'teams' | 'profile'
   const [invites, setInvites] = useState([]);
   const [invitesLoading, setInvitesLoading] = useState(true);
@@ -160,6 +162,12 @@ export default function Dashboard() {
           <Tab value="teams" label="Teams">
             <TeamsPanel />
           </Tab>
+
+          {isCoach && (
+            <Tab value="coaching" label="Coaching">
+              <CoachingPanel />
+            </Tab>
+          )}
 
           <Tab value="profile" label="Profile">
             <ProfilePanel />
