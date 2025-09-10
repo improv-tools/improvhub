@@ -3,6 +3,7 @@ import { useMemo, useState } from "react";
 import { Button, GhostButton, DangerButton, Label, Input, ErrorText, InfoText, Row } from "components/ui";
 import useCalendarData from "../hooks/useCalendarData";
 import { composeStartEndISO, splitLocal, fmtRangeLocal, browserTZ } from "../utils/datetime";
+import { listAttendance, setAttendance } from "../teams.api";
 
 const CATEGORIES = ["rehearsal", "social", "performance"];
 const TYPE_META = {
@@ -155,12 +156,51 @@ function validateTimes({ title, startDate, startTime, endTime }) {
   return errs;
 }
 
+const toggleAttendance = async (occ) => {
+  try {
+    const key = `${occ.event_id}|${occ.base_start}`;
+    const arr = attendanceMap.get(key) || [];
+    const mine = arr.some(a => a.isMe);
+    await setAttendance(occ.event_id, occ.base_start, !mine);
+    await loadAttendance();
+  } catch (e) {
+    console.error("attendance toggle failed:", e);
+  }
+};
+
 /* -------------------------------- Component ------------------------------- */
 export default function CalendarPanel({ team }) {
   const tz = browserTZ();
   const today = new Date();
   const windowStartIso = new Date(today.getFullYear(), today.getMonth(), today.getDate()).toISOString();
   const windowEndIso = new Date(today.getFullYear(), today.getMonth(), today.getDate() + 120).toISOString();
+
+  +// Attendance cache keyed by `${event_id}|${occ_start ISO}`
+ const [attendanceMap, setAttendanceMap] = useState(new Map());
+ 
+ const loadAttendance = async () => {
+   if (!team?.id) return;
+   try {
+     const rows = await listAttendance(team.id, windowStartIso, windowEndIso);
+     const map = new Map();
+     (rows || [])
+       .filter(r => r.attending)
+       .forEach(r => {
+         const k = `${r.event_id}|${new Date(r.occ_start).toISOString()}`;
+         const arr = map.get(k) || [];
+         arr.push({ name: r.full_name || "Unknown", isMe: !!r._is_me });
+         map.set(k, arr);
+       });
+     setAttendanceMap(map);
+   } catch (e) {
+     console.error("attendance load failed:", e);
+   }
+ };
+ 
+ // (Re)load when window/team changes or occurrences list changes size
+ useEffect(() => { loadAttendance(); },
+   [team?.id, windowStartIso, windowEndIso, occurrences?.length]);
+
 
   const {
     loading, err, occurrences, events,
@@ -899,6 +939,31 @@ export default function CalendarPanel({ team }) {
                             </>
                           )}
                         </div>
+                        {(() => {
+  const ak = `${occ.event_id}|${occ.base_start}`;
+  const arr = attendanceMap.get(ak) || [];
+  const mine = arr.some(a => a.isMe);
+  const names = arr.map(a => a.name);
+
+  return (
+    <div style={{ marginTop: 6, display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+      <Button onClick={() => toggleAttendance(occ)}>
+        {mine ? "Cancel my attendance" : "I’m attending"}
+      </Button>
+
+      {names.length > 0 && (
+        <div style={{ display: "flex", gap: 8, flexWrap: "wrap", opacity: 0.9 }}>
+          {names.map((n, i) => (
+            <span key={i}
+              style={{ border: "1px solid rgba(255,255,255,0.2)", padding: "2px 6px", borderRadius: 6 }}>
+              {n}
+            </span>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+})()}
                         {openDescKeys.has(key) && occ.description && (
                           <div style={{ marginTop: 6, opacity: 0.9 }}>
                             {occ.description}
