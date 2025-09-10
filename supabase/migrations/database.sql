@@ -701,6 +701,8 @@ begin
       description  = coalesce(v_patch->>'description', description),
       location     = coalesce(v_patch->>'location', location),
       category     = coalesce((v_patch->>'category')::event_category, category),
+      allow_team_applications = coalesce((v_patch->>'allow_team_applications')::boolean, allow_team_applications),
+      allow_individual_applications = coalesce((v_patch->>'allow_individual_applications')::boolean, allow_individual_applications),
       tz           = coalesce(v_patch->>'tz', tz),
       starts_at    = coalesce((v_patch->>'starts_at')::timestamptz, starts_at),
       ends_at      = coalesce((v_patch->>'ends_at')::timestamptz, ends_at),
@@ -884,6 +886,254 @@ $trg_overrides_notify$;
 create trigger trg_notify_event_overrides
 after insert or update or delete on public.team_event_overrides
 for each row execute procedure public.trg_notify_event_overrides();
+
+notify pgrst, 'reload schema';
+
+-- ====================================================
+-- 11) Showrunner: Series + Shows (no attendance)
+-- Mirrors Teams schema with owner-only access
+-- ====================================================
+
+-- Types are shared (event_category, recur_freq) from earlier sections
+
+-- SHOW SERIES ---------------------------------------------------------------
+create table if not exists public.show_series (
+  id          uuid primary key default gen_random_uuid(),
+  name        text not null,
+  display_id  text not null unique,
+  owner_id    uuid not null references auth.users(id) on delete cascade,
+  created_at  timestamptz not null default now()
+);
+
+alter table public.show_series enable row level security;
+
+drop policy if exists "show_series select own" on public.show_series;
+create policy "show_series select own"
+on public.show_series
+for select to authenticated
+using (owner_id = auth.uid());
+
+drop policy if exists "show_series write own" on public.show_series;
+create policy "show_series write own"
+on public.show_series
+for all to authenticated
+using (owner_id = auth.uid())
+with check (owner_id = auth.uid());
+
+-- Helper to generate display ids
+drop function if exists public.next_show_display_id(p_name text);
+create or replace function public.next_show_display_id(p_name text)
+returns text
+language plpgsql
+stable
+security definer
+set search_path = public
+as $$
+declare base text := trim(p_name); n int := 0; candidate text;
+begin
+  if base is null or base = '' then raise exception 'Name required'; end if;
+  candidate := base;
+  loop
+    exit when not exists (select 1 from public.show_series s where s.display_id = candidate);
+    n := n + 1; candidate := base || '#' || n;
+  end loop;
+  return candidate;
+end; $$;
+grant execute on function public.next_show_display_id(text) to authenticated;
+
+-- SHOW EVENTS (no attendance) ----------------------------------------------
+create table if not exists public.show_events (
+  id                 uuid primary key default gen_random_uuid(),
+  series_id          uuid not null references public.show_series(id) on delete cascade,
+  title              text not null,
+  description        text,
+  location           text,
+  category           event_category not null default 'rehearsal',
+  -- Applications (showrunner-specific)
+  allow_team_applications boolean not null default false,
+  allow_individual_applications boolean not null default false,
+  tz                 text not null default 'Europe/London',
+  starts_at          timestamptz not null,
+  ends_at            timestamptz not null,
+  recur_freq         recur_freq not null default 'none',
+  recur_interval     int not null default 1,
+  recur_byday        text[],
+  recur_bymonthday   int[],
+  recur_week_of_month int,
+  recur_day_of_week  text,
+  recur_count        int,
+  recur_until        date,
+  created_at         timestamptz not null default now(),
+  constraint show_events_time_chk check (ends_at > starts_at)
+);
+
+create index if not exists show_events_series_idx on public.show_events(series_id);
+
+alter table public.show_events enable row level security;
+
+drop policy if exists "show_events select own" on public.show_events;
+create policy "show_events select own"
+on public.show_events for select to authenticated
+using (exists (select 1 from public.show_series s where s.id = show_events.series_id and s.owner_id = auth.uid()));
+
+drop policy if exists "show_events insert own" on public.show_events;
+create policy "show_events insert own"
+on public.show_events for insert to authenticated
+with check (exists (select 1 from public.show_series s where s.id = show_events.series_id and s.owner_id = auth.uid()));
+
+drop policy if exists "show_events delete own" on public.show_events;
+create policy "show_events delete own"
+on public.show_events for delete to authenticated
+using (exists (select 1 from public.show_series s where s.id = show_events.series_id and s.owner_id = auth.uid()));
+
+-- SHOW EVENT OVERRIDES ------------------------------------------------------
+create table if not exists public.show_event_overrides (
+  event_id    uuid not null references public.show_events(id) on delete cascade,
+  occ_start   timestamptz not null,
+  title       text,
+  description text,
+  location    text,
+  category    event_category,
+  tz          text,
+  starts_at   timestamptz,
+  ends_at     timestamptz,
+  canceled    boolean not null default false,
+  created_at  timestamptz not null default now(),
+  primary key (event_id, occ_start)
+);
+
+alter table public.show_event_overrides enable row level security;
+
+drop policy if exists "show_overrides select own" on public.show_event_overrides;
+create policy "show_overrides select own"
+on public.show_event_overrides for select to authenticated
+using (exists (select 1 from public.show_events e join public.show_series s on s.id = e.series_id where e.id = show_event_overrides.event_id and s.owner_id = auth.uid()));
+
+drop policy if exists "show_overrides write own" on public.show_event_overrides;
+create policy "show_overrides write own"
+on public.show_event_overrides for all to authenticated
+using (exists (select 1 from public.show_events e join public.show_series s on s.id = e.series_id where e.id = show_event_overrides.event_id and s.owner_id = auth.uid()))
+with check (exists (select 1 from public.show_events e join public.show_series s on s.id = e.series_id where e.id = show_event_overrides.event_id and s.owner_id = auth.uid()));
+
+-- RPCs: series management
+drop function if exists public.create_show_series(p_name text);
+create or replace function public.create_show_series(p_name text)
+returns table (id uuid, name text, display_id text)
+language sql
+security definer
+set search_path = public
+as $$
+  with ins as (
+    insert into public.show_series(name, display_id, owner_id)
+    values (
+      p_name,
+      public.next_show_display_id(p_name),
+      auth.uid()
+    )
+    returning id, name, display_id
+  )
+  select id, name, display_id from ins
+$$;
+grant execute on function public.create_show_series(text) to authenticated;
+
+drop function if exists public.list_my_show_series();
+create or replace function public.list_my_show_series()
+returns table (id uuid, name text, display_id text)
+language sql
+stable
+security definer
+set search_path = public
+as $$
+  select s.id, s.name, s.display_id
+  from public.show_series s
+  where s.owner_id = auth.uid()
+  order by s.created_at desc
+$$;
+grant execute on function public.list_my_show_series() to authenticated;
+
+drop function if exists public.rename_show_series(p_series_id uuid, p_name text);
+create or replace function public.rename_show_series(p_series_id uuid, p_name text)
+returns table (id uuid, name text, display_id text)
+language sql
+security definer
+set search_path = public
+as $$
+  update public.show_series
+  set name = p_name
+  where id = p_series_id and owner_id = auth.uid();
+
+  select s.id, s.name, s.display_id
+  from public.show_series s
+  where s.id = p_series_id;
+$$;
+grant execute on function public.rename_show_series(uuid, text) to authenticated;
+
+drop function if exists public.delete_show_series(p_series_id uuid);
+create or replace function public.delete_show_series(p_series_id uuid)
+returns void language plpgsql security definer set search_path = public as $$
+begin
+  delete from public.show_series where id = p_series_id and owner_id = auth.uid();
+end; $$;
+grant execute on function public.delete_show_series(uuid) to authenticated;
+
+-- RPC: edit show event patch (like edit_team_event)
+drop function if exists public.edit_show_event(p_event_id uuid, p_patch jsonb);
+create or replace function public.edit_show_event(p_event_id uuid, p_patch jsonb)
+returns public.show_events
+language plpgsql security definer set search_path = public as $$
+declare v_row public.show_events; v_patch jsonb := coalesce(p_patch, '{}'::jsonb);
+begin
+  if not exists (
+    select 1 from public.show_events e
+    join public.show_series s on s.id = e.series_id
+    where e.id = p_event_id and s.owner_id = auth.uid()
+  ) then
+    raise exception 'not allowed';
+  end if;
+
+  update public.show_events
+  set title        = coalesce(v_patch->>'title', title),
+      description  = coalesce(v_patch->>'description', description),
+      location     = coalesce(v_patch->>'location', location),
+      category     = coalesce((v_patch->>'category')::event_category, category),
+      tz           = coalesce(v_patch->>'tz', tz),
+      starts_at    = coalesce((v_patch->>'starts_at')::timestamptz, starts_at),
+      ends_at      = coalesce((v_patch->>'ends_at')::timestamptz, ends_at),
+      recur_freq   = coalesce((v_patch->>'recur_freq')::recur_freq, recur_freq),
+      recur_interval = 1,
+      recur_byday = case when v_patch ? 'recur_byday' then
+        case jsonb_typeof(v_patch->'recur_byday') when 'array' then (select coalesce(array_agg(value::text), '{}') from jsonb_array_elements_text(v_patch->'recur_byday'))
+          when 'string' then array[(v_patch->>'recur_byday')] when 'null' then null else recur_byday end
+        else recur_byday end,
+      recur_bymonthday = case when v_patch ? 'recur_bymonthday' then
+        case jsonb_typeof(v_patch->'recur_bymonthday') when 'array' then (select coalesce(array_agg((e.value)::int), '{}') from jsonb_array_elements(v_patch->'recur_bymonthday') e)
+          when 'number' then array[(v_patch->>'recur_bymonthday')::int] when 'null' then null else recur_bymonthday end
+        else recur_bymonthday end,
+      recur_week_of_month = case when v_patch ? 'recur_week_of_month' then (v_patch->>'recur_week_of_month')::int else recur_week_of_month end,
+      recur_until         = coalesce((v_patch->>'recur_until')::timestamptz, recur_until),
+      recur_count         = case when v_patch ? 'recur_count' then (v_patch->>'recur_count')::int else recur_count end
+  where id = p_event_id
+  returning * into v_row;
+  return v_row;
+end; $$;
+grant execute on function public.edit_show_event(uuid, jsonb) to authenticated;
+
+-- Ensure application columns exist if table was created earlier
+do $$
+begin
+  if not exists (
+    select 1 from information_schema.columns
+    where table_schema='public' and table_name='show_events' and column_name='allow_team_applications'
+  ) then
+    alter table public.show_events add column allow_team_applications boolean not null default false;
+  end if;
+  if not exists (
+    select 1 from information_schema.columns
+    where table_schema='public' and table_name='show_events' and column_name='allow_individual_applications'
+  ) then
+    alter table public.show_events add column allow_individual_applications boolean not null default false;
+  end if;
+end$$;
 
 notify pgrst, 'reload schema';
 
