@@ -146,6 +146,9 @@ export async function deleteEventOverride(eventId, baseStartIso) {
   const { error } = await supabase
     .from("team_event_overrides")
     .delete()
-    .match({ event_id: eventId, occ_start: baseStartIso });
+    .eq("event_id", eventId)
+    .eq("occ_start", baseStartIso); // timestamptz equality
+
   if (error) throw new Error(error.message);
 }
+
