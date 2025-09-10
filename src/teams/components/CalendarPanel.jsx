@@ -175,7 +175,7 @@ export default function CalendarPanel({ team }) {
   const windowStartIso = new Date(today.getFullYear(), today.getMonth(), today.getDate()).toISOString();
   const windowEndIso = new Date(today.getFullYear(), today.getMonth(), today.getDate() + 120).toISOString();
 
-  +// Attendance cache keyed by `${event_id}|${occ_start ISO}`
+ // Attendance cache keyed by `${event_id}|${occ_start ISO}`
  const [attendanceMap, setAttendanceMap] = useState(new Map());
  
  const loadAttendance = async () => {
