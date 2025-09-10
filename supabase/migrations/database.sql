@@ -962,7 +962,19 @@ left join auth.users au on au.id = tea.user_id;
 
 grant select on public.team_event_attendance_with_names to authenticated;
 
-
+do $$
+begin
+  -- Add 'daily' to the recur_freq enum if it's not already there
+  if not exists (
+    select 1
+    from pg_type t
+    join pg_enum e on e.enumtypid = t.oid
+    where t.typname = 'recur_freq' and e.enumlabel = 'daily'
+  ) then
+    alter type public.recur_freq add value 'daily' after 'weekly';
+  end if;
+end
+$$;
 -- =============================================================================
 -- 6) PGRST schema reload (make new RPCs visible immediately)
 -- =============================================================================
