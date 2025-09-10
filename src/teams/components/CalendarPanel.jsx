@@ -1,5 +1,5 @@
 // src/teams/components/CalendarPanel.jsx
-import { useMemo, useState } from "react";
+import { useMemo, useState, useEffect } from "react";
 import { Button, GhostButton, DangerButton, Label, Input, ErrorText, InfoText, Row } from "components/ui";
 import useCalendarData from "../hooks/useCalendarData";
 import { composeStartEndISO, splitLocal, fmtRangeLocal, browserTZ } from "../utils/datetime";
