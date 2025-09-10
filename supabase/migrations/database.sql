@@ -667,7 +667,58 @@ with check (
   )
 );
 
-notify pgrst, 'reload schema';
+-- Edit a team event (series) with an admin check; bypasses RLS safely
+create or replace function public.edit_team_event(
+  p_event_id uuid,
+  p_patch jsonb
+) returns public.team_events
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  v_team_id uuid;
+  v_row public.team_events;
+begin
+  select team_id into v_team_id from public.team_events where id = p_event_id;
+  if v_team_id is null then
+    raise exception 'event % not found', p_event_id using errcode = 'P0002';
+  end if;
+  if not public.is_team_admin(v_team_id) then
+    raise exception 'not allowed' using errcode = '42501';
+  end if;
+
+  update public.team_events
+  set title              = coalesce(p_patch->>'title', title),
+      description        = coalesce(p_patch->>'description', description),
+      location           = coalesce(p_patch->>'location', location),
+      category           = coalesce((p_patch->>'category')::event_category, category),
+      tz                 = coalesce(p_patch->>'tz', tz),
+      starts_at          = coalesce((p_patch->>'starts_at')::timestamptz, starts_at),
+      ends_at            = coalesce((p_patch->>'ends_at')::timestamptz, ends_at),
+      recur_freq         = coalesce((p_patch->>'recur_freq')::recur_freq, recur_freq),
+      recur_interval     = 1,
+      recur_byday        = coalesce(
+                              (select case when p_patch ? 'recur_byday'
+                                           then array(select jsonb_array_elements_text(p_patch->'recur_byday'))
+                                      end),
+                              recur_byday
+                            ),
+      recur_bymonthday   = coalesce((p_patch->>'recur_bymonthday')::int, recur_bymonthday),
+      recur_week_of_month= coalesce((p_patch->>'recur_week_of_month')::int, recur_week_of_month),
+      recur_until        = coalesce((p_patch->>'recur_until')::timestamptz, recur_until),
+      recur_count        = coalesce((p_patch->>'recur_count')::int, recur_count)
+  where id = p_event_id
+  returning * into v_row;
+
+  return v_row;
+end$$;
+
+alter function public.edit_team_event(uuid, jsonb) owner to postgres;
+grant execute on function public.edit_team_event(uuid, jsonb) to authenticated;
+
+ 
+
 -- =============================================================================
 -- 6) PGRST schema reload (make new RPCs visible immediately)
 -- =============================================================================
