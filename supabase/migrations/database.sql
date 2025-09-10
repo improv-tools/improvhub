@@ -804,7 +804,159 @@ left join public.profiles p on p.id = tea.user_id;
 
 grant select on public.team_event_attendance_with_names to authenticated;
 
- 
+ -- ===============================================
+-- 1) Ensure PROFILES table exists (with full_name)
+-- ===============================================
+do $$
+begin
+  if not exists (
+    select 1 from information_schema.tables
+    where table_schema='public' and table_name='profiles'
+  ) then
+    create table public.profiles (
+      id         uuid primary key references auth.users(id) on delete cascade,
+      full_name  text,
+      updated_at timestamptz not null default now()
+    );
+
+    alter table public.profiles enable row level security;
+
+    drop policy if exists "profiles read own or team" on public.profiles;
+    create policy "profiles read own or team"
+      on public.profiles for select
+      to authenticated
+      using (true); -- relax as needed; typically profiles are readable by members
+
+    drop policy if exists "profiles upsert own" on public.profiles;
+    create policy "profiles upsert own"
+      on public.profiles for insert
+      to authenticated
+      with check (id = auth.uid());
+
+    drop policy if exists "profiles update own" on public.profiles;
+    create policy "profiles update own"
+      on public.profiles for update
+      to authenticated
+      using (id = auth.uid())
+      with check (id = auth.uid());
+  else
+    -- Ensure full_name column exists
+    if not exists (
+      select 1 from information_schema.columns
+      where table_schema='public' and table_name='profiles' and column_name='full_name'
+    ) then
+      alter table public.profiles add column full_name text;
+    end if;
+  end if;
+end
+$$;
+
+-- ====================================================
+-- 2) Ensure TEAM EVENT ATTENDANCE table + policies
+-- ====================================================
+do $$
+declare has_tbl boolean;
+begin
+  select exists(
+    select 1 from information_schema.tables
+    where table_schema='public' and table_name='team_event_attendance'
+  ) into has_tbl;
+
+  if not has_tbl then
+    create table public.team_event_attendance (
+      event_id   uuid not null references public.team_events(id) on delete cascade,
+      occ_start  timestamptz not null,
+      user_id    uuid not null default auth.uid(),
+      attending  boolean not null default true,
+      created_at timestamptz not null default now(),
+      primary key (event_id, occ_start, user_id)
+    );
+  end if;
+
+  -- Ensure occ_start exists (rename common mistakes)
+  if not exists (
+    select 1 from information_schema.columns
+    where table_schema='public' and table_name='team_event_attendance' and column_name='occ_start'
+  ) then
+    if exists (
+      select 1 from information_schema.columns
+      where table_schema='public' and table_name='team_event_attendance' and column_name='base_start'
+    ) then
+      alter table public.team_event_attendance rename column base_start to occ_start;
+    else
+      alter table public.team_event_attendance add column occ_start timestamptz;
+      alter table public.team_event_attendance alter column occ_start set not null;
+    end if;
+  end if;
+
+  create index if not exists team_event_attendance_event_time_idx
+    on public.team_event_attendance (event_id, occ_start);
+
+  alter table public.team_event_attendance enable row level security;
+
+  drop policy if exists "attendance select if team member" on public.team_event_attendance;
+  create policy "attendance select if team member"
+  on public.team_event_attendance for select
+  to authenticated
+  using (
+    exists (
+      select 1
+      from public.team_events e
+      join public.team_members m on m.team_id = e.team_id
+      where e.id = team_event_attendance.event_id
+        and m.user_id = auth.uid()
+    )
+  );
+
+  drop policy if exists "attendance upsert own if member" on public.team_event_attendance;
+  create policy "attendance upsert own if member"
+  on public.team_event_attendance for insert
+  to authenticated
+  with check (
+    auth.uid() = user_id and exists (
+      select 1 from public.team_events e
+      join public.team_members m on m.team_id = e.team_id
+      where e.id = team_event_attendance.event_id
+        and m.user_id = auth.uid()
+    )
+  );
+
+  drop policy if exists "attendance update own if member" on public.team_event_attendance;
+  create policy "attendance update own if member"
+  on public.team_event_attendance for update
+  to authenticated
+  using (auth.uid() = user_id)
+  with check (auth.uid() = user_id);
+end
+$$;
+
+-- ====================================================
+-- 3) Helper VIEW: robust attendee name resolution
+-- ====================================================
+drop view if exists public.team_event_attendance_with_names;
+
+create view public.team_event_attendance_with_names as
+select
+  tea.event_id,
+  tea.occ_start,
+  tea.user_id,
+  tea.attending,
+  e.team_id,
+  coalesce(
+    to_jsonb(p)->>'full_name',            -- profiles.full_name, if present
+    au.raw_user_meta_data->>'full_name',  -- auth metadata
+    au.raw_user_meta_data->>'name',       -- common alternative
+    au.email,                             -- fallback
+    'Unknown'
+  ) as full_name,
+  (tea.user_id = auth.uid()) as _is_me
+from public.team_event_attendance tea
+join public.team_events e on e.id = tea.event_id
+left join public.profiles p on p.id = tea.user_id
+left join auth.users au on au.id = tea.user_id;
+
+grant select on public.team_event_attendance_with_names to authenticated;
+
 
 -- =============================================================================
 -- 6) PGRST schema reload (make new RPCs visible immediately)
