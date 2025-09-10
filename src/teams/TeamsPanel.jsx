@@ -13,6 +13,7 @@ import {
   deleteTeamRPC,
 } from "./teams.api";
 import CalendarPanel from "./components/CalendarPanel";
+import TeamUpdates from "./components/TeamUpdates";
 import TeamMembers from "./components/TeamMembers";
 import {
   Card, H1, Label, Input, Button, GhostButton, DangerButton, ErrorText, InfoText, Row, Tabs, Tab,
@@ -30,7 +31,7 @@ export default function TeamsPanel() {
   const [selected, setSelected] = useState(null); // current team object
   const [members, setMembers] = useState([]);
   const [invites, setInvites] = useState([]);
-  const [teamTab, setTeamTab] = useState("members"); // 'members' | 'calendar'
+  const [teamTab, setTeamTab] = useState("updates"); // 'updates' | 'members' | 'calendar' | 'admin'
 
   // create team UI
   const [newName, setNewName] = useState("");
@@ -87,7 +88,7 @@ export default function TeamsPanel() {
     setMsg("");
     setSelected(team);
     setMembers([]);
-    setTeamTab("members");
+    setTeamTab("updates");
     await loadMembers(team);
     try {
       const { listTeamInvitations } = await import('./teams.api');
@@ -359,6 +360,9 @@ export default function TeamsPanel() {
               onChange={(v) => { setTeamTab(v); setErr(""); setMsg(""); }}
               style={{ marginTop: 8, marginBottom: 16 }}
             >
+              <Tab value="updates" label="Updates">
+                <TeamUpdates team={selected} />
+              </Tab>
               <Tab value="members" label="Members">
                 <TeamMembers
                   team={selected}

@@ -219,6 +219,13 @@ export async function markNotificationRead(id) {
   if (error) throw new Error(error.message);
 }
 
+/* ------------------------------- Updates feed ------------------------------- */
+export async function listTeamUpdates(teamId) {
+  const { data, error } = await supabase.rpc('list_team_updates', { p_team_id: teamId });
+  if (error) throw new Error(error.message);
+  return data || [];
+}
+
 export async function deleteNotification(id) {
   const { error } = await supabase.rpc('delete_notification', { p_id: id });
   if (error) throw new Error(error.message);

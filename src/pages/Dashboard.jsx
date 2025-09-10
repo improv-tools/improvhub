@@ -91,30 +91,63 @@ export default function Dashboard() {
                   <p style={{ opacity: 0.8 }}>Loading…</p>
                 ) : (notifs.length === 0 ? null : (
                   <ul style={{ listStyle: "none", padding: 0, margin: 0 }}>
-                    {notifs.map((n) => (
-                      <li key={n.id} style={{
-                        border: "1px solid rgba(255,255,255,0.1)",
-                        borderRadius: 10,
-                        padding: 12,
-                        marginBottom: 10,
-                        display: "flex",
-                        justifyContent: "space-between",
-                        alignItems: "center",
-                        opacity: n.read_at ? 0.8 : 1,
-                      }}>
-                        <div>
-                          {n.kind === 'removed_from_team' ? (
-                            <div style={{ fontWeight: 600 }}>Removed from team: {n.team_name || n.display_id || n.team_id}</div>
-                          ) : (
-                            <div style={{ fontWeight: 600 }}>{n.kind}</div>
-                          )}
-                          <div style={{ opacity: 0.7, fontSize: 12 }}>{new Date(n.created_at).toLocaleString()}</div>
-                        </div>
-                        <Row>
-                          <GhostButton onClick={async ()=> { await deleteNotification(n.id); await loadNotifs(); }}>Dismiss</GhostButton>
-                        </Row>
-                      </li>
-                    ))}
+                    {notifs.map((n) => {
+                      const p = n.payload || {};
+                      const when = (iso) => iso ? new Date(iso).toLocaleString() : '';
+                      const line = (() => {
+                        switch (n.kind) {
+                          case 'removed_from_team':
+                            return `Removed from team: ${n.team_name || n.display_id || n.team_id}`;
+                          case 'event_deleted':
+                            return `Event deleted: ${p.title || p.event_id || ''}${p.by_name ? ` (by ${p.by_name})` : ''}`;
+                          case 'event_changed': {
+                            const parts = [];
+                            if (p.new_location && p.old_location !== p.new_location) parts.push(`location → ${p.new_location}`);
+                            if (p.new_starts_at && p.old_starts_at !== p.new_starts_at) parts.push(`starts → ${when(p.new_starts_at)}`);
+                            if (p.new_ends_at && p.old_ends_at !== p.new_ends_at) parts.push(`ends → ${when(p.new_ends_at)}`);
+                            const by = p.by_name ? ` (by ${p.by_name})` : '';
+                            return `Event updated: ${p.title || p.event_id || ''}${by}${parts.length ? ' · ' + parts.join(', ') : ''}`;
+                          }
+                          case 'occurrence_canceled': {
+                            const by = p.by_name ? ` (by ${p.by_name})` : '';
+                            return `Occurrence canceled: ${p.title || p.event_id || ''} · ${when(p.occ_start)}${by}`;
+                          }
+                          case 'occurrence_changed': {
+                            const parts = [];
+                            if (p.new_location) parts.push(`location → ${p.new_location}`);
+                            if (p.new_starts_at) parts.push(`starts → ${when(p.new_starts_at)}`);
+                            if (p.new_ends_at) parts.push(`ends → ${when(p.new_ends_at)}`);
+                            const by = p.by_name ? ` (by ${p.by_name})` : '';
+                            return `Occurrence updated: ${p.title || p.event_id || ''} · ${when(p.occ_start)}${by}${parts.length ? ' · ' + parts.join(', ') : ''}`;
+                          }
+                          default:
+                            return n.kind;
+                        }
+                      })();
+                      return (
+                        <li key={n.id} style={{
+                          border: "1px solid rgba(255,255,255,0.1)",
+                          borderRadius: 10,
+                          padding: 12,
+                          marginBottom: 10,
+                          display: "flex",
+                          justifyContent: "space-between",
+                          alignItems: "center",
+                          opacity: n.read_at ? 0.8 : 1,
+                        }}>
+                          <div>
+                            <div style={{ fontWeight: 600 }}>{line}</div>
+                            <div style={{ opacity: 0.7, fontSize: 12 }}>
+                              {n.team_name || n.display_id || ''}
+                              {" · "}{new Date(n.created_at).toLocaleString()}
+                            </div>
+                          </div>
+                          <Row>
+                            <GhostButton onClick={async ()=> { await deleteNotification(n.id); await loadNotifs(); }}>Dismiss</GhostButton>
+                          </Row>
+                        </li>
+                      );
+                    })}
                   </ul>
                 ))}
               </div>

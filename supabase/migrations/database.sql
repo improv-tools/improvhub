@@ -749,6 +749,145 @@ grant execute on function public.edit_team_event(uuid, jsonb) to authenticated;
 notify pgrst, 'reload schema';
 
 -- ====================================================
+-- 10) Event notifications to users
+-- - Notifies team members when a base event is deleted
+-- - Notifies attendees when a base event's time/location changes
+-- - Notifies attendees when a single occurrence is canceled/edited
+-- ====================================================
+
+-- Base event notifications: delete or time/location change
+drop trigger if exists trg_notify_team_events on public.team_events;
+drop function if exists public.trg_notify_team_events();
+
+create or replace function public.trg_notify_team_events()
+returns trigger
+language plpgsql
+security definer
+set search_path = public
+as $trg_events_notify$
+begin
+  if TG_OP = 'DELETE' then
+    -- Notify all team members that the event (series) was deleted
+    insert into public.user_notifications (user_id, kind, team_id, payload)
+    select m.user_id, 'event_deleted', OLD.team_id,
+           jsonb_build_object(
+             'event_id', OLD.id,
+             'title', OLD.title,
+             'starts_at', OLD.starts_at,
+             'ends_at', OLD.ends_at,
+             'by', auth.uid(),
+             'by_name', public.user_display_name(auth.uid())
+           )
+    from public.team_members m
+    where m.team_id = OLD.team_id;
+    return OLD;
+
+  elsif TG_OP = 'UPDATE' then
+    -- Only notify if base time or location changed
+    if (NEW.location is distinct from OLD.location)
+       or (NEW.starts_at is distinct from OLD.starts_at)
+       or (NEW.ends_at   is distinct from OLD.ends_at)
+    then
+      insert into public.user_notifications (user_id, kind, team_id, payload)
+      select distinct tea.user_id, 'event_changed', NEW.team_id,
+             jsonb_build_object(
+               'event_id', NEW.id,
+               'title', NEW.title,
+               'old_location', OLD.location, 'new_location', NEW.location,
+               'old_starts_at', OLD.starts_at, 'new_starts_at', NEW.starts_at,
+               'old_ends_at', OLD.ends_at, 'new_ends_at', NEW.ends_at,
+               'by', auth.uid(),
+               'by_name', public.user_display_name(auth.uid())
+             )
+      from public.team_event_attendance tea
+      where tea.event_id = NEW.id;
+    end if;
+    return NEW;
+  end if;
+
+  return null;
+end;
+$trg_events_notify$;
+
+create trigger trg_notify_team_events
+after update or delete on public.team_events
+for each row execute procedure public.trg_notify_team_events();
+
+-- Occurrence notifications: cancel or time/location change via overrides
+drop trigger if exists trg_notify_event_overrides on public.team_event_overrides;
+drop function if exists public.trg_notify_event_overrides();
+
+create or replace function public.trg_notify_event_overrides()
+returns trigger
+language plpgsql
+security definer
+set search_path = public
+as $trg_overrides_notify$
+declare
+  v_team uuid;
+  v_title text;
+begin
+  if TG_OP = 'DELETE' then
+    select team_id, title into v_team, v_title from public.team_events where id = OLD.event_id;
+  else
+    select team_id, title into v_team, v_title from public.team_events where id = NEW.event_id;
+  end if;
+
+  if TG_OP in ('INSERT','UPDATE') then
+    -- Cancelation newly set
+    if NEW.canceled and (TG_OP = 'INSERT' or coalesce(OLD.canceled,false) = false) then
+      insert into public.user_notifications (user_id, kind, team_id, payload)
+      select tea.user_id, 'occurrence_canceled', v_team,
+             jsonb_build_object(
+               'event_id', NEW.event_id,
+               'title', v_title,
+               'occ_start', NEW.occ_start,
+               'by', auth.uid(),
+               'by_name', public.user_display_name(auth.uid())
+             )
+      from public.team_event_attendance tea
+      where tea.event_id = NEW.event_id and tea.occ_start = NEW.occ_start;
+      return NEW;
+    end if;
+
+    -- Edited fields present or changed
+    if (TG_OP = 'INSERT' and (NEW.starts_at is not null or NEW.ends_at is not null or NEW.location is not null))
+       or (TG_OP = 'UPDATE' and ((NEW.starts_at is distinct from OLD.starts_at) or (NEW.ends_at is distinct from OLD.ends_at) or (NEW.location is distinct from OLD.location)))
+    then
+      insert into public.user_notifications (user_id, kind, team_id, payload)
+      select tea.user_id, 'occurrence_changed', v_team,
+             jsonb_build_object(
+               'event_id', NEW.event_id,
+               'title', v_title,
+               'occ_start', NEW.occ_start,
+               'new_starts_at', NEW.starts_at,
+               'new_ends_at',   NEW.ends_at,
+               'new_location',  NEW.location,
+               'by', auth.uid(),
+               'by_name', public.user_display_name(auth.uid())
+             )
+      from public.team_event_attendance tea
+      where tea.event_id = NEW.event_id and tea.occ_start = NEW.occ_start;
+      return NEW;
+    end if;
+
+    return NEW;
+  elsif TG_OP = 'DELETE' then
+    -- Clearing an override: no notification
+    return OLD;
+  end if;
+
+  return null;
+end;
+$trg_overrides_notify$;
+
+create trigger trg_notify_event_overrides
+after insert or update or delete on public.team_event_overrides
+for each row execute procedure public.trg_notify_event_overrides();
+
+notify pgrst, 'reload schema';
+
+-- ====================================================
 -- 7) Team Invitations: table, policies, RPCs
 -- ====================================================
 
@@ -1017,6 +1156,7 @@ declare
   v_self boolean;
   v_target_admin boolean;
   v_admin_count int;
+  v_target_name text;
 begin
   v_self := (p_user_id = auth.uid());
 
@@ -1057,6 +1197,466 @@ end;
 $$;
 
 grant execute on function public.remove_member(uuid, uuid) to authenticated;
+
+notify pgrst, 'reload schema';
+
+-- ====================================================
+-- 9) Team change log (90-day feed)
+-- ====================================================
+
+create table if not exists public.team_change_log (
+  id              uuid primary key default gen_random_uuid(),
+  team_id         uuid not null references public.teams(id) on delete cascade,
+  actor_user_id   uuid references auth.users(id),
+  action          text not null, -- e.g., 'member_removed','role_changed','event_created','event_deleted','event_updated','invite_sent','invite_accepted','invite_declined','invite_canceled','attendance_changed','occurrence_canceled','occurrence_edited','occurrence_override_cleared','team_renamed'
+  details         jsonb not null default '{}'::jsonb,
+  created_at      timestamptz not null default now()
+);
+
+alter table public.team_change_log enable row level security;
+
+drop policy if exists "log select if member" on public.team_change_log;
+create policy "log select if member"
+on public.team_change_log for select
+to authenticated
+using (
+  exists (
+    select 1 from public.team_members m
+    where m.team_id = team_change_log.team_id and m.user_id = auth.uid()
+  )
+);
+
+-- Helper to resolve actor name in feeds
+drop view if exists public.team_change_log_with_names;
+create view public.team_change_log_with_names as
+select
+  l.id,
+  l.team_id,
+  l.actor_user_id,
+  coalesce(
+    u.raw_user_meta_data->>'display_name',
+    u.raw_user_meta_data->>'full_name',
+    u.raw_user_meta_data->>'name',
+    split_part(u.email, '@', 1),
+    'Unknown'
+  ) as actor_name,
+  l.action,
+  l.details,
+  l.created_at
+from public.team_change_log l
+left join auth.users u on u.id = l.actor_user_id;
+
+grant select on public.team_change_log_with_names to authenticated;
+
+-- RPC: list updates for a team (last 90 days)
+drop function if exists public.list_team_updates(p_team_id uuid);
+create or replace function public.list_team_updates(p_team_id uuid)
+returns table (
+  id uuid,
+  created_at timestamptz,
+  action text,
+  actor_user_id uuid,
+  actor_name text,
+  details jsonb
+)
+language sql
+stable
+security definer
+set search_path = public
+as $$
+  select l.id, l.created_at, l.action, l.actor_user_id, l.actor_name, l.details
+  from public.team_change_log_with_names l
+  where l.team_id = p_team_id
+    and l.created_at >= now() - interval '90 days'
+    and exists (
+      select 1 from public.team_members m
+      where m.team_id = p_team_id and m.user_id = auth.uid()
+    )
+  order by l.created_at desc
+$$;
+grant execute on function public.list_team_updates(uuid) to authenticated;
+
+-- Helper to log from functions
+drop function if exists public._log_team_change(p_team_id uuid, p_action text, p_details jsonb);
+create or replace function public._log_team_change(p_team_id uuid, p_action text, p_details jsonb)
+returns void
+language plpgsql
+volatile
+security definer
+set search_path = public
+as $$
+begin
+  insert into public.team_change_log(team_id, actor_user_id, action, details)
+  values (p_team_id, auth.uid(), p_action, coalesce(p_details, '{}'::jsonb));
+end;
+$$;
+grant execute on function public._log_team_change(uuid, text, jsonb) to authenticated;
+
+-- Helper: consistent display name resolution
+drop function if exists public.user_display_name(p_user_id uuid);
+create or replace function public.user_display_name(p_user_id uuid)
+returns text
+language sql
+stable
+security definer
+set search_path = public
+as $$
+  select coalesce(
+    au.raw_user_meta_data->>'display_name',
+    au.raw_user_meta_data->>'full_name',
+    au.raw_user_meta_data->>'name',
+    split_part(au.email, '@', 1),
+    'Unknown'
+  )
+  from auth.users au where au.id = p_user_id
+$$;
+
+-- Hook logs into existing RPCs
+-- 1) remove_member: already replaced above; add log
+drop function if exists public.remove_member(p_team_id uuid, p_user_id uuid);
+create or replace function public.remove_member(p_team_id uuid, p_user_id uuid)
+returns void
+language plpgsql
+volatile
+security definer
+set search_path = public
+as $$
+declare
+  v_is_admin boolean;
+  v_self boolean;
+  v_target_admin boolean;
+  v_admin_count int;
+  v_target_name text;
+begin
+  v_self := (p_user_id = auth.uid());
+
+  select exists (
+    select 1 from public.team_members m
+    where m.team_id = p_team_id and m.user_id = auth.uid() and m.role = 'admin'
+  ) into v_is_admin;
+  if not v_self and not v_is_admin then
+    raise exception 'Only admins can remove other members';
+  end if;
+
+  select (role = 'admin') from public.team_members
+  where team_id = p_team_id and user_id = p_user_id
+  into v_target_admin;
+
+  if coalesce(v_target_admin,false) then
+    select count(*) from public.team_members
+    where team_id = p_team_id and role = 'admin'
+    into v_admin_count;
+    if v_admin_count <= 1 then
+      raise exception 'Cannot remove the last admin';
+    end if;
+  end if;
+
+  -- Remove membership
+  delete from public.team_members
+  where team_id = p_team_id and user_id = p_user_id;
+
+  -- Remove all attendance by this user for this team's events
+  delete from public.team_event_attendance tea
+  using public.team_events e
+  where tea.event_id = e.id
+    and e.team_id = p_team_id
+    and tea.user_id = p_user_id;
+
+  -- Log and notify (skip self-removal)
+  if not v_self then
+    v_target_name := public.user_display_name(p_user_id);
+    perform public._log_team_change(
+      p_team_id,
+      'member_removed',
+      jsonb_build_object('target_user_id', p_user_id, 'target_name', v_target_name)
+    );
+    insert into public.user_notifications (user_id, kind, team_id, payload)
+    values (
+      p_user_id,
+      'removed_from_team',
+      p_team_id,
+      jsonb_build_object('by', auth.uid(), 'by_name', public.user_display_name(auth.uid()))
+    );
+  end if;
+end;
+$$;
+grant execute on function public.remove_member(uuid, uuid) to authenticated;
+
+-- 2) set_member_role: log promotion/demotion
+drop function if exists public.set_member_role(p_team_id uuid, p_user_id uuid, p_role text);
+create or replace function public.set_member_role(p_team_id uuid, p_user_id uuid, p_role text)
+returns void
+language plpgsql
+volatile
+security definer
+set search_path = public
+as $$
+declare
+  v_is_admin boolean;
+  v_admin_count int;
+  v_new_role public.team_role := p_role::public.team_role;
+  v_target_name text;
+  v_old_role public.team_role;
+begin
+  if p_role not in ('admin','member') then
+    raise exception 'Invalid role %', p_role;
+  end if;
+  select exists (
+    select 1 from public.team_members m
+    where m.team_id = p_team_id and m.user_id = auth.uid() and m.role = 'admin'
+  ) into v_is_admin;
+  if not v_is_admin then
+    raise exception 'Only team admins can change roles';
+  end if;
+  if v_new_role = 'member' then
+    select count(*) from public.team_members
+    where team_id = p_team_id and role = 'admin'
+    into v_admin_count;
+    if v_admin_count <= 1 then
+      if exists (select 1 from public.team_members where team_id = p_team_id and user_id = p_user_id and role = 'admin') then
+        raise exception 'Cannot demote the last admin';
+      end if;
+    end if;
+  end if;
+  -- current role
+  select role into v_old_role from public.team_members where team_id = p_team_id and user_id = p_user_id;
+  if v_old_role = v_new_role then
+    return;
+  end if;
+
+  update public.team_members set role = v_new_role where team_id = p_team_id and user_id = p_user_id;
+  v_target_name := public.user_display_name(p_user_id);
+  perform public._log_team_change(
+    p_team_id,
+    'role_changed',
+    jsonb_build_object('target_user_id', p_user_id, 'target_name', v_target_name, 'new_role', v_new_role)
+  );
+
+  -- Notify target for admin grant/revoke
+  if v_new_role = 'admin' then
+    insert into public.user_notifications (user_id, kind, team_id, payload)
+    values (
+      p_user_id,
+      'role_admin_granted',
+      p_team_id,
+      jsonb_build_object('by', auth.uid(), 'by_name', public.user_display_name(auth.uid()))
+    );
+  elsif v_new_role = 'member' then
+    insert into public.user_notifications (user_id, kind, team_id, payload)
+    values (
+      p_user_id,
+      'role_admin_revoked',
+      p_team_id,
+      jsonb_build_object('by', auth.uid(), 'by_name', public.user_display_name(auth.uid()))
+    );
+  end if;
+end;
+$$;
+grant execute on function public.set_member_role(uuid, uuid, text) to authenticated;
+
+-- 3) rename_team: log rename
+drop function if exists public.rename_team(p_team_id uuid, p_name text);
+create or replace function public.rename_team(p_team_id uuid, p_name text)
+returns table (id uuid, name text, display_id text)
+language plpgsql
+volatile
+security definer
+set search_path = public
+as $$
+declare v_old text;
+begin
+  select name into v_old from public.teams where id = p_team_id;
+  update public.teams set name = p_name where id = p_team_id;
+  perform public._log_team_change(p_team_id, 'team_renamed', jsonb_build_object('old_name', v_old, 'new_name', p_name));
+  return query select t.id, t.name, t.display_id from public.teams t where t.id = p_team_id;
+end;
+$$;
+grant execute on function public.rename_team(uuid, text) to authenticated;
+
+-- 4) Invitations: log offer/accept/decline/cancel
+drop function if exists public.add_member_by_email(p_team_id uuid, p_email text);
+drop function if exists public.add_member_by_email(p_team_id uuid, p_email text, p_role text);
+create or replace function public.add_member_by_email(p_team_id uuid, p_email text, p_role text default 'member')
+returns void
+language plpgsql
+volatile
+security definer
+set search_path = public, auth
+as $$
+declare v_user uuid; v_is_admin boolean; v_role public.team_role := coalesce(p_role, 'member')::public.team_role;
+begin
+  select exists (select 1 from public.team_members m where m.team_id = p_team_id and m.user_id = auth.uid() and m.role = 'admin') into v_is_admin;
+  if not v_is_admin then raise exception 'Only team admins can invite members'; end if;
+  select id into v_user from auth.users where lower(email) = lower(p_email);
+  if v_user is null then raise exception 'User with that email does not exist'; end if;
+  insert into public.team_invitations (team_id, user_id, role, status, invited_by)
+  values (p_team_id, v_user, v_role, 'invited', auth.uid())
+  on conflict (team_id, user_id) do update set role = excluded.role, status = 'invited', invited_by = auth.uid(), created_at = now();
+  perform public._log_team_change(
+    p_team_id,
+    'invite_sent',
+    jsonb_build_object('target_user_id', v_user, 'target_name', public.user_display_name(v_user), 'role', v_role)
+  );
+end;
+$$;
+grant execute on function public.add_member_by_email(uuid, text, text) to authenticated;
+
+drop function if exists public.accept_invitation(p_team_id uuid);
+create or replace function public.accept_invitation(p_team_id uuid)
+returns void
+language plpgsql
+volatile
+security definer
+set search_path = public
+as $$
+declare v_role public.team_role;
+begin
+  select role into v_role from public.team_invitations where team_id = p_team_id and user_id = auth.uid() and status = 'invited';
+  if v_role is null then raise exception 'No pending invitation for this team'; end if;
+  update public.team_invitations set status = 'accepted' where team_id = p_team_id and user_id = auth.uid();
+  insert into public.team_members (team_id, user_id, role) values (p_team_id, auth.uid(), v_role)
+  on conflict (team_id, user_id) do update set role = excluded.role;
+  perform public._log_team_change(
+    p_team_id,
+    'invite_accepted',
+    jsonb_build_object('target_user_id', auth.uid(), 'target_name', public.user_display_name(auth.uid()), 'role', v_role)
+  );
+end;
+$$;
+grant execute on function public.accept_invitation(uuid) to authenticated;
+
+drop function if exists public.decline_invitation(p_team_id uuid);
+create or replace function public.decline_invitation(p_team_id uuid)
+returns void
+language plpgsql
+volatile
+security definer
+set search_path = public
+as $$
+begin
+  update public.team_invitations set status = 'declined' where team_id = p_team_id and user_id = auth.uid() and status = 'invited';
+  perform public._log_team_change(
+    p_team_id,
+    'invite_declined',
+    jsonb_build_object('target_user_id', auth.uid(), 'target_name', public.user_display_name(auth.uid()))
+  );
+end;
+$$;
+grant execute on function public.decline_invitation(uuid) to authenticated;
+
+-- For cancel invite via direct update, add trigger to log when status becomes canceled
+drop trigger if exists trg_log_invite_cancel on public.team_invitations;
+drop function if exists public.trg_team_invitations_log_cancel();
+create or replace function public.trg_team_invitations_log_cancel()
+returns trigger
+language plpgsql
+security definer
+set search_path = public
+as $$
+begin
+  if TG_OP = 'UPDATE' and NEW.status = 'canceled' and coalesce(OLD.status,'') <> 'canceled' then
+    perform public._log_team_change(
+      NEW.team_id,
+      'invite_canceled',
+      jsonb_build_object('target_user_id', NEW.user_id, 'target_name', public.user_display_name(NEW.user_id))
+    );
+  end if;
+  return NEW;
+end;
+$$;
+create trigger trg_log_invite_cancel after update on public.team_invitations
+for each row execute procedure public.trg_team_invitations_log_cancel();
+
+-- Events: triggers for create/update/delete
+drop function if exists public.trg_team_events_log();
+create or replace function public.trg_team_events_log()
+returns trigger
+language plpgsql
+security definer
+set search_path = public
+as $$
+begin
+  if TG_OP = 'INSERT' then
+    perform public._log_team_change(NEW.team_id, 'event_created', jsonb_build_object('event_id', NEW.id, 'title', NEW.title));
+    return NEW;
+  elsif TG_OP = 'UPDATE' then
+    perform public._log_team_change(NEW.team_id, 'event_updated', jsonb_build_object('event_id', NEW.id, 'title', NEW.title));
+    return NEW;
+  elsif TG_OP = 'DELETE' then
+    perform public._log_team_change(OLD.team_id, 'event_deleted', jsonb_build_object('event_id', OLD.id, 'title', OLD.title));
+    return OLD;
+  end if;
+  return null;
+end;
+$$;
+drop trigger if exists trg_log_team_events on public.team_events;
+create trigger trg_log_team_events after insert or update or delete on public.team_events
+for each row execute procedure public.trg_team_events_log();
+
+-- Overrides: insert/update/delete
+drop function if exists public.trg_team_event_overrides_log();
+create or replace function public.trg_team_event_overrides_log()
+returns trigger
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare v_team uuid; v_title text;
+begin
+  if TG_OP in ('INSERT','UPDATE') then
+    select team_id, title into v_team, v_title from public.team_events where id = NEW.event_id;
+    if NEW.canceled and (TG_OP='INSERT' or coalesce(OLD.canceled,false) = false) then
+      perform public._log_team_change(v_team, 'occurrence_canceled', jsonb_build_object('event_id', NEW.event_id, 'occ_start', NEW.occ_start, 'title', v_title));
+    else
+      perform public._log_team_change(v_team, 'occurrence_edited', jsonb_build_object('event_id', NEW.event_id, 'occ_start', NEW.occ_start, 'title', v_title));
+    end if;
+    return NEW;
+  elsif TG_OP = 'DELETE' then
+    select team_id, title into v_team, v_title from public.team_events where id = OLD.event_id;
+    perform public._log_team_change(v_team, 'occurrence_override_cleared', jsonb_build_object('event_id', OLD.event_id, 'occ_start', OLD.occ_start, 'title', v_title));
+    return OLD;
+  end if;
+  return null;
+end;
+$$;
+drop trigger if exists trg_log_team_event_overrides on public.team_event_overrides;
+create trigger trg_log_team_event_overrides after insert or update or delete on public.team_event_overrides
+for each row execute procedure public.trg_team_event_overrides_log();
+
+-- Attendance: log when user toggles
+drop function if exists public.trg_team_event_attendance_log();
+create or replace function public.trg_team_event_attendance_log()
+returns trigger
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare v_team uuid; v_title text; v_uid uuid := coalesce(auth.uid(), NEW.user_id);
+begin
+  select e.team_id, e.title into v_team, v_title from public.team_events e where e.id = (case when TG_OP='DELETE' then OLD.event_id else NEW.event_id end);
+  if TG_OP='INSERT' then
+    perform public._log_team_change(
+      v_team,
+      'attendance_changed',
+      jsonb_build_object('event_id', NEW.event_id, 'occ_start', NEW.occ_start, 'attending', NEW.attending, 'by', v_uid, 'by_name', public.user_display_name(v_uid), 'title', v_title)
+    );
+    return NEW;
+  elsif TG_OP='UPDATE' then
+    if coalesce(OLD.attending,false) <> coalesce(NEW.attending,false) then
+      perform public._log_team_change(
+        v_team,
+        'attendance_changed',
+        jsonb_build_object('event_id', NEW.event_id, 'occ_start', NEW.occ_start, 'attending', NEW.attending, 'by', v_uid, 'by_name', public.user_display_name(v_uid), 'title', v_title)
+      );
+    end if;
+    return NEW;
+  end if;
+  return null;
+end;
+$$;
+drop trigger if exists trg_log_team_event_attendance on public.team_event_attendance;
+create trigger trg_log_team_event_attendance after insert or update on public.team_event_attendance
+for each row execute procedure public.trg_team_event_attendance_log();
 
 notify pgrst, 'reload schema';
 

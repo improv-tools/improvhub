@@ -144,6 +144,11 @@ function validateTimes({ title, startDate, startTime, endTime }) {
   if (!startDate) errs.push("Start date is required.");
   if (!startTime) errs.push("Start time is required.");
   if (!endTime) errs.push("End time is required.");
+  // Disallow end time earlier than or equal to start time on the same day
+  if (startTime && endTime && startDate) {
+    // 'HH:MM' string comparison is safe here
+    if (endTime <= startTime) errs.push("End time must be after start time.");
+  }
   return errs;
 }
 
@@ -304,6 +309,7 @@ export default function CalendarPanel({ team }) {
 
   /* ------------------------------ Edit Series ------------------------------ */
   const [sEd, setSEd] = useState(null);
+  const [sEndTouched, setSEndTouched] = useState(false);
   const [sRecurrenceMode, setSRecurrenceMode] = useState("none"); // 'none'|'until'|'count'
 
   const openEditSeries = (eventId) => {
@@ -323,6 +329,7 @@ export default function CalendarPanel({ team }) {
     }
     const mode = (e.recur_freq === "none") ? "none" : (e.recur_until ? "until" : "count");
 
+    const durationMin = Math.max(1, Math.round((new Date(e.ends_at) - new Date(e.starts_at)) / 60000));
     setSEd({
       ...e,
       recur_byday,
@@ -330,7 +337,9 @@ export default function CalendarPanel({ team }) {
       recur_week_of_month,
       _s: splitLocal(e.starts_at),
       _e: splitLocal(e.ends_at),
+      _durMin: durationMin,
     });
+    setSEndTouched(false);
     setSRecurrenceMode(mode);
     setBanner(""); setBannerErr("");
     setMode("editSeries");
@@ -688,10 +697,30 @@ export default function CalendarPanel({ team }) {
           </Row>
 
           <Row>
-            <Input type="date" value={sEd._s.date} onChange={(ev)=>setSEd({ ...sEd, _s: { ...sEd._s, date: ev.target.value } })} />
-            <Input type="time" value={sEd._s.time} onChange={(ev)=>setSEd({ ...sEd, _s: { ...sEd._s, time: ev.target.value } })} />
+            <Input type="date" value={sEd._s.date} onChange={(ev)=>{
+              const newDate = ev.target.value;
+              let next = { ...sEd, _s: { ...sEd._s, date: newDate } };
+              if (!sEndTouched && sEd._durMin) {
+                const base = new Date(`${newDate}T${sEd._s.time}:00`);
+                const end = new Date(base.getTime() + sEd._durMin*60000);
+                const pad = (n)=> String(n).padStart(2, '0');
+                next = { ...next, _e: { ...sEd._e, time: `${pad(end.getHours())}:${pad(end.getMinutes())}` } };
+              }
+              setSEd(next);
+            }} />
+            <Input type="time" value={sEd._s.time} onChange={(ev)=>{
+              const newTime = ev.target.value;
+              let next = { ...sEd, _s: { ...sEd._s, time: newTime } };
+              if (!sEndTouched && sEd._durMin) {
+                const base = new Date(`${sEd._s.date}T${newTime}:00`);
+                const end = new Date(base.getTime() + sEd._durMin*60000);
+                const pad = (n)=> String(n).padStart(2, '0');
+                next = { ...next, _e: { ...sEd._e, time: `${pad(end.getHours())}:${pad(end.getMinutes())}` } };
+              }
+              setSEd(next);
+            }} />
             <span style={{ alignSelf:"center", opacity:0.7 }}>→</span>
-            <Input type="time" value={sEd._e.time} onChange={(ev)=>setSEd({ ...sEd, _e: { ...sEd._e, time: ev.target.value } })} />
+            <Input type="time" value={sEd._e.time} onChange={(ev)=>{ setSEndTouched(true); setSEd({ ...sEd, _e: { ...sEd._e, time: ev.target.value } }); }} />
           </Row>
 
           {sRecurrenceMode !== "none" && (
