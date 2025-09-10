@@ -950,9 +950,10 @@ select
   tea.attending,
   e.team_id,
   coalesce(
+    au.raw_user_meta_data->>'display_name',
     au.raw_user_meta_data->>'full_name',
     au.raw_user_meta_data->>'name',
-    au.email,
+    split_part(au.email, '@', 1),
     'Unknown'
   ) as full_name,
   (tea.user_id = auth.uid()) as _is_me

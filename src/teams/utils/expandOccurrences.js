@@ -84,17 +84,16 @@ export function expandOccurrences(baseEvents, overrides, windowStartIso, windowE
     const hasEnd = recur_count != null || recur_until != null;
     const maxOcc = recur_count != null ? Math.min(Number(recur_count) || 0, 12)
                                        : (hasEnd ? 12 : Number.POSITIVE_INFINITY);
-
-    let occurrences = 0;
+    // Sequence index across the series (1-based while counting); only used for count-based series label
+    let seq = 0;
 
     const bounded = (d) => {
-      if (occurrences >= maxOcc) return false;
+      if (seq >= maxOcc) return false; // respect series cap
       if (recur_until && d > new Date(recur_until)) return false;
       return true;
     };
 
-    const pushOcc = (occStart) => {
-      if (occurrences >= maxOcc) return;
+    const pushOcc = (occStart, occIndex) => {
       const occStartIso = iso(occStart);
       const occEndIso = iso(new Date(occStart.getTime() + durMs));
       if (occStart < winStart || occStart > winEnd) return;
@@ -114,20 +113,24 @@ export function expandOccurrences(baseEvents, overrides, windowStartIso, windowE
         category: ov?.category ?? category,
         tz: ov?.tz ?? tz,
         overridden: !!ov && !ov.canceled,
+        // Only expose index/total when count-based; otherwise leave undefined
+        occ_index: recur_count != null ? occIndex : undefined,
+        occ_total: recur_count != null ? Number(recur_count) : undefined,
       });
-      occurrences++;
     };
 
     // ---------- Expand ----------
     if (freq === "none") {
-      pushOcc(baseStart);
+      // Single occurrence, not a series
+      pushOcc(baseStart, 0);
       continue;
     }
 
     if (freq === "daily") {
       let t = new Date(baseStart);
-      while (t <= winEnd && bounded(t)) {
-        if (t >= winStart) pushOcc(t);
+      while (bounded(t) && (!hasEnd ? t <= winEnd : true)) {
+        seq++;
+        if (t >= winStart && t <= winEnd) pushOcc(t, seq - 1);
         t = addDays(t, 1);
       }
       continue;
@@ -139,14 +142,15 @@ export function expandOccurrences(baseEvents, overrides, windowStartIso, windowE
       const weekdays = days.map((d)=>DOW.indexOf(d)).filter((x)=>x>=0).sort((a,b)=>a-b);
 
       let anchor = new Date(Date.UTC(baseStart.getUTCFullYear(), baseStart.getUTCMonth(), baseStart.getUTCDate()));
-      while (anchor <= winEnd && bounded(anchor)) {
+      while (bounded(anchor) && (!hasEnd ? anchor <= winEnd : true)) {
         for (const wd of weekdays) {
           const day = addDays(anchor, (wd - anchor.getUTCDay() + 7) % 7);
           if (!bounded(day)) break;
           const occ = new Date(day);
           occ.setUTCHours(baseStart.getUTCHours(), baseStart.getUTCMinutes(), baseStart.getUTCSeconds(), baseStart.getUTCMilliseconds());
-          if (occ >= winStart && occ <= winEnd) pushOcc(occ);
-          if (occurrences >= maxOcc) break;
+          seq++;
+          if (occ >= winStart && occ <= winEnd) pushOcc(occ, seq - 1);
+          if (seq >= maxOcc) break;
         }
         anchor = addDays(anchor, 7);
       }
@@ -155,7 +159,7 @@ export function expandOccurrences(baseEvents, overrides, windowStartIso, windowE
 
     if (freq === "monthly") {
       let t = new Date(Date.UTC(baseStart.getUTCFullYear(), baseStart.getUTCMonth(), 1));
-      while (t <= winEnd && bounded(t)) {
+      while (bounded(t) && (!hasEnd ? t <= winEnd : true)) {
         const y = t.getUTCFullYear();
         const m = t.getUTCMonth();
         let dayDate = null;
@@ -175,7 +179,10 @@ export function expandOccurrences(baseEvents, overrides, windowStartIso, windowE
         if (dayDate) {
           const occ = new Date(dayDate);
           occ.setUTCHours(baseStart.getUTCHours(), baseStart.getUTCMinutes(), baseStart.getUTCSeconds(), baseStart.getUTCMilliseconds());
-          if (occ >= winStart && occ <= winEnd && bounded(occ)) pushOcc(occ);
+          if (bounded(occ)) {
+            seq++;
+            if (occ >= winStart && occ <= winEnd) pushOcc(occ, seq - 1);
+          }
         }
         t = addMonths(t, 1);
       }

@@ -1,6 +1,7 @@
 // src/teams/components/CalendarPanel.jsx
 import { useMemo, useState, useEffect } from "react";
 import { Button, GhostButton, DangerButton, Label, Input, ErrorText, InfoText, Row } from "components/ui";
+import { useAuth } from "auth/AuthContext";
 import useCalendarData from "../hooks/useCalendarData";
 import { composeStartEndISO, splitLocal, fmtRangeLocal, browserTZ } from "../utils/datetime";
 import { listAttendance, setAttendance } from "../teams.api";
@@ -148,6 +149,7 @@ function validateTimes({ title, startDate, startTime, endTime }) {
 
 /* -------------------------------- Component ------------------------------- */
 export default function CalendarPanel({ team }) {
+  const { displayName } = useAuth();
   const tz = browserTZ();
   const today = new Date();
   const windowStartIso = new Date(today.getFullYear(), today.getMonth(), today.getDate()).toISOString();
@@ -170,15 +172,16 @@ export default function CalendarPanel({ team }) {
     try {
       const rows = await listAttendance(team.id, windowStartIso, windowEndIso);
       const map = new Map();
-      (rows || [])
-        .filter(r => r.attending)
-        .forEach(r => {
-          const k = `${r.event_id}|${new Date(r.occ_start).toISOString()}`;
-          const arr = map.get(k) || [];
-          arr.push({ name: r.full_name || "Unknown", isMe: !!r._is_me });
-          map.set(k, arr);
-        });
-      setAttendanceMap(map);
+     (rows || [])
+       .filter(r => r.attending)
+       .forEach(r => {
+         const k = `${r.event_id}|${new Date(r.occ_start).toISOString()}`;
+         const arr = map.get(k) || [];
+         const n = r._is_me && displayName ? displayName : (r.full_name || "Unknown");
+         arr.push({ name: n, isMe: !!r._is_me });
+         map.set(k, arr);
+       });
+     setAttendanceMap(map);
     } catch (e) {
       // Don't break the page if the view isn't ready
       console.warn("attendance load failed:", e?.message || e);
@@ -845,19 +848,43 @@ export default function CalendarPanel({ team }) {
                         {typeMeta.icon}
                       </span>
                       <div>
-                        <div
-                          style={styles.titleLink}
-                          onClick={() => {
-                            setOpenDescKeys(prev => {
-                              const next = new Set(prev);
-                              next.has(key) ? next.delete(key) : next.add(key);
-                              return next;
-                            });
-                          }}
-                        >
-                          {occ.title || "(untitled)"}{" "}
-                          <span style={{ opacity: 0.7, fontSize: 12 }}>· {cap(occ.category || "rehearsal")}</span>
-                          {occ.overridden && <span style={{ marginLeft: 8, fontSize: 12, opacity: 0.7 }}>(edited)</span>}
+                        {/* Header row: title + actions aligned */}
+                        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8 }}>
+                          <div>
+                            <div
+                              style={styles.titleLink}
+                              onClick={() => {
+                                setOpenDescKeys(prev => {
+                                  const next = new Set(prev);
+                                  next.has(key) ? next.delete(key) : next.add(key);
+                                  return next;
+                                });
+                              }}
+                            >
+                              {occ.title || "(untitled)"}{" "}
+                              {(() => {
+                                const showSeriesIndex = isRecurring && Number.isFinite(occ.occ_index) && Number.isFinite(occ.occ_total);
+                                const ak = `${occ.event_id}|${occ.base_start}`;
+                                const attendingCount = (attendanceMap.get(ak) || []).length;
+                                return (
+                                  <>
+                                    {showSeriesIndex && (
+                                      <span style={{ opacity: 0.7, fontSize: 12 }}>
+                                        · {occ.occ_index + 1} of {occ.occ_total}
+                                      </span>
+                                    )}
+                                    {attendingCount > 0 && (
+                                      <span style={{ opacity: 0.7, fontSize: 12, marginLeft: 6 }}>
+                                        · {attendingCount} attending
+                                      </span>
+                                    )}
+                                  </>
+                                );
+                              })()}
+                              {occ.overridden && <span style={{ marginLeft: 8, fontSize: 12, opacity: 0.7 }}>(edited)</span>}
+                            </div>
+                          </div>
+                          {/* actions moved back to right column */}
                         </div>
                         <div style={{ opacity: 0.8, fontSize: 12 }}>
                           {fmtRangeLocal(occ.starts_at, occ.ends_at, occ.tz)}
@@ -873,30 +900,41 @@ export default function CalendarPanel({ team }) {
 
                         {/* Attendance UI */}
                         {(() => {
-                          const ak = `${occ.event_id}|${occ.base_start}`;
-                          const arr = attendanceMap.get(ak) || [];
-                          const mine = arr.some(a => a.isMe);
-                          const names = arr.map(a => a.name);
+  const ak = `${occ.event_id}|${occ.base_start}`;
+  const arr = attendanceMap.get(ak) || [];
+  const mine = arr.some(a => a.isMe);
 
-                          return (
-                            <div style={{ marginTop: 6, display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
-                              <Button onClick={() => toggleAttendance(occ)}>
-                                {mine ? "Cancel my attendance" : "I’m attending"}
-                              </Button>
+  return (
+    <div style={{ marginTop: 6, display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+      <button
+        onClick={() => toggleAttendance(occ)}
+        title={mine ? "Click to mark Not Attending" : "Click to mark Attending"}
+        style={{
+          border: `1px solid ${mine ? "#34d399" : "#f87171"}`,
+          borderRadius: 999,
+          padding: "6px 10px",
+          fontSize: 12,
+          cursor: "pointer",
+          color: mine ? "#34d399" : "#f87171",
+          background: "transparent",
+        }}
+      >
+        {mine ? "Attending" : "Not Attending"}
+      </button>
 
-                              {names.length > 0 && (
-                                <div style={{ display: "flex", gap: 8, flexWrap: "wrap", opacity: 0.9 }}>
-                                  {names.map((n, i) => (
-                                    <span key={i}
-                                      style={{ border: "1px solid rgba(255,255,255,0.2)", padding: "2px 6px", borderRadius: 6 }}>
-                                      {n}
-                                    </span>
-                                  ))}
-                                </div>
-                              )}
-                            </div>
-                          );
-                        })()}
+      {arr.length > 0 && (
+        <div style={{ display: "flex", gap: 8, flexWrap: "wrap", opacity: 0.9 }}>
+          {arr.map((a, i) => (
+            <span key={i}
+              style={{ border: "1px solid rgba(255,255,255,0.2)", padding: "2px 6px", borderRadius: 6 }}>
+              {a.name}{a.isMe ? " (you)" : ""}
+            </span>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+})()}
 
                         {openDescKeys.has(key) && occ.description && (
                           <div style={{ marginTop: 6, opacity: 0.9 }}>
@@ -911,14 +949,9 @@ export default function CalendarPanel({ team }) {
                         <>
                           <GhostButton onClick={() => openEditSeries(occ.event_id)}>Edit series</GhostButton>
                           <GhostButton onClick={() => openEditOccurrence(occ)}>Edit occurrence</GhostButton>
-                          {/* Clear override removed from list */}
-                          {/* Cancel occurrence moved to edit occurrence */}
                         </>
                       ) : (
-                        <>
-                          <GhostButton onClick={() => openEditSeries(occ.event_id)}>Edit event</GhostButton>
-                          {/* Delete event lives in edit panel */}
-                        </>
+                        <GhostButton onClick={() => openEditSeries(occ.event_id)}>Edit event</GhostButton>
                       )}
                     </Row>
                   </li>
