@@ -81,8 +81,22 @@ export default function Dashboard() {
                         <div style={{ opacity: 0.7, fontSize: 12 }}>ID: {inv.display_id} · role: {inv.role}</div>
                       </div>
                       <Row>
-                        <Button onClick={async ()=> { await acceptInvitation(inv.team_id); await loadInvites(); }}>Accept</Button>
-                        <GhostButton onClick={async ()=> { await declineInvitation(inv.team_id); await loadInvites(); }}>Decline</GhostButton>
+                        <Button onClick={async ()=> {
+                          try {
+                            await acceptInvitation(inv.team_id);
+                            await loadInvites();
+                          } catch (e) {
+                            setInvErr(e?.message || 'Failed to accept team invite');
+                          }
+                        }}>Accept</Button>
+                        <GhostButton onClick={async ()=> {
+                          try {
+                            await declineInvitation(inv.team_id);
+                            await loadInvites();
+                          } catch (e) {
+                            setInvErr(e?.message || 'Failed to decline team invite');
+                          }
+                        }}>Decline</GhostButton>
                       </Row>
                     </li>
                   ))}

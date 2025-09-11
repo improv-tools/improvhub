@@ -46,7 +46,10 @@ export async function addMemberByEmailRPC(teamId, email, role = "member") {
     p_email: email,
     p_role: role,
   });
-  if (error) throw new Error(error.message);
+  if (error) {
+    const msg = error?.message || 'Unknown error';
+    throw new Error(`Invite member failed: ${msg}`);
+  }
 }
 
 export async function removeMemberRPC(teamId, userId) {
@@ -247,13 +250,37 @@ export async function listTeamShowInvitations(teamId) {
 export async function acceptTeamShowInvite(eventId, baseStartIso) {
   const { error } = await supabase
     .rpc('accept_team_show_invite', { p_event_id: eventId, p_occ_start: baseStartIso });
-  if (error) throw new Error(error.message);
+  if (error) {
+    const msg = error?.message || error?.hint || error?.details || JSON.stringify(error);
+    throw new Error(`[accept_team_show_invite] event=${eventId} occ=${baseStartIso}: ${msg}`);
+  }
+}
+
+export async function acceptTeamShowInviteForTeam(eventId, baseStartIso, teamId) {
+  const { error } = await supabase
+    .rpc('accept_team_show_invite_for_team', { p_event_id: eventId, p_occ_start: baseStartIso, p_team_id: teamId });
+  if (error) {
+    const msg = error?.message || error?.hint || error?.details || JSON.stringify(error);
+    throw new Error(`[accept_team_show_invite_for_team] event=${eventId} occ=${baseStartIso} team=${teamId}: ${msg}`);
+  }
 }
 
 export async function declineTeamShowInvite(eventId, baseStartIso) {
   const { error } = await supabase
     .rpc('decline_team_show_invite', { p_event_id: eventId, p_occ_start: baseStartIso });
-  if (error) throw new Error(error.message);
+  if (error) {
+    const msg = error?.message || error?.hint || error?.details || JSON.stringify(error);
+    throw new Error(`[decline_team_show_invite] event=${eventId} occ=${baseStartIso}: ${msg}`);
+  }
+}
+
+export async function declineTeamShowInviteForTeam(eventId, baseStartIso, teamId) {
+  const { error } = await supabase
+    .rpc('decline_team_show_invite_for_team', { p_event_id: eventId, p_occ_start: baseStartIso, p_team_id: teamId });
+  if (error) {
+    const msg = error?.message || error?.hint || error?.details || JSON.stringify(error);
+    throw new Error(`[decline_team_show_invite_for_team] event=${eventId} occ=${baseStartIso} team=${teamId}: ${msg}`);
+  }
 }
 
 /* -------------------------- Show lineup: performances in calendar ------------- */

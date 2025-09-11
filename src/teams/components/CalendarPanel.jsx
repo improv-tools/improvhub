@@ -4,7 +4,7 @@ import { Button, GhostButton, DangerButton, Label, Input, Textarea, ErrorText, I
 import { useAuth } from "auth/AuthContext";
 import useCalendarData from "../hooks/useCalendarData";
 import { composeStartEndISO, splitLocal, fmtRangeLocal, browserTZ } from "../utils/datetime";
-import { listAttendance, setAttendance, listTeamShowInvitations, acceptTeamShowInvite, declineTeamShowInvite, listTeamShowPerformances, cancelTeamShowBooking } from "../teams.api";
+import { listAttendance, setAttendance, listTeamShowInvitations, acceptTeamShowInviteForTeam, declineTeamShowInviteForTeam, listTeamShowPerformances, cancelTeamShowBooking } from "../teams.api";
 
 const CATEGORIES = ["rehearsal", "social", "performance"];
 const TYPE_META = {
@@ -177,6 +177,8 @@ export default function CalendarPanel({ team }) {
       setShowBookings(rows || []);
     } catch (e) {
       console.warn('show bookings load failed:', e?.message || e);
+      // Surface error so users get feedback in the UI
+      setInvErr(e?.message || 'Failed to load show bookings');
       setShowBookings([]);
     }
   };
@@ -904,8 +906,22 @@ export default function CalendarPanel({ team }) {
                           <div style={{ opacity: 0.75, fontSize: 12 }}>Invited</div>
                         </div>
                         <div style={{ display:'flex', gap:8 }}>
-                          <Button onClick={async ()=> { await acceptTeamShowInvite(inv.event_id, inv.occ_start); await loadShowInvites(); }}>Accept</Button>
-                          <GhostButton onClick={async ()=> { await declineTeamShowInvite(inv.event_id, inv.occ_start); await loadShowInvites(); }}>Decline</GhostButton>
+                          <Button onClick={async ()=> {
+                            try {
+                              await acceptTeamShowInviteForTeam(inv.event_id, inv.occ_start, inv.team_id);
+                              await loadShowInvites();
+                            } catch (e) {
+                              setInvErr(e?.message || 'Failed to accept invite');
+                            }
+                          }}>Accept</Button>
+                          <GhostButton onClick={async ()=> {
+                            try {
+                              await declineTeamShowInviteForTeam(inv.event_id, inv.occ_start, inv.team_id);
+                              await loadShowInvites();
+                            } catch (e) {
+                              setInvErr(e?.message || 'Failed to decline invite');
+                            }
+                          }}>Decline</GhostButton>
                         </div>
                       </li>
                     ))}
@@ -1085,7 +1101,17 @@ export default function CalendarPanel({ team }) {
                         </div>
                       </div>
                       <Row>
-                        <DangerButton onClick={async ()=>{ if (!window.confirm('Cancel this booking?')) return; try { await cancelTeamShowBooking(b.event_id, b.occ_start); await loadShowBookings(); await loadShowInvites(); } catch(e){ console.warn(e); } }}>Cancel</DangerButton>
+                        <DangerButton onClick={async ()=>{
+                          if (!window.confirm('Cancel this booking?')) return;
+                          try {
+                            await cancelTeamShowBooking(b.event_id, b.occ_start);
+                            await loadShowBookings();
+                            await loadShowInvites();
+                          } catch(e) {
+                            console.warn(e);
+                            setInvErr(e?.message || 'Failed to cancel booking');
+                          }
+                        }}>Cancel</DangerButton>
                       </Row>
                     </li>
                   );

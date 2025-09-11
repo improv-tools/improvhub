@@ -203,18 +203,29 @@ export default function ShowCalendarPanel({ series }) {
       });
       // Invite any queued teams (by display_id)
       // - For single shows: create per-occurrence invite for this show
-      // - For recurring shows: add to series default lineup (applies to all nights)
+      // - For recurring shows: invite to all occurrences (no series-level defaults anymore)
       if (Array.isArray(cLineupItems) && cLineupItems.length && created?.id) {
+        const inviteErrors = [];
         for (const it of cLineupItems) {
           try {
             const teamId = it.id || await resolveTeamIdByDisplayId(it.display_id);
-            if (!teamId) continue;
+            if (!teamId) {
+              inviteErrors.push(`Team not found: ${it.display_id || it.id || 'unknown'}`);
+              continue;
+            }
             if (cFreq === 'none') {
               await inviteTeamToShow(created.id, startIso, teamId);
             } else {
               await inviteTeamToSeries(created.id, teamId);
             }
-          } catch { /* ignore per-team errors */ }
+          } catch (e) {
+            const msg = e?.message || 'Unknown invite error';
+            inviteErrors.push(`${it.display_id || it.id || 'team'}: ${msg}`);
+            console.warn('Invite error', it, e);
+          }
+        }
+        if (inviteErrors.length) {
+          setBannerErr(`Show created, but some invites failed: ${inviteErrors.join('; ')}`);
         }
       }
       setCTitle(""); setCDescription(""); setCLocation("");
@@ -223,7 +234,7 @@ export default function ShowCalendarPanel({ series }) {
       setCEndMode("count"); setCUntilDate(""); setCCount(6);
       setCLineupItems([]); setCLineupInput(""); setCLineupErr("");
       setMode("list");
-      setBanner("Show created.");
+      if (!bannerErr) setBanner("Show created.");
     } catch (e) { setBannerErr(e.message || "Failed to create show"); }
   };
 
