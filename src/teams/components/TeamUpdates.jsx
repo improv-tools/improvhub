@@ -25,11 +25,14 @@ function fmtAction(a) {
   if (t === 'attendance_changed') return `${d.by_name || who} marked ${d.attending ? 'Attending' : 'Not Attending'} for “${tname}”${occ}`;
   if (t === 'team_renamed') return `${who} renamed the team to “${d.new_name}”`;
   // Show lineup (showrunner bookings)
-  if (t === 'show_lineup_invited') return `${who} invited the team to perform “${d.title || 'a show'}”`;
-  if (t === 'show_lineup_accepted') return `Team accepted show “${d.title || 'show'}”`;
-  if (t === 'show_lineup_declined') return `Team declined show “${d.title || 'show'}”`;
-  if (t === 'show_lineup_canceled') return `${who} canceled a show booking for “${d.title || 'show'}”`;
-  if (t === 'show_lineup_removed') return `${who} removed a show booking for “${d.title || 'show'}”`;
+  const prod = d.production_name || who;
+  if (t === 'show_lineup_invited') return `${prod} invited the team to perform “${d.title || 'a show'}”`;
+  if (t === 'show_lineup_accepted') return `${who} accepted show “${d.title || 'show'}”`;
+  if (t === 'show_lineup_declined') return `${who} declined show “${d.title || 'show'}”`;
+  if (t === 'invite_withdrawn') return `${prod} withdrew an invitation for “${d.title || 'show'}”`;
+  if (t === 'show_booking_removed') return `${prod} removed a show booking for “${d.title || 'show'}”`;
+  if (t === 'show_lineup_canceled') return `${prod} canceled a show booking for “${d.title || 'show'}”`;
+  if (t === 'show_lineup_removed') return `${prod} removed a show booking for “${d.title || 'show'}”`;
   return `${who} did ${t}`;
 }
 

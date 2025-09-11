@@ -458,12 +458,12 @@ export default function ShowCalendarPanel({ series }) {
           {/* Lineup on create */}
           <div style={{ marginTop: 18 }}>
             <h4 style={{ margin: '0 0 6px', fontSize: 14, opacity: 0.85 }}>
-              {cFreq === 'none' ? 'Lineup (this show)' : 'Default Lineup (applies to all nights)'}
+              {cFreq === 'none' ? 'Lineup (this show)' : 'Residency (applies to all nights)'}
             </h4>
             <p style={{ margin: 0, opacity: 0.75, fontSize: 13 }}>
               {cFreq === 'none'
                 ? 'Add team IDs to invite to this show.'
-                : 'Add team IDs to the series default lineup. You can override per night later in Edit Occurrence.'}
+                : 'Add team IDs to the Residency (series default lineup). You can override per night later in Edit Occurrence.'}
             </p>
             <Row>
               <Input placeholder="Team ID (e.g. MyTeam#1)" value={cLineupInput} onChange={(e)=>{ setCLineupInput(e.target.value); setCLineupErr(""); }} onKeyDown={async (e)=>{ if (e.key==='Enter' && cLineupInput.trim()) { const v = cLineupInput.trim(); try { const brief = await resolveTeamBriefByDisplayId(v); if (!brief) { setCLineupErr('No team found with that ID'); return; } if (!cLineupItems.some(x=>x.display_id===v)) setCLineupItems([...cLineupItems, { display_id: v, id: brief.id, name: brief.name }]); setCLineupInput(""); } catch (err) { setCLineupErr(err.message || 'Lookup failed'); } } }} style={{ minWidth: 260 }} />
@@ -862,7 +862,7 @@ function SeriesLineup({ eventId }) {
 
   return (
     <div style={{ marginTop: 18 }}>
-      <h4 style={{ margin: '0 0 6px', fontSize: 14, opacity: 0.85 }}>Default Lineup</h4>
+      <h4 style={{ margin: '0 0 6px', fontSize: 14, opacity: 0.85 }}>Residency</h4>
       {loading ? (
         <p style={{ opacity: 0.8 }}>Loading lineup…</p>
       ) : (
@@ -885,7 +885,9 @@ function SeriesLineup({ eventId }) {
                       </span>
                     )}
                   </div>
-                  <div style={{ opacity: 0.9, fontSize: 12 }}>{r.status}</div>
+                  <div style={{ opacity: 0.9, fontSize: 12 }}>
+                    {r.status === 'invited' ? 'Residency' : r.status}
+                  </div>
                 </div>
                 <GhostButton onClick={() => cancel(r.team_id)}>Remove</GhostButton>
               </li>
