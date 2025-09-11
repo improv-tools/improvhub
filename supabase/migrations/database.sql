@@ -871,6 +871,7 @@ declare
   v_occ   timestamptz;
   v_title text;
   v_prod  text;
+  v_tz    text;
   l record;
 begin
   if TG_OP = 'INSERT' then
@@ -894,7 +895,7 @@ begin
     return NULL;
   end if;
 
-  select coalesce(e.title, s.name), s.name into v_title, v_prod from public.show_events e join public.show_series s on s.id = e.series_id where e.id = v_event;
+  select coalesce(e.title, s.name), s.name, coalesce(e.tz,'UTC') into v_title, v_prod, v_tz from public.show_events e join public.show_series s on s.id = e.series_id where e.id = v_event;
 
   insert into public.user_notifications (user_id, kind, team_id, payload)
   select m.user_id, 'show_occurrence_canceled', x.team_id,
@@ -934,7 +935,7 @@ begin
     select * from lineup
   loop
     if l.had_accepted then
-      perform public._log_team_change(l.team_id, 'show_booking_removed', jsonb_build_object('event_id', v_event, 'occ_start', v_occ, 'title', v_title, 'production_name', v_prod));
+      perform public._log_team_change(l.team_id, 'show_booking_removed', jsonb_build_object('event_id', v_event, 'occ_start', v_occ, 'occ_date', to_char(v_occ at time zone v_tz, 'YYYY-MM-DD'), 'title', v_title, 'production_name', v_prod));
     else
       delete from public.team_change_log
       where team_id = l.team_id
@@ -1009,7 +1010,7 @@ begin
         perform public._log_team_change(
           l.team_id,
           'show_booking_removed',
-          jsonb_build_object('event_id', OLD.id, 'occ_start', acc.occ_start, 'title', v_title, 'production_name', v_prod)
+          jsonb_build_object('event_id', OLD.id, 'occ_start', acc.occ_start, 'occ_date', to_char(acc.occ_start at time zone coalesce(OLD.tz,'UTC'), 'YYYY-MM-DD'), 'title', v_title, 'production_name', v_prod)
         );
       end loop;
     else
@@ -2036,6 +2037,7 @@ as $$
 declare
   v_title text;
   v_prod  text;
+  v_tz    text;
   v_event_deleting text;
 begin
   -- If this delete is cascading from an event deletion, skip per-row logging/cleanup
@@ -2046,22 +2048,22 @@ begin
     end if;
   end if;
   if TG_OP = 'INSERT' then
-    select e.title, s.name into v_title, v_prod from public.show_events e join public.show_series s on s.id = e.series_id where e.id = NEW.event_id;
+    select e.title, s.name, coalesce(e.tz,'UTC') into v_title, v_prod, v_tz from public.show_events e join public.show_series s on s.id = e.series_id where e.id = NEW.event_id;
     if NEW.status = 'accepted' then
-      perform public._log_team_change(NEW.team_id, 'show_lineup_accepted', jsonb_build_object('event_id', NEW.event_id, 'occ_start', NEW.occ_start, 'title', coalesce(v_title, v_prod), 'production_name', v_prod));
+      perform public._log_team_change(NEW.team_id, 'show_lineup_accepted', jsonb_build_object('event_id', NEW.event_id, 'occ_start', NEW.occ_start, 'occ_date', to_char(NEW.occ_start at time zone v_tz, 'YYYY-MM-DD'), 'title', coalesce(v_title, v_prod), 'production_name', v_prod));
     elsif NEW.status = 'declined' then
-      perform public._log_team_change(NEW.team_id, 'show_lineup_declined', jsonb_build_object('event_id', NEW.event_id, 'occ_start', NEW.occ_start, 'title', coalesce(v_title, v_prod), 'production_name', v_prod));
+      perform public._log_team_change(NEW.team_id, 'show_lineup_declined', jsonb_build_object('event_id', NEW.event_id, 'occ_start', NEW.occ_start, 'occ_date', to_char(NEW.occ_start at time zone v_tz, 'YYYY-MM-DD'), 'title', coalesce(v_title, v_prod), 'production_name', v_prod));
     elsif NEW.status = 'invited' then
-      perform public._log_team_change(NEW.team_id, 'show_lineup_invited', jsonb_build_object('event_id', NEW.event_id, 'occ_start', NEW.occ_start, 'title', coalesce(v_title, v_prod), 'production_name', v_prod));
+      perform public._log_team_change(NEW.team_id, 'show_lineup_invited', jsonb_build_object('event_id', NEW.event_id, 'occ_start', NEW.occ_start, 'occ_date', to_char(NEW.occ_start at time zone v_tz, 'YYYY-MM-DD'), 'title', coalesce(v_title, v_prod), 'production_name', v_prod));
     end if;
     return NEW;
   elsif TG_OP = 'UPDATE' then
     if NEW.status is distinct from OLD.status then
-      select e.title, s.name into v_title, v_prod from public.show_events e join public.show_series s on s.id = e.series_id where e.id = NEW.event_id;
+      select e.title, s.name, coalesce(e.tz,'UTC') into v_title, v_prod, v_tz from public.show_events e join public.show_series s on s.id = e.series_id where e.id = NEW.event_id;
       if NEW.status = 'accepted' then
-        perform public._log_team_change(NEW.team_id, 'show_lineup_accepted', jsonb_build_object('event_id', NEW.event_id, 'occ_start', NEW.occ_start, 'title', coalesce(v_title, v_prod), 'production_name', v_prod));
+        perform public._log_team_change(NEW.team_id, 'show_lineup_accepted', jsonb_build_object('event_id', NEW.event_id, 'occ_start', NEW.occ_start, 'occ_date', to_char(NEW.occ_start at time zone v_tz, 'YYYY-MM-DD'), 'title', coalesce(v_title, v_prod), 'production_name', v_prod));
       elsif NEW.status = 'declined' then
-        perform public._log_team_change(NEW.team_id, 'show_lineup_declined', jsonb_build_object('event_id', NEW.event_id, 'occ_start', NEW.occ_start, 'title', coalesce(v_title, v_prod), 'production_name', v_prod));
+        perform public._log_team_change(NEW.team_id, 'show_lineup_declined', jsonb_build_object('event_id', NEW.event_id, 'occ_start', NEW.occ_start, 'occ_date', to_char(NEW.occ_start at time zone v_tz, 'YYYY-MM-DD'), 'title', coalesce(v_title, v_prod), 'production_name', v_prod));
       elsif NEW.status = 'canceled' then
         -- Invited → Canceled: remove the prior invite logs (no new entry)
         if OLD.status = 'invited' then
@@ -2071,15 +2073,15 @@ begin
             and (details->>'event_id')::uuid = NEW.event_id
             and (details->>'occ_start')::timestamptz = NEW.occ_start;
         elsif OLD.status = 'accepted' then
-          perform public._log_team_change(NEW.team_id, 'show_booking_removed', jsonb_build_object('event_id', NEW.event_id, 'occ_start', NEW.occ_start, 'title', coalesce(v_title, v_prod), 'production_name', v_prod));
+          perform public._log_team_change(NEW.team_id, 'show_booking_removed', jsonb_build_object('event_id', NEW.event_id, 'occ_start', NEW.occ_start, 'occ_date', to_char(NEW.occ_start at time zone v_tz, 'YYYY-MM-DD'), 'title', coalesce(v_title, v_prod), 'production_name', v_prod));
         else
-          perform public._log_team_change(NEW.team_id, 'show_lineup_canceled', jsonb_build_object('event_id', NEW.event_id, 'occ_start', NEW.occ_start, 'title', coalesce(v_title, v_prod), 'production_name', v_prod));
+          perform public._log_team_change(NEW.team_id, 'show_lineup_canceled', jsonb_build_object('event_id', NEW.event_id, 'occ_start', NEW.occ_start, 'occ_date', to_char(NEW.occ_start at time zone v_tz, 'YYYY-MM-DD'), 'title', coalesce(v_title, v_prod), 'production_name', v_prod));
         end if;
       end if;
     end if;
     return NEW;
   elsif TG_OP = 'DELETE' then
-    select e.title, s.name into v_title, v_prod from public.show_events e join public.show_series s on s.id = e.series_id where e.id = OLD.event_id;
+    select e.title, s.name, coalesce(e.tz,'UTC') into v_title, v_prod, v_tz from public.show_events e join public.show_series s on s.id = e.series_id where e.id = OLD.event_id;
     if OLD.status = 'invited' then
       -- Remove prior invitation logs; do not add a new entry
       delete from public.team_change_log
@@ -2089,10 +2091,10 @@ begin
         and (details->>'occ_start')::timestamptz = OLD.occ_start;
     elsif OLD.status = 'accepted' then
       -- Explicitly mark the accepted booking as removed
-      perform public._log_team_change(OLD.team_id, 'show_booking_removed', jsonb_build_object('event_id', OLD.event_id, 'occ_start', OLD.occ_start, 'title', coalesce(v_title, v_prod), 'production_name', v_prod));
+      perform public._log_team_change(OLD.team_id, 'show_booking_removed', jsonb_build_object('event_id', OLD.event_id, 'occ_start', OLD.occ_start, 'occ_date', to_char(OLD.occ_start at time zone v_tz, 'YYYY-MM-DD'), 'title', coalesce(v_title, v_prod), 'production_name', v_prod));
     else
       -- For other statuses, keep a generic removal entry
-      perform public._log_team_change(OLD.team_id, 'show_lineup_removed', jsonb_build_object('event_id', OLD.event_id, 'occ_start', OLD.occ_start, 'title', coalesce(v_title, v_prod), 'production_name', v_prod));
+      perform public._log_team_change(OLD.team_id, 'show_lineup_removed', jsonb_build_object('event_id', OLD.event_id, 'occ_start', OLD.occ_start, 'occ_date', to_char(OLD.occ_start at time zone v_tz, 'YYYY-MM-DD'), 'title', coalesce(v_title, v_prod), 'production_name', v_prod));
     end if;
     return OLD;
   end if;

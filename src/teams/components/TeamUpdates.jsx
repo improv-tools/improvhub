@@ -7,7 +7,10 @@ function fmtAction(a) {
   const t = a?.action;
   const who = a?.actor_name || "Someone";
   const d = a?.details || {};
-  const tname = d.title || d.event_title || "event";
+  const tname = d.title || d.event_title || "";
+  const occDate = (d.occ_start || d.occ_date)
+    ? new Date(d.occ_start || d.occ_date).toLocaleDateString()
+    : null;
   const occ = d.occ_start ? ` (${new Date(d.occ_start).toLocaleString()})` : "";
   const target = d.target_name || d.target_user_name || null;
   if (t === 'member_removed') return `${who} removed ${target || 'a member'}`;
@@ -26,13 +29,14 @@ function fmtAction(a) {
   if (t === 'team_renamed') return `${who} renamed the team to “${d.new_name}”`;
   // Show lineup (showrunner bookings)
   const prod = d.production_name || who;
-  if (t === 'show_lineup_invited') return `${prod} invited the team to perform “${d.title || 'a show'}”`;
-  if (t === 'show_lineup_accepted') return `${who} accepted show “${d.title || 'show'}”`;
-  if (t === 'show_lineup_declined') return `${who} declined show “${d.title || 'show'}”`;
-  if (t === 'invite_withdrawn') return `${prod} withdrew an invitation for “${d.title || 'show'}”`;
-  if (t === 'show_booking_removed') return `${prod} removed a show booking for “${d.title || 'show'}”`;
-  if (t === 'show_lineup_canceled') return `${prod} canceled a show booking for “${d.title || 'show'}”`;
-  if (t === 'show_lineup_removed') return `${prod} removed a show booking for “${d.title || 'show'}”`;
+  const onDate = occDate ? ` on ${occDate}` : "";
+  if (t === 'show_lineup_invited') return `${prod} invited the team to perform “${tname || prod}”${onDate}`;
+  if (t === 'show_lineup_accepted') return `${who} accepted “${tname || prod}”${onDate}`;
+  if (t === 'show_lineup_declined') return `${who} declined “${tname || prod}”${onDate}`;
+  if (t === 'invite_withdrawn') return `${prod} withdrew an invitation for “${tname || prod}”${onDate}`;
+  if (t === 'show_booking_removed') return `${prod} removed a booking for “${tname || prod}”${onDate}`;
+  if (t === 'show_lineup_canceled') return `${prod} canceled a booking for “${tname || prod}”${onDate}`;
+  if (t === 'show_lineup_removed') return `${prod} removed a booking for “${tname || prod}”${onDate}`;
   return `${who} did ${t}`;
 }
 
