@@ -331,7 +331,7 @@ export default function TeamsPanel() {
                     <div>
                       <div style={{ fontWeight: 600 }}>{t.name}</div>
                       <div style={{ opacity: 0.7, fontSize: 12 }}>
-                        {t.display_id} · you are {t.role}
+                        ID: {t.display_id} · you are {t.role}
                       </div>
                     </div>
                     <Row>
@@ -350,6 +350,7 @@ export default function TeamsPanel() {
               <GhostButton onClick={backToList} style={{ padding: "6px 10px", fontSize: 16 }}>Teams</GhostButton>
               <span style={{ opacity: 0.6 }}>→</span>
               <span style={{ fontWeight: 800, fontSize: 22 }}>{selected.name}</span>
+              <span style={{ opacity: 0.7, fontSize: 12 }}>ID: {selected.display_id}</span>
             </div>
           </Row>
 

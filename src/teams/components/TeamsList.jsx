@@ -25,7 +25,7 @@ export default function TeamsList({ teams, loading, onOpenTeam, onCreateTeam }) 
                 style={{ padding: "10px 0", borderBottom: "1px solid rgba(255,255,255,0.06)", cursor: "pointer" }}
                 onClick={() => onOpenTeam(t)}>
               <div style={{ display:"flex", justifyContent:"space-between", alignItems:"baseline" }}>
-                <div><strong>{t.name}</strong> <span style={{ opacity:0.7 }}>({t.display_id})</span></div>
+                <div><strong>{t.name}</strong> <span style={{ opacity:0.7 }}>· ID: {t.display_id}</span></div>
                 <span style={{ opacity: 0.7 }}>{t.role}</span>
               </div>
             </li>

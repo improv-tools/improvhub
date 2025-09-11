@@ -14,8 +14,13 @@ export async function listMyTeams() {
 export async function createTeam(name) {
   const { data, error } = await supabase.rpc("create_team", { p_name: name });
   if (error) throw new Error(error.message);
-  if (!data?.length) throw new Error("create_team returned no data");
-  return data[0];
+  // PostgREST can return a single row object or a one-item array depending on settings
+  if (Array.isArray(data)) {
+    if (!data.length) throw new Error("create_team returned no data");
+    return data[0];
+  }
+  if (data && typeof data === 'object') return data;
+  throw new Error("create_team returned no data");
 }
 
 export async function listTeamMembersRPC(teamId) {
@@ -228,5 +233,39 @@ export async function listTeamUpdates(teamId) {
 
 export async function deleteNotification(id) {
   const { error } = await supabase.rpc('delete_notification', { p_id: id });
+  if (error) throw new Error(error.message);
+}
+
+/* -------------------------- Show lineup: team invites ------------------------- */
+export async function listTeamShowInvitations(teamId) {
+  const { data, error } = await supabase
+    .rpc('list_team_show_invitations', { p_team_id: teamId });
+  if (error) throw new Error(error.message);
+  return data || [];
+}
+
+export async function acceptTeamShowInvite(eventId, baseStartIso) {
+  const { error } = await supabase
+    .rpc('accept_team_show_invite', { p_event_id: eventId, p_occ_start: baseStartIso });
+  if (error) throw new Error(error.message);
+}
+
+export async function declineTeamShowInvite(eventId, baseStartIso) {
+  const { error } = await supabase
+    .rpc('decline_team_show_invite', { p_event_id: eventId, p_occ_start: baseStartIso });
+  if (error) throw new Error(error.message);
+}
+
+/* -------------------------- Show lineup: performances in calendar ------------- */
+export async function listTeamShowPerformances(teamId, windowStartIso, windowEndIso) {
+  const { data, error } = await supabase
+    .rpc('list_team_show_performances', { p_team_id: teamId, p_start: windowStartIso, p_end: windowEndIso });
+  if (error) throw new Error(error.message);
+  return data || [];
+}
+
+export async function cancelTeamShowBooking(eventId, baseStartIso) {
+  const { error } = await supabase
+    .rpc('cancel_team_show_booking', { p_event_id: eventId, p_occ_start: baseStartIso });
   if (error) throw new Error(error.message);
 }

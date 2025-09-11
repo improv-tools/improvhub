@@ -1,8 +1,9 @@
 // src/showrunner/components/ShowCalendarPanel.jsx
-import { useMemo, useState } from "react";
+import { useMemo, useState, useEffect } from "react";
 import { Button, GhostButton, DangerButton, Label, Input, ErrorText, InfoText, Row } from "components/ui";
 import useShowCalendarData from "../hooks/useShowCalendarData";
 import { composeStartEndISO, splitLocal, fmtRangeLocal, browserTZ } from "../../teams/utils/datetime";
+import { inviteTeamToShow, listShowLineup, cancelTeamShowInvite, resolveTeamIdByDisplayId, removeTeamFromShow, resolveTeamBriefByDisplayId, listSeriesLineup, inviteTeamToSeries, cancelTeamSeriesInvite, removeTeamFromSeries, upsertOccLineupStatus, clearOccLineupOverride } from "../shows.api";
 
 const CATEGORIES = ["performance"]; // Showrunner shows are always performances
 const TYPE_META = { performance: { icon: "🎤", label: "Performance" } };
@@ -160,6 +161,10 @@ export default function ShowCalendarPanel({ series }) {
   const [cEndMode, setCEndMode] = useState("count"); // 'until'|'count'
   const [cUntilDate, setCUntilDate] = useState("");
   const [cCount, setCCount] = useState(6);
+  // Lineup (create-first-occurrence)
+  const [cLineupItems, setCLineupItems] = useState([]); // { display_id, id?, name? }
+  const [cLineupInput, setCLineupInput] = useState("");
+  const [cLineupErr, setCLineupErr] = useState("");
 
   const cUntilEstimate = useMemo(() => cFreq === "none" || cEndMode !== "until" ? null : estimateUntilCount({ recurFreq: cFreq, startDate: cStartDate, startTime: cStartTime, untilDate: cUntilDate, byday: cByday, byMonthday: cByMonthday, weekOfMonth: cWeekOfMonth }), [cFreq, cEndMode, cStartDate, cStartTime, cUntilDate, cByday, cByMonthday, cWeekOfMonth]);
   const cRecurrenceErrors = useMemo(() => validateRecurrence({ recurrenceMode: cFreq === "none" ? "none" : (cEndMode === "until" ? "until" : "count"), recurFreq: cFreq, endUntilDate: cUntilDate, endCount: cCount, recurByday: cByday, recurByMonthday: cByMonthday, recurWeekOfMonth: cWeekOfMonth, occEstimate: cUntilEstimate }), [cFreq, cEndMode, cUntilDate, cCount, cByday, cByMonthday, cWeekOfMonth, cUntilEstimate]);
@@ -176,7 +181,7 @@ export default function ShowCalendarPanel({ series }) {
         if (cEndMode === "until") recur_until = new Date(`${cUntilDate}T23:59:59`).toISOString();
         else recur_count = Math.max(1, Math.min(Number(cCount) || 1, 12));
       }
-      await createBase({
+      const created = await createBase({
         title: cTitle.trim(),
         description: cDescription.trim(),
         location: cLocation.trim(),
@@ -196,10 +201,27 @@ export default function ShowCalendarPanel({ series }) {
         recur_until,
         recur_count,
       });
+      // Invite any queued teams (by display_id)
+      // - For single shows: create per-occurrence invite for this show
+      // - For recurring shows: add to series default lineup (applies to all nights)
+      if (Array.isArray(cLineupItems) && cLineupItems.length && created?.id) {
+        for (const it of cLineupItems) {
+          try {
+            const teamId = it.id || await resolveTeamIdByDisplayId(it.display_id);
+            if (!teamId) continue;
+            if (cFreq === 'none') {
+              await inviteTeamToShow(created.id, startIso, teamId);
+            } else {
+              await inviteTeamToSeries(created.id, teamId);
+            }
+          } catch { /* ignore per-team errors */ }
+        }
+      }
       setCTitle(""); setCDescription(""); setCLocation("");
       setCStartDate(defaultStartDate); setCStartTime(defaultStartTime); setCEndTime(defaultEndTime);
       setCFreq("none"); setCByday(["MO"]); setCByMonthday(0); setCWeekOfMonth(0);
       setCEndMode("count"); setCUntilDate(""); setCCount(6);
+      setCLineupItems([]); setCLineupInput(""); setCLineupErr("");
       setMode("list");
       setBanner("Show created.");
     } catch (e) { setBannerErr(e.message || "Failed to create show"); }
@@ -208,6 +230,8 @@ export default function ShowCalendarPanel({ series }) {
   // Edit series
   const [sEd, setSEd] = useState(null);
   const [sRecurrenceMode, setSRecurrenceMode] = useState("none");
+  const [sMonthlyMode, setSMonthlyMode] = useState("monthday"); // edit-series monthly mode
+  const [sLineupBase, setSLineupBase] = useState(null); // selected occurrence base start for lineup in series edit
   const openEditSeries = (eventId) => {
     const e = events.find(x => x.id === eventId);
     if (!e) { setBannerErr("Could not load show."); return; }
@@ -220,7 +244,13 @@ export default function ShowCalendarPanel({ series }) {
     let recur_week_of_month = e.recur_week_of_month;
     if (e.recur_freq === "monthly" && !recur_bymonthday && !recur_week_of_month) recur_bymonthday = new Date(e.starts_at).getUTCDate();
     const mode = (e.recur_freq === "none") ? "none" : (e.recur_until ? "until" : "count");
-    setSEd({ ...e, recur_byday, recur_bymonthday, recur_week_of_month, _s: splitLocal(e.starts_at), _e: splitLocal(e.ends_at) });
+    setSEd({ ...e, recur_byday, recur_bymonthday, recur_week_of_month, _s: splitLocal(e.starts_at), _e: splitLocal(e.ends_at), _baseStart: e.starts_at });
+    if (e.recur_freq === 'monthly') setSMonthlyMode(e.recur_bymonthday ? 'monthday' : 'week'); else setSMonthlyMode('monthday');
+    // Pick default lineup occurrence for series: next future occurrence or first
+    const evOccs = (occurrences || []).filter(o => o.event_id === eventId);
+    let pick = null; const nowMs = Date.now();
+    pick = evOccs.find(o => new Date(o.starts_at).getTime() > nowMs) || evOccs[0] || null;
+    setSLineupBase(pick ? pick.base_start : null);
     setSRecurrenceMode(mode);
     setBanner(""); setBannerErr(""); setMode("editSeries");
   };
@@ -425,6 +455,38 @@ export default function ShowCalendarPanel({ series }) {
               )}
             </Row>
           )}
+          {/* Lineup on create */}
+          <div style={{ marginTop: 18 }}>
+            <h4 style={{ margin: '0 0 6px', fontSize: 14, opacity: 0.85 }}>
+              {cFreq === 'none' ? 'Lineup (this show)' : 'Default Lineup (applies to all nights)'}
+            </h4>
+            <p style={{ margin: 0, opacity: 0.75, fontSize: 13 }}>
+              {cFreq === 'none'
+                ? 'Add team IDs to invite to this show.'
+                : 'Add team IDs to the series default lineup. You can override per night later in Edit Occurrence.'}
+            </p>
+            <Row>
+              <Input placeholder="Team ID (e.g. MyTeam#1)" value={cLineupInput} onChange={(e)=>{ setCLineupInput(e.target.value); setCLineupErr(""); }} onKeyDown={async (e)=>{ if (e.key==='Enter' && cLineupInput.trim()) { const v = cLineupInput.trim(); try { const brief = await resolveTeamBriefByDisplayId(v); if (!brief) { setCLineupErr('No team found with that ID'); return; } if (!cLineupItems.some(x=>x.display_id===v)) setCLineupItems([...cLineupItems, { display_id: v, id: brief.id, name: brief.name }]); setCLineupInput(""); } catch (err) { setCLineupErr(err.message || 'Lookup failed'); } } }} style={{ minWidth: 260 }} />
+              <Button onClick={async ()=>{ const v = cLineupInput.trim(); if (!v) return; try { const brief = await resolveTeamBriefByDisplayId(v); if (!brief) { setCLineupErr('No team found with that ID'); return; } if (!cLineupItems.some(x=>x.display_id===v)) setCLineupItems([...cLineupItems, { display_id: v, id: brief.id, name: brief.name }]); setCLineupInput(""); } catch (err) { setCLineupErr(err.message || 'Lookup failed'); } }} disabled={!cLineupInput.trim()}>Add team</Button>
+              {cLineupItems.length > 0 && (
+                <GhostButton onClick={()=>{ setCLineupItems([]); setCLineupErr(""); }}>Clear</GhostButton>
+              )}
+            </Row>
+            {cLineupErr && <ErrorText>{cLineupErr}</ErrorText>}
+            {cLineupItems.length > 0 && (
+              <ul style={{ listStyle: 'none', padding: 0, marginTop: 10 }}>
+                {cLineupItems.map((it) => (
+                  <li key={it.display_id} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', border: '1px solid rgba(255,255,255,0.1)', borderRadius: 10, padding: 8, marginBottom: 8 }}>
+                    <span>
+                      {it.name ? (<><strong>{it.name}</strong> <span style={{ opacity: 0.75, fontSize: 12 }}>· ID: {it.display_id}</span></>) : (<span style={{ fontFamily: 'monospace' }}>ID: {it.display_id}</span>)}
+                    </span>
+                    <GhostButton onClick={()=> setCLineupItems(cLineupItems.filter(x=>x.display_id!==it.display_id))}>Remove</GhostButton>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </div>
+
           <Row>
             <Button onClick={submitCreate} disabled={!canSaveCreate}>Create</Button>
             <GhostButton onClick={()=>setMode("list")}>Cancel</GhostButton>
@@ -465,36 +527,114 @@ export default function ShowCalendarPanel({ series }) {
             </label>
           </Row>
 
-          {sRecurrenceMode !== "none" && (
-            <>
+          {/* Recurrence controls: allow switching between single and recurring */}
+          <Row>
+            <Label>
+              Frequency
+              <select value={sEd.recur_freq || 'none'} onChange={(e)=>{
+                const v = e.target.value;
+                const next = { ...sEd, recur_freq: v };
+                // default byday for weekly if none
+                if (v === 'weekly' && (!Array.isArray(next.recur_byday) || next.recur_byday.length === 0)) {
+                  const DOW = ["SU","MO","TU","WE","TH","FR","SA"]; const wd = DOW[new Date(sEd._s ? `${sEd._s.date}T${sEd._s.time}:00` : sEd.starts_at).getDay()];
+                  next.recur_byday = [wd || 'MO'];
+                }
+                setSEd(next);
+                if (v === 'none') setSRecurrenceMode('none'); else if (sRecurrenceMode === 'none') setSRecurrenceMode('count');
+              }} style={styles.select}>
+                {FREQUENCIES.map((f)=> <option key={f} value={f}>{cap(f)}</option>)}
+              </select>
+            </Label>
+            {/* Weekly specifics */}
+            {sEd.recur_freq === 'weekly' && (
+              <div style={{ display:'flex', gap:6, alignItems:'center', flexWrap:'wrap' }}>
+                {BYDAY.map((d)=>{
+                  const chk = Array.isArray(sEd.recur_byday) && sEd.recur_byday.includes(d);
+                  return (
+                    <label key={d} style={{ display:'inline-flex', gap:6, alignItems:'center' }}>
+                      <input type="checkbox" checked={!!chk} onChange={()=>{
+                        const arr = Array.isArray(sEd.recur_byday) ? [...sEd.recur_byday] : [];
+                        const next = chk ? arr.filter(x=>x!==d) : [...arr, d].sort();
+                        setSEd({ ...sEd, recur_byday: next });
+                      }} />
+                      <span>{d}</span>
+                    </label>
+                  );
+                })}
+              </div>
+            )}
+            {/* Monthly specifics */}
+            {sEd.recur_freq === 'monthly' && (
               <Row>
-                <label style={{ display:"inline-flex", gap:8, alignItems:"center" }}>
-                  <input type="radio" name="s_recmod" checked={sRecurrenceMode==="none"} onChange={()=>setSRecurrenceMode("none")} />
-                  <span>No recurrence</span>
-                </label>
-                <label style={{ display:"inline-flex", gap:8, alignItems:"center" }}>
-                  <input type="radio" name="s_recmod" checked={sRecurrenceMode==="until"} onChange={()=>setSRecurrenceMode("until")} />
-                  <span>Recurring · Until</span>
-                </label>
-                <label style={{ display:"inline-flex", gap:8, alignItems:"center" }}>
-                  <input type="radio" name="s_recmod" checked={sRecurrenceMode==="count"} onChange={()=>setSRecurrenceMode("count")} />
-                  <span>Recurring · Count</span>
-                </label>
-              </Row>
-              <Row>
-                {sRecurrenceMode === "until" && (
-                  <Label>Until
-                    <Input type="date" value={sEd.recur_until ? splitLocal(sEd.recur_until).date : ""} onChange={(e2)=>setSEd({ ...sEd, recur_until: e2.target.value ? new Date(`${e2.target.value}T23:59:59`).toISOString() : null })} />
+                <Label>Mode
+                  <select value={sMonthlyMode} onChange={(e)=>setSMonthlyMode(e.target.value)} style={styles.select}>
+                    <option value="monthday">By month-day</option>
+                    <option value="week">Week of month</option>
+                  </select>
+                </Label>
+                {sMonthlyMode === 'monthday' ? (
+                  <Label>By month-day
+                    <Input type="number" min={1} max={31} value={Number(sEd.recur_bymonthday)||0} onChange={(e)=>setSEd({ ...sEd, recur_bymonthday: Math.max(1, Math.min(31, Number(e.target.value)||0)) })} style={{ width: 120 }} />
                   </Label>
-                )}
-                {sRecurrenceMode === "count" && (
-                  <Label>Count (max 12)
-                    <Input type="number" min={1} max={12} value={sEd.recur_count || 6} onChange={(e2)=>setSEd({ ...sEd, recur_count: Math.max(1, Math.min(12, Number(e2.target.value) || 1)) })} style={{ width: 120 }} />
-                  </Label>
+                ) : (
+                  <>
+                    <Label>Week-of-month (1..4, -1=last)
+                      <Input type="number" min={-1} max={4} value={Number(sEd.recur_week_of_month)||0} onChange={(e)=>setSEd({ ...sEd, recur_week_of_month: Number(e.target.value)||0 })} style={{ width: 140 }} />
+                    </Label>
+                    <Label>Weekday
+                      <select value={(Array.isArray(sEd.recur_byday) && sEd.recur_byday[0]) || 'MO'} onChange={(e)=>setSEd({ ...sEd, recur_byday: [e.target.value] })} style={styles.select}>
+                        {BYDAY.map((d)=> <option key={d} value={d}>{d}</option>)}
+                      </select>
+                    </Label>
+                  </>
                 )}
               </Row>
-            </>
+            )}
+          </Row>
+
+          {/* Recurrence mode (end strategy) */}
+          <Row>
+            <label style={{ display:"inline-flex", gap:8, alignItems:"center" }}>
+              <input type="radio" name="s_recmod" checked={sRecurrenceMode==="none"} onChange={()=>setSRecurrenceMode("none")} />
+              <span>No recurrence</span>
+            </label>
+            <label style={{ display:"inline-flex", gap:8, alignItems:"center" }}>
+              <input type="radio" name="s_recmod" checked={sRecurrenceMode==="until"} onChange={()=>setSRecurrenceMode("until")} />
+              <span>Recurring · Until</span>
+            </label>
+            <label style={{ display:"inline-flex", gap:8, alignItems:"center" }}>
+              <input type="radio" name="s_recmod" checked={sRecurrenceMode==="count"} onChange={()=>setSRecurrenceMode("count")} />
+              <span>Recurring · Count</span>
+            </label>
+          </Row>
+          <Row>
+            {sRecurrenceMode === "until" && (
+              <Label>Until
+                <Input type="date" value={sEd.recur_until ? splitLocal(sEd.recur_until).date : ""} onChange={(e2)=>setSEd({ ...sEd, recur_until: e2.target.value ? new Date(`${e2.target.value}T23:59:59`).toISOString() : null })} />
+              </Label>
+            )}
+            {sRecurrenceMode === "count" && (
+              <Label>Count (max 12)
+                <Input type="number" min={1} max={12} value={sEd.recur_count || 6} onChange={(e2)=>setSEd({ ...sEd, recur_count: Math.max(1, Math.min(12, Number(e2.target.value) || 1)) })} style={{ width: 120 }} />
+              </Label>
+            )}
+          </Row>
+          {/* Lineup section: for single shows (non-recurring) manage the only night here */}
+          {sRecurrenceMode === 'none' && sEd && (
+            <div style={{ marginTop: 18 }}>
+              {/* Remove duplicate header; OccLineup renders its own header */}
+              <OccLineup eventId={sEd.id} baseStart={sEd._baseStart} />
+            </div>
           )}
+
+          {/* Lineup section for recurring series: one default list applied to all nights */}
+          {sRecurrenceMode !== 'none' && sEd && (
+            <div style={{ marginTop: 18 }}>
+              <SeriesLineup eventId={sEd.id} />
+            </div>
+          )}
+
+          {/* Action buttons at the bottom, below lineup when present */}
           <Row>
             <Button onClick={saveEditSeries} disabled={!canSaveSeries}>Save</Button>
             <GhostButton onClick={cancelEditSeries}>Cancel</GhostButton>
@@ -533,6 +673,9 @@ export default function ShowCalendarPanel({ series }) {
               <span>Individuals can apply (Jam)</span>
             </label>
           </Row>
+          {/* Lineup management for this night (buttons below) */}
+          <OccLineup eventId={oEd.event_id} baseStart={oEd.base_start} />
+
           <Row>
             <Button onClick={saveEditOccurrence} disabled={!canSaveOccurrence}>Save occurrence</Button>
             {oEd.overridden && <GhostButton onClick={clearOneOverride}>Clear override</GhostButton>}
@@ -590,6 +733,164 @@ export default function ShowCalendarPanel({ series }) {
               })}
             </ul>
           )}
+        </>
+      )}
+    </div>
+  );
+}
+
+function OccLineup({ eventId, baseStart, hideHeader = false }) {
+  const [loading, setLoading] = useState(true);
+  const [err, setErr] = useState("");
+  const [rows, setRows] = useState([]);
+  const [input, setInput] = useState("");
+  const [busy, setBusy] = useState(false);
+
+  const load = async () => {
+    setLoading(true); setErr("");
+    try { setRows(await listShowLineup(eventId, baseStart)); }
+    catch (e) { setErr(e.message || 'Failed to load lineup'); }
+    finally { setLoading(false); }
+  };
+
+  useEffect(() => { load(); }, [eventId, baseStart]);
+
+  const add = async () => {
+    const disp = input.trim(); if (!disp) return;
+    setBusy(true); setErr("");
+    try {
+      const teamId = await resolveTeamIdByDisplayId(disp);
+      if (!teamId) { setErr('No team found with that ID'); setBusy(false); return; }
+      await inviteTeamToShow(eventId, baseStart, teamId);
+      setInput("");
+      await load();
+    } catch (e) { setErr(e.message || 'Invite failed'); }
+    finally { setBusy(false); }
+  };
+
+  const cancel = async (teamId) => {
+    if (!window.confirm('Remove this team from the lineup?')) return;
+    setBusy(true); setErr("");
+    try { await upsertOccLineupStatus(eventId, baseStart, teamId, 'canceled'); await load(); }
+    catch (e) { setErr(e.message || 'Remove failed'); }
+    finally { setBusy(false); }
+  };
+
+  return (
+    <div style={{ marginTop: 18 }}>
+      {!hideHeader && (
+        <h4 style={{ margin: '0 0 6px', fontSize: 14, opacity: 0.85 }}>Lineup</h4>
+      )}
+      {loading ? (
+        <p style={{ opacity: 0.8 }}>Loading lineup…</p>
+      ) : (
+        <>
+          <Row>
+            <Input placeholder="Team ID (e.g. MyTeam#1)" value={input} onChange={(e)=>setInput(e.target.value)} onKeyDown={(e)=>{ if (e.key==='Enter') add(); }} style={{ minWidth: 260 }} />
+            <Button onClick={add} disabled={busy || !input.trim()}>Invite team</Button>
+          </Row>
+          {err && <ErrorText>{err}</ErrorText>}
+          <ul style={{ listStyle: 'none', padding: 0, marginTop: 10 }}>
+            {rows.length === 0 && <li style={{ opacity: 0.8 }}>No teams invited yet.</li>}
+            {rows.map((r) => (
+              <li key={`${r.team_id}`} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', border: '1px solid rgba(255,255,255,0.1)', borderRadius: 10, padding: 8, marginBottom: 8 }}>
+                <div>
+                  <div style={{ fontWeight: 600 }}>
+                    {r.team_name || (r.team_display_id ? `ID: ${r.team_display_id}` : `ID: ${r.team_id}`)}
+                    {r.team_name && (r.team_display_id || r.team_id) && (
+                      <span style={{ opacity: 0.75, fontSize: 12, marginLeft: 8 }}>
+                        · ID: {r.team_display_id || r.team_id}
+                      </span>
+                    )}
+                  </div>
+                  <div style={{ opacity: 0.9, fontSize: 12, color: (r.status === 'canceled' || r.status === 'declined') ? '#ff6b6b' : 'rgba(255,255,255,0.75)' }}>{r.status}</div>
+                </div>
+                <div style={{ display:'flex', gap:8 }}>
+                  {(r.status === 'canceled' || r.status === 'declined') ? (
+                    <GhostButton onClick={async ()=>{ if (!window.confirm('Dismiss this team from the lineup?')) return; try { await upsertOccLineupStatus(eventId, baseStart, r.team_id, 'dismissed'); await load(); } catch(e){ setErr(e.message || 'Dismiss failed'); } }}>Dismiss</GhostButton>
+                  ) : (
+                    <GhostButton onClick={() => cancel(r.team_id)}>Remove</GhostButton>
+                  )}
+                  {(r.status === 'canceled' || r.status === 'dismissed') && (
+                    <GhostButton onClick={async ()=>{ try { await clearOccLineupOverride(eventId, baseStart, r.team_id); await load(); } catch(e){ setErr(e.message || 'Clear override failed'); } }}>Clear override</GhostButton>
+                  )}
+                </div>
+              </li>
+            ))}
+          </ul>
+        </>
+      )}
+    </div>
+  );
+}
+
+function SeriesLineup({ eventId }) {
+  const [loading, setLoading] = useState(true);
+  const [err, setErr] = useState("");
+  const [rows, setRows] = useState([]);
+  const [input, setInput] = useState("");
+  const [busy, setBusy] = useState(false);
+
+  const load = async () => {
+    setLoading(true); setErr("");
+    try { setRows(await listSeriesLineup(eventId)); }
+    catch (e) { setErr(e.message || 'Failed to load lineup'); }
+    finally { setLoading(false); }
+  };
+  useEffect(() => { load(); }, [eventId]);
+
+  const add = async () => {
+    const disp = input.trim(); if (!disp) return;
+    setBusy(true); setErr("");
+    try {
+      const brief = await resolveTeamBriefByDisplayId(disp);
+      if (!brief?.id) { setErr('No team found with that ID'); setBusy(false); return; }
+      await inviteTeamToSeries(eventId, brief.id);
+      setInput("");
+      await load();
+    } catch (e) { setErr(e.message || 'Invite failed'); }
+    finally { setBusy(false); }
+  };
+
+  const cancel = async (teamId) => {
+    if (!window.confirm('Remove this team from the series default lineup?')) return;
+    setBusy(true); setErr("");
+    try { await cancelTeamSeriesInvite(eventId, teamId); await load(); }
+    catch (e) { setErr(e.message || 'Remove failed'); }
+    finally { setBusy(false); }
+  };
+
+  return (
+    <div style={{ marginTop: 18 }}>
+      <h4 style={{ margin: '0 0 6px', fontSize: 14, opacity: 0.85 }}>Default Lineup</h4>
+      {loading ? (
+        <p style={{ opacity: 0.8 }}>Loading lineup…</p>
+      ) : (
+        <>
+          <Row>
+            <Input placeholder="Team ID (e.g. MyTeam#1)" value={input} onChange={(e)=>setInput(e.target.value)} onKeyDown={(e)=>{ if (e.key==='Enter') add(); }} style={{ minWidth: 260 }} />
+            <Button onClick={add} disabled={busy || !input.trim()}>Invite team</Button>
+          </Row>
+          {err && <ErrorText>{err}</ErrorText>}
+          <ul style={{ listStyle: 'none', padding: 0, marginTop: 10 }}>
+            {rows.length === 0 && <li style={{ opacity: 0.8 }}>No teams invited yet.</li>}
+            {rows.map((r) => (
+              <li key={`${r.team_id}`} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', border: '1px solid rgba(255,255,255,0.1)', borderRadius: 10, padding: 8, marginBottom: 8 }}>
+                <div>
+                  <div style={{ fontWeight: 600 }}>
+                    {r.team_name || (r.team_display_id ? `ID: ${r.team_display_id}` : `ID: ${r.team_id}`)}
+                    {r.team_name && (r.team_display_id || r.team_id) && (
+                      <span style={{ opacity: 0.75, fontSize: 12, marginLeft: 8 }}>
+                        · ID: {r.team_display_id || r.team_id}
+                      </span>
+                    )}
+                  </div>
+                  <div style={{ opacity: 0.9, fontSize: 12 }}>{r.status}</div>
+                </div>
+                <GhostButton onClick={() => cancel(r.team_id)}>Remove</GhostButton>
+              </li>
+            ))}
+          </ul>
         </>
       )}
     </div>

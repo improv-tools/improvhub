@@ -4,7 +4,7 @@ import { Button, GhostButton, DangerButton, Label, Input, Textarea, ErrorText, I
 import { useAuth } from "auth/AuthContext";
 import useCalendarData from "../hooks/useCalendarData";
 import { composeStartEndISO, splitLocal, fmtRangeLocal, browserTZ } from "../utils/datetime";
-import { listAttendance, setAttendance } from "../teams.api";
+import { listAttendance, setAttendance, listTeamShowInvitations, acceptTeamShowInvite, declineTeamShowInvite, listTeamShowPerformances, cancelTeamShowBooking } from "../teams.api";
 
 const CATEGORIES = ["rehearsal", "social", "performance"];
 const TYPE_META = {
@@ -167,6 +167,34 @@ export default function CalendarPanel({ team }) {
   } = useCalendarData(team?.id, windowStartIso, windowEndIso);
 
   const upcoming = useMemo(() => occurrences, [occurrences]);
+
+  // Accepted show bookings (Performance), merged into list
+  const [showBookings, setShowBookings] = useState([]);
+  const loadShowBookings = async () => {
+    if (!team?.id) return;
+    try {
+      const rows = await listTeamShowPerformances(team.id, windowStartIso, windowEndIso);
+      setShowBookings(rows || []);
+    } catch (e) {
+      console.warn('show bookings load failed:', e?.message || e);
+      setShowBookings([]);
+    }
+  };
+  useEffect(() => { loadShowBookings(); }, [team?.id, windowStartIso, windowEndIso]);
+
+  // -------- Show invitations (lineup) for this team --------
+  const [showInvites, setShowInvites] = useState([]);
+  const [invitesLoading, setInvitesLoading] = useState(true);
+  const [invErr, setInvErr] = useState("");
+
+  const loadShowInvites = async () => {
+    if (!team?.id) return;
+    setInvErr(""); setInvitesLoading(true);
+    try { setShowInvites(await listTeamShowInvitations(team.id)); }
+    catch (e) { setInvErr(e.message || 'Failed to load show invites'); }
+    finally { setInvitesLoading(false); }
+  };
+  useEffect(() => { loadShowInvites(); }, [team?.id]);
 
   // ---------- Attendance (safe integration) ----------
   // Map key: `${event_id}|${occ_start ISO}` -> [{ name, isMe }]
@@ -856,18 +884,56 @@ export default function CalendarPanel({ team }) {
       {/* LIST */}
       {mode === "list" && (
         <>
+          {/* Show invitations at top */}
+          <div style={{ marginBottom: 12 }}>
+            <h4 style={{ margin: '0 0 6px', fontSize: 14 }}>Invitations</h4>
+            {invitesLoading ? (
+              <p style={{ opacity: 0.8 }}>Loading invites…</p>
+            ) : invErr ? (
+              <ErrorText>{invErr}</ErrorText>
+            ) : (
+              (() => {
+                const pending = (showInvites || []).filter(i => i.status === 'invited');
+                if (pending.length === 0) return <p style={{ opacity: 0.8, margin: 0 }}>No invitations.</p>;
+                return (
+                  <ul style={{ listStyle: 'none', padding: 0, margin: 0 }}>
+                    {pending.map((inv) => (
+                      <li key={`${inv.event_id}|${inv.occ_start}|${inv.team_id}`} style={{ border: '1px solid rgba(255,255,255,0.1)', borderRadius: 10, padding: 12, marginBottom: 8, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                        <div>
+                          <div style={{ fontWeight: 600 }}>{inv.show_title || '(show)'} · {new Date(inv.occ_start).toLocaleString()}</div>
+                          <div style={{ opacity: 0.75, fontSize: 12 }}>Invited</div>
+                        </div>
+                        <div style={{ display:'flex', gap:8 }}>
+                          <Button onClick={async ()=> { await acceptTeamShowInvite(inv.event_id, inv.occ_start); await loadShowInvites(); }}>Accept</Button>
+                          <GhostButton onClick={async ()=> { await declineTeamShowInvite(inv.event_id, inv.occ_start); await loadShowInvites(); }}>Decline</GhostButton>
+                        </div>
+                      </li>
+                    ))}
+                  </ul>
+                );
+              })()
+            )}
+          </div>
+
           {loading ? (
             <p style={{ opacity: 0.8 }}>Loading calendar…</p>
           ) : upcoming.length === 0 ? (
             <p style={{ opacity: 0.8 }}>No upcoming events.</p>
           ) : (
             <ul style={{ listStyle: "none", padding: 0, margin: 0 }}>
-              {upcoming.map((occ) => {
+              {[...upcoming.map(o => ({ kind:'team', o })), ...showBookings.map(b => ({ kind:'show', b }))]
+                .sort((a,b) => {
+                  const ta = a.kind==='team' ? new Date(a.o.starts_at).getTime() : new Date(a.b.starts_at).getTime();
+                  const tb = b.kind==='team' ? new Date(b.o.starts_at).getTime() : new Date(b.b.starts_at).getTime();
+                  return ta - tb;
+                })
+                .map((it) => {
+                if (it.kind === 'team') {
+                  const occ = it.o;
                 const series = events.find(e => e.id === occ.event_id);
                 const isRecurring = !!(series && series.recur_freq && series.recur_freq !== "none");
                 const key = `${occ.event_id}|${occ.base_start}`;
                 const typeMeta = TYPE_META[occ.category] || { icon: "📅", label: cap(occ.category || "event") };
-
                 return (
                   <li
                     key={key}
@@ -1000,6 +1066,30 @@ export default function CalendarPanel({ team }) {
                     </Row>
                   </li>
                 );
+                } else {
+                  const b = it.b;
+                  const key = `show|${b.event_id}|${b.occ_start}`;
+                  const typeMeta = TYPE_META['performance'];
+                  return (
+                    <li key={key} style={{ border: '1px solid rgba(255,255,255,0.1)', borderRadius: 10, padding: 12, marginBottom: 10, display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 12 }}>
+                      <div style={{ display: 'flex', gap: 10, alignItems: 'flex-start' }}>
+                        <span title={typeMeta.label} aria-label={typeMeta.label} style={{ fontSize: 18, lineHeight: '20px' }}>{typeMeta.icon}</span>
+                        <div>
+                          <div style={styles.titleLink}>
+                            {b.title || '(show)'} <span style={{ opacity: 0.7, fontSize: 12 }}>· Show booking</span>
+                          </div>
+                          <div style={{ opacity: 0.8, fontSize: 12 }}>
+                            {fmtRangeLocal(b.starts_at, b.ends_at, b.tz)}
+                            {b.location && (<>{' · '}{b.location}</>)}
+                          </div>
+                        </div>
+                      </div>
+                      <Row>
+                        <DangerButton onClick={async ()=>{ if (!window.confirm('Cancel this booking?')) return; try { await cancelTeamShowBooking(b.event_id, b.occ_start); await loadShowBookings(); await loadShowInvites(); } catch(e){ console.warn(e); } }}>Cancel</DangerButton>
+                      </Row>
+                    </li>
+                  );
+                }
               })}
             </ul>
           )}

@@ -78,7 +78,7 @@ export default function Dashboard() {
                     }}>
                       <div>
                         <div style={{ fontWeight: 600 }}>Invitation: {inv.team_name}</div>
-                        <div style={{ opacity: 0.7, fontSize: 12 }}>{inv.display_id} · role: {inv.role}</div>
+                        <div style={{ opacity: 0.7, fontSize: 12 }}>ID: {inv.display_id} · role: {inv.role}</div>
                       </div>
                       <Row>
                         <Button onClick={async ()=> { await acceptInvitation(inv.team_id); await loadInvites(); }}>Accept</Button>
@@ -101,7 +101,7 @@ export default function Dashboard() {
                       const line = (() => {
                         switch (n.kind) {
                           case 'removed_from_team':
-                            return `Removed from team: ${n.team_name || n.display_id || n.team_id}`;
+                            return `Removed from team: ${n.team_name ? n.team_name : `ID: ${n.display_id || n.team_id}`}`;
                           case 'event_deleted':
                             return `Event deleted: ${p.title || p.event_id || ''}${p.by_name ? ` (by ${p.by_name})` : ''}`;
                           case 'event_changed': {
@@ -142,8 +142,9 @@ export default function Dashboard() {
                           <div>
                             <div style={{ fontWeight: 600 }}>{line}</div>
                             <div style={{ opacity: 0.7, fontSize: 12 }}>
-                              {n.team_name || n.display_id || ''}
-                              {" · "}{new Date(n.created_at).toLocaleString()}
+                              {n.team_name || ''}
+                              {n.display_id ? (n.team_name ? ` · ID: ${n.display_id}` : `ID: ${n.display_id}`) : ''}
+                              {` · ${new Date(n.created_at).toLocaleString()}`}
                             </div>
                           </div>
                           <Row>

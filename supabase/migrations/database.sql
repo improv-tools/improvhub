@@ -1298,6 +1298,651 @@ left join auth.users u on u.id = i.user_id;
 
 grant select on public.team_invitations_with_names to authenticated;
 
+-- ====================================================
+-- 12) Show lineup: team invitations per occurrence
+-- ====================================================
+
+-- Link a team to a specific show occurrence (event_id + occ_start)
+create table if not exists public.show_team_invitations (
+  event_id    uuid not null references public.show_events(id) on delete cascade,
+  occ_start   timestamptz not null, -- base occurrence start (series key)
+  team_id     uuid not null references public.teams(id) on delete cascade,
+  status      text not null default 'invited', -- invited|accepted|declined|canceled
+  invited_by  uuid references auth.users(id),
+  created_at  timestamptz not null default now(),
+  primary key (event_id, occ_start, team_id)
+);
+
+alter table public.show_team_invitations enable row level security;
+
+-- Select if: show owner, or member of invited team
+drop policy if exists "sti select owner or team" on public.show_team_invitations;
+create policy "sti select owner or team"
+on public.show_team_invitations for select to authenticated
+using (
+  exists (
+    select 1 from public.show_events e
+    join public.show_series s on s.id = e.series_id
+    where e.id = show_team_invitations.event_id and s.owner_id = auth.uid()
+  ) or exists (
+    select 1 from public.team_members m
+    where m.team_id = show_team_invitations.team_id and m.user_id = auth.uid()
+  )
+);
+
+-- Insert/delete by show owner only
+drop policy if exists "sti write owner" on public.show_team_invitations;
+create policy "sti write owner"
+on public.show_team_invitations for insert to authenticated
+with check (
+  exists (
+    select 1 from public.show_events e
+    join public.show_series s on s.id = e.series_id
+    where e.id = show_team_invitations.event_id and s.owner_id = auth.uid()
+  )
+);
+
+drop policy if exists "sti update owner or team-admin" on public.show_team_invitations;
+create policy "sti update owner or team-admin"
+on public.show_team_invitations for update to authenticated
+using (
+  -- owner can update/cancel
+  exists (
+    select 1 from public.show_events e
+    join public.show_series s on s.id = e.series_id
+    where e.id = show_team_invitations.event_id and s.owner_id = auth.uid()
+  )
+  or
+  -- team admin can accept/decline
+  exists (
+    select 1 from public.team_members m
+    where m.team_id = show_team_invitations.team_id and m.user_id = auth.uid() and m.role = 'admin'
+  )
+)
+with check (
+  -- same as using
+  exists (
+    select 1 from public.show_events e
+    join public.show_series s on s.id = e.series_id
+    where e.id = show_team_invitations.event_id and s.owner_id = auth.uid()
+  )
+  or exists (
+    select 1 from public.team_members m
+    where m.team_id = show_team_invitations.team_id and m.user_id = auth.uid() and m.role = 'admin'
+  )
+);
+
+drop policy if exists "sti delete owner" on public.show_team_invitations;
+create policy "sti delete owner"
+on public.show_team_invitations for delete to authenticated
+using (
+  exists (
+    select 1 from public.show_events e
+    join public.show_series s on s.id = e.series_id
+    where e.id = show_team_invitations.event_id and s.owner_id = auth.uid()
+  )
+);
+
+-- Helper view with show and team names for UI
+drop view if exists public.show_team_invitations_with_details;
+create view public.show_team_invitations_with_details as
+select
+  sti.event_id,
+  sti.occ_start,
+  sti.team_id,
+  sti.status,
+  sti.invited_by,
+  sti.created_at,
+  t.name as team_name,
+  t.display_id as team_display_id,
+  e.title as show_title,
+  e.tz as show_tz,
+  e.starts_at as base_starts_at,
+  e.ends_at as base_ends_at,
+  s.name as series_name
+from public.show_team_invitations sti
+join public.show_events e on e.id = sti.event_id
+join public.show_series s on s.id = e.series_id
+join public.teams t on t.id = sti.team_id;
+
+grant select on public.show_team_invitations_with_details to authenticated;
+
+-- RPCs
+drop function if exists public.list_show_lineup(p_event_id uuid, p_occ_start timestamptz);
+create or replace function public.list_show_lineup(p_event_id uuid, p_occ_start timestamptz)
+returns table (
+  event_id uuid,
+  occ_start timestamptz,
+  team_id uuid,
+  status text,
+  invited_by uuid,
+  created_at timestamptz,
+  team_name text,
+  team_display_id text,
+  show_title text,
+  show_tz text,
+  base_starts_at timestamptz,
+  base_ends_at timestamptz,
+  series_name text
+)
+language sql
+stable
+security definer
+set search_path = public
+as $$
+  with occ as (
+    select * from public.show_team_invitations_with_details
+    where event_id = p_event_id and occ_start = p_occ_start and coalesce(status,'') <> 'dismissed'
+  )
+  select * from occ
+  union all
+  select p_event_id as event_id,
+         p_occ_start as occ_start,
+         ssti.team_id,
+         ssti.status,
+         ssti.invited_by,
+         ssti.created_at,
+         t.name as team_name,
+         t.display_id as team_display_id,
+         e.title as show_title,
+         e.tz as show_tz,
+         e.starts_at as base_starts_at,
+         e.ends_at as base_ends_at,
+         s.name as series_name
+  from public.show_series_team_invitations ssti
+  join public.show_events e on e.id = ssti.event_id
+  join public.show_series s on s.id = e.series_id
+  join public.teams t on t.id = ssti.team_id
+  where ssti.event_id = p_event_id
+    and coalesce(ssti.status,'') <> 'dismissed'
+    and not exists (
+      select 1 from public.show_team_invitations sti
+      where sti.event_id = p_event_id and sti.occ_start = p_occ_start and sti.team_id = ssti.team_id
+    )
+  order by created_at desc;
+$$;
+grant execute on function public.list_show_lineup(uuid, timestamptz) to authenticated;
+
+drop function if exists public.invite_team_to_show(p_event_id uuid, p_occ_start timestamptz, p_team_id uuid);
+create or replace function public.invite_team_to_show(p_event_id uuid, p_occ_start timestamptz, p_team_id uuid)
+returns void
+language plpgsql
+security definer
+set search_path = public
+as $$
+begin
+  -- Ensure caller owns the show
+  if not exists (
+    select 1 from public.show_events e join public.show_series s on s.id = e.series_id
+    where e.id = p_event_id and s.owner_id = auth.uid()
+  ) then
+    raise exception 'not allowed';
+  end if;
+
+  insert into public.show_team_invitations(event_id, occ_start, team_id, status, invited_by)
+  values (p_event_id, p_occ_start, p_team_id, 'invited', auth.uid())
+  on conflict (event_id, occ_start, team_id) do update set status = excluded.status, invited_by = excluded.invited_by;
+end;
+$$;
+grant execute on function public.invite_team_to_show(uuid, timestamptz, uuid) to authenticated;
+
+drop function if exists public.cancel_team_show_invite(p_event_id uuid, p_occ_start timestamptz, p_team_id uuid);
+create or replace function public.cancel_team_show_invite(p_event_id uuid, p_occ_start timestamptz, p_team_id uuid)
+returns void
+language plpgsql
+security definer
+set search_path = public
+as $$
+begin
+  update public.show_team_invitations
+  set status = 'canceled'
+  where event_id = p_event_id and occ_start = p_occ_start and team_id = p_team_id;
+end;
+$$;
+grant execute on function public.cancel_team_show_invite(uuid, timestamptz, uuid) to authenticated;
+
+drop function if exists public.list_team_show_invitations(p_team_id uuid);
+create or replace function public.list_team_show_invitations(p_team_id uuid)
+returns setof public.show_team_invitations_with_details
+language sql
+stable
+security definer
+set search_path = public
+as $$
+  select *
+  from public.show_team_invitations_with_details v
+  where v.team_id = p_team_id
+  order by v.created_at desc;
+$$;
+grant execute on function public.list_team_show_invitations(uuid) to authenticated;
+
+drop function if exists public.accept_team_show_invite(p_event_id uuid, p_occ_start timestamptz);
+create or replace function public.accept_team_show_invite(p_event_id uuid, p_occ_start timestamptz)
+returns void
+language plpgsql
+security definer
+set search_path = public
+as $$
+begin
+  -- Require admin of the invited team
+  if not exists (
+    select 1 from public.team_members m
+    join public.show_team_invitations sti on sti.team_id = m.team_id
+    where sti.event_id = p_event_id and sti.occ_start = p_occ_start and m.user_id = auth.uid() and m.role = 'admin'
+  ) then
+    raise exception 'not allowed';
+  end if;
+
+  update public.show_team_invitations
+  set status = 'accepted'
+  where event_id = p_event_id and occ_start = p_occ_start and exists (
+    select 1 from public.team_members m
+    where m.team_id = show_team_invitations.team_id and m.user_id = auth.uid() and m.role = 'admin'
+  );
+end;
+$$;
+grant execute on function public.accept_team_show_invite(uuid, timestamptz) to authenticated;
+
+drop function if exists public.decline_team_show_invite(p_event_id uuid, p_occ_start timestamptz);
+create or replace function public.decline_team_show_invite(p_event_id uuid, p_occ_start timestamptz)
+returns void
+language plpgsql
+security definer
+set search_path = public
+as $$
+begin
+  if not exists (
+    select 1 from public.team_members m
+    join public.show_team_invitations sti on sti.team_id = m.team_id
+    where sti.event_id = p_event_id and sti.occ_start = p_occ_start and m.user_id = auth.uid() and m.role = 'admin'
+  ) then
+    raise exception 'not allowed';
+  end if;
+
+  update public.show_team_invitations
+  set status = 'declined'
+  where event_id = p_event_id and occ_start = p_occ_start and exists (
+    select 1 from public.team_members m
+    where m.team_id = show_team_invitations.team_id and m.user_id = auth.uid() and m.role = 'admin'
+  );
+end;
+$$;
+grant execute on function public.decline_team_show_invite(uuid, timestamptz) to authenticated;
+
+notify pgrst, 'reload schema';
+
+-- ====================================================
+-- Utility: resolve team UUID from display_id (for showrunner invites)
+-- ====================================================
+
+drop function if exists public.team_id_by_display_id(p_display_id text);
+create or replace function public.team_id_by_display_id(p_display_id text)
+returns uuid
+language sql
+stable
+security definer
+set search_path = public
+as $$
+  select id from public.teams where display_id = p_display_id limit 1;
+$$;
+grant execute on function public.team_id_by_display_id(text) to authenticated;
+
+notify pgrst, 'reload schema';
+
+-- Resolve team brief (id, name, display_id) by Team ID (display_id)
+drop function if exists public.team_brief_by_display_id(p_display_id text);
+create or replace function public.team_brief_by_display_id(p_display_id text)
+returns table (id uuid, name text, display_id text)
+language sql
+stable
+security definer
+set search_path = public
+as $$
+  select t.id, t.name, t.display_id
+  from public.teams t
+  where t.display_id = p_display_id
+  limit 1;
+$$;
+grant execute on function public.team_brief_by_display_id(text) to authenticated;
+
+notify pgrst, 'reload schema';
+
+-- ====================================================
+-- Show lineup: logging + team-side cancel + listings
+-- ====================================================
+
+-- Log lineup changes into team_change_log
+drop function if exists public.trg_log_show_team_invitations();
+create or replace function public.trg_log_show_team_invitations()
+returns trigger
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare v_title text;
+begin
+  if TG_OP = 'INSERT' then
+    select e.title into v_title from public.show_events e where e.id = NEW.event_id;
+    perform public._log_team_change(NEW.team_id, 'show_lineup_invited', jsonb_build_object('event_id', NEW.event_id, 'occ_start', NEW.occ_start, 'title', v_title));
+    return NEW;
+  elsif TG_OP = 'UPDATE' then
+    if NEW.status is distinct from OLD.status then
+      select e.title into v_title from public.show_events e where e.id = NEW.event_id;
+      if NEW.status = 'accepted' then
+        perform public._log_team_change(NEW.team_id, 'show_lineup_accepted', jsonb_build_object('event_id', NEW.event_id, 'occ_start', NEW.occ_start, 'title', v_title));
+      elsif NEW.status = 'declined' then
+        perform public._log_team_change(NEW.team_id, 'show_lineup_declined', jsonb_build_object('event_id', NEW.event_id, 'occ_start', NEW.occ_start, 'title', v_title));
+      elsif NEW.status = 'canceled' then
+        perform public._log_team_change(NEW.team_id, 'show_lineup_canceled', jsonb_build_object('event_id', NEW.event_id, 'occ_start', NEW.occ_start, 'title', v_title));
+      end if;
+    end if;
+    return NEW;
+  elsif TG_OP = 'DELETE' then
+    select e.title into v_title from public.show_events e where e.id = OLD.event_id;
+    perform public._log_team_change(OLD.team_id, 'show_lineup_removed', jsonb_build_object('event_id', OLD.event_id, 'occ_start', OLD.occ_start, 'title', v_title));
+    return OLD;
+  end if;
+  return null;
+end; $$;
+
+drop trigger if exists trg_log_show_team_invitations on public.show_team_invitations;
+create trigger trg_log_show_team_invitations
+after insert or update or delete on public.show_team_invitations
+for each row execute procedure public.trg_log_show_team_invitations();
+
+-- Team-side cancellation (after acceptance)
+drop function if exists public.cancel_team_show_booking(p_event_id uuid, p_occ_start timestamptz);
+create or replace function public.cancel_team_show_booking(p_event_id uuid, p_occ_start timestamptz)
+returns void
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare v_team uuid;
+begin
+  select team_id into v_team from public.show_team_invitations
+  where event_id = p_event_id and occ_start = p_occ_start and status = 'accepted';
+
+  if v_team is null then
+    raise exception 'No accepted booking to cancel';
+  end if;
+
+  if not exists (
+    select 1 from public.team_members m
+    where m.team_id = v_team and m.user_id = auth.uid() and m.role = 'admin'
+  ) then
+    raise exception 'not allowed';
+  end if;
+
+  update public.show_team_invitations
+  set status = 'canceled'
+  where event_id = p_event_id and occ_start = p_occ_start and team_id = v_team;
+end; $$;
+grant execute on function public.cancel_team_show_booking(uuid, timestamptz) to authenticated;
+
+-- Owner-side hard remove (dismiss after cancellation)
+drop function if exists public.remove_team_from_show(p_event_id uuid, p_occ_start timestamptz, p_team_id uuid);
+create or replace function public.remove_team_from_show(p_event_id uuid, p_occ_start timestamptz, p_team_id uuid)
+returns void
+language plpgsql
+security definer
+set search_path = public
+as $$
+begin
+  if not exists (
+    select 1 from public.show_events e join public.show_series s on s.id = e.series_id
+    where e.id = p_event_id and s.owner_id = auth.uid()
+  ) then
+    raise exception 'not allowed';
+  end if;
+  delete from public.show_team_invitations where event_id = p_event_id and occ_start = p_occ_start and team_id = p_team_id;
+end; $$;
+grant execute on function public.remove_team_from_show(uuid, timestamptz, uuid) to authenticated;
+
+-- List accepted bookings for a team within a window, resolving overrides
+drop function if exists public.list_team_show_performances(p_team_id uuid, p_start timestamptz, p_end timestamptz);
+create or replace function public.list_team_show_performances(p_team_id uuid, p_start timestamptz, p_end timestamptz)
+returns table (
+  event_id uuid,
+  occ_start timestamptz,
+  starts_at timestamptz,
+  ends_at timestamptz,
+  title text,
+  location text,
+  tz text,
+  series_name text
+)
+language sql
+stable
+security definer
+set search_path = public
+as $$
+  select
+    sti.event_id,
+    sti.occ_start,
+    coalesce(ov.starts_at, e.starts_at) as starts_at,
+    coalesce(ov.ends_at,   e.ends_at)   as ends_at,
+    coalesce(ov.title, e.title) as title,
+    coalesce(ov.location, e.location) as location,
+    e.tz,
+    s.name as series_name
+  from public.show_team_invitations sti
+  join public.show_events e on e.id = sti.event_id
+  join public.show_series s on s.id = e.series_id
+  left join public.show_event_overrides ov
+    on ov.event_id = sti.event_id and ov.occ_start = sti.occ_start and coalesce(ov.canceled, false) = false
+  where sti.team_id = p_team_id
+    and sti.status = 'accepted'
+    and sti.occ_start >= p_start and sti.occ_start <= p_end
+  order by coalesce(ov.starts_at, e.starts_at) asc;
+$$;
+grant execute on function public.list_team_show_performances(uuid, timestamptz, timestamptz) to authenticated;
+
+notify pgrst, 'reload schema';
+
+-- Series default lineup: tables, policies, RPCs, and occurrence override upsert
+create table if not exists public.show_series_team_invitations (
+  event_id   uuid not null references public.show_events(id) on delete cascade,
+  team_id    uuid not null references public.teams(id) on delete cascade,
+  status     text not null default 'invited',
+  invited_by uuid references auth.users(id),
+  created_at timestamptz not null default now(),
+  primary key (event_id, team_id)
+);
+alter table public.show_series_team_invitations enable row level security;
+drop policy if exists "ssti select owner or team" on public.show_series_team_invitations;
+create policy "ssti select owner or team" on public.show_series_team_invitations for select to authenticated
+using (
+  exists (select 1 from public.show_events e join public.show_series s on s.id = e.series_id where e.id = show_series_team_invitations.event_id and s.owner_id = auth.uid())
+  or exists (select 1 from public.team_members m where m.team_id = show_series_team_invitations.team_id and m.user_id = auth.uid())
+);
+drop policy if exists "ssti write owner" on public.show_series_team_invitations;
+create policy "ssti write owner" on public.show_series_team_invitations for all to authenticated
+using (exists (select 1 from public.show_events e join public.show_series s on s.id = e.series_id where e.id = show_series_team_invitations.event_id and s.owner_id = auth.uid()))
+with check (exists (select 1 from public.show_events e join public.show_series s on s.id = e.series_id where e.id = show_series_team_invitations.event_id and s.owner_id = auth.uid()));
+
+drop function if exists public.list_series_lineup(p_event_id uuid);
+create or replace function public.list_series_lineup(p_event_id uuid)
+returns table (event_id uuid, team_id uuid, status text, invited_by uuid, created_at timestamptz, team_name text, team_display_id text)
+language sql stable security definer set search_path = public as $$
+  select ssti.event_id, ssti.team_id, ssti.status, ssti.invited_by, ssti.created_at,
+         t.name as team_name, t.display_id as team_display_id
+  from public.show_series_team_invitations ssti
+  join public.teams t on t.id = ssti.team_id
+  where ssti.event_id = p_event_id and coalesce(ssti.status,'') <> 'dismissed'
+  order by ssti.created_at desc
+$$;
+grant execute on function public.list_series_lineup(uuid) to authenticated;
+
+-- Seed per-occurrence invites for a series within a window
+drop function if exists public.seed_series_invites(p_event_id uuid, p_start timestamptz, p_end timestamptz);
+create or replace function public.seed_series_invites(p_event_id uuid, p_start timestamptz, p_end timestamptz)
+returns void
+language plpgsql security definer set search_path=public as $$
+declare
+  e record; s record; d timestamptz; day_interval interval;
+  start_day timestamptz; end_day timestamptz; byday text[]; e_dow text;
+  y int; m int; dom int; month_start date; occ timestamptz;
+  wom int; wd2 text;
+begin
+  select * into e from public.show_events where id = p_event_id;
+  if e.id is null then raise exception 'event not found'; end if;
+  day_interval := e.starts_at - date_trunc('day', e.starts_at);
+  start_day := greatest(date_trunc('day', coalesce(p_start, now())), date_trunc('day', e.starts_at));
+  end_day   := date_trunc('day', coalesce(p_end, now() + interval '365 days'));
+  byday := e.recur_byday;
+  -- Map Postgres DY ('MON') to two-letter ('MO') to match stored byday values
+  e_dow := substring(upper(to_char(e.starts_at, 'DY')), 1, 2);
+  if e.recur_freq = 'weekly' and (byday is null or array_length(byday,1) is null) then byday := array[e_dow]; end if;
+  wom := e.recur_week_of_month;
+
+  for s in select team_id from public.show_series_team_invitations where event_id = p_event_id and coalesce(status,'') <> 'dismissed' loop
+    if e.recur_freq = 'none' then
+      occ := e.starts_at;
+      if occ >= start_day and occ <= (end_day + interval '1 day - 1 second') then
+        insert into public.show_team_invitations(event_id, occ_start, team_id, status, invited_by)
+        values (p_event_id, occ, s.team_id, 'invited', auth.uid())
+        on conflict (event_id, occ_start, team_id) do nothing;
+      end if;
+    elsif e.recur_freq = 'weekly' then
+      d := start_day;
+      while d <= end_day loop
+        wd2 := substring(upper(to_char(d,'DY')),1,2);
+        if (byday is null and wd2 = e_dow) or (byday is not null and wd2 = any(byday)) then
+          occ := date_trunc('day', d) + day_interval;
+          if occ >= e.starts_at then
+            insert into public.show_team_invitations(event_id, occ_start, team_id, status, invited_by)
+            values (p_event_id, occ, s.team_id, 'invited', auth.uid())
+            on conflict (event_id, occ_start, team_id) do nothing;
+          end if;
+        end if;
+        d := d + interval '1 day';
+      end loop;
+    elsif e.recur_freq = 'monthly' then
+      d := start_day;
+      while d <= end_day loop
+        y := extract(year from d)::int; m := extract(month from d)::int;
+        month_start := make_date(y, m, 1);
+        if wom is not null and byday is not null and array_length(byday,1) = 1 then
+          -- Week-of-month pattern: compute nth weekday of month
+          wd2 := byday[1];
+          -- Convert wd2 ('MO') to 0..6 where 0=Sunday like Postgres dow?
+          -- We'll match by stepping days from first of month until matching wd2
+          -- Find first matching weekday in this month
+          dom := 1;
+          while substring(upper(to_char(make_timestamp(y,m,dom,0,0,0),'DY')),1,2) <> wd2 loop
+            dom := dom + 1;
+          end loop;
+          if wom > 0 then
+            dom := dom + 7 * (wom - 1);
+          else
+            -- last (-1): go to last day of month, step back to matching weekday
+            dom := extract(day from (month_start + interval '1 month - 1 day'))::int;
+            while substring(upper(to_char(make_timestamp(y,m,dom,0,0,0),'DY')),1,2) <> wd2 loop
+              dom := dom - 1;
+            end loop;
+          end if;
+        else
+          -- Month-day pattern (or fallback to event DOM)
+          dom := coalesce(e.recur_bymonthday[1], extract(day from e.starts_at)::int);
+          dom := least(dom, extract(day from (month_start + interval '1 month - 1 day'))::int);
+        end if;
+        occ := (make_timestamp(y, m, dom, 0, 0, 0) at time zone 'UTC') + day_interval;
+        if occ >= e.starts_at and occ >= start_day and occ <= (end_day + interval '1 day - 1 second') then
+          insert into public.show_team_invitations(event_id, occ_start, team_id, status, invited_by)
+          values (p_event_id, occ, s.team_id, 'invited', auth.uid())
+          on conflict (event_id, occ_start, team_id) do nothing;
+        end if;
+        d := date_trunc('month', d) + interval '1 month';
+      end loop;
+    else
+      occ := e.starts_at;
+      if occ >= start_day and occ <= (end_day + interval '1 day - 1 second') then
+        insert into public.show_team_invitations(event_id, occ_start, team_id, status, invited_by)
+        values (p_event_id, occ, s.team_id, 'invited', auth.uid())
+        on conflict (event_id, occ_start, team_id) do nothing;
+      end if;
+    end if;
+  end loop;
+end; $$;
+grant execute on function public.seed_series_invites(uuid, timestamptz, timestamptz) to authenticated;
+
+drop function if exists public.invite_team_to_series(p_event_id uuid, p_team_id uuid);
+create or replace function public.invite_team_to_series(p_event_id uuid, p_team_id uuid)
+returns void language plpgsql security definer set search_path=public as $$
+begin
+  if not exists (select 1 from public.show_events e join public.show_series s on s.id = e.series_id where e.id = p_event_id and s.owner_id = auth.uid()) then raise exception 'not allowed'; end if;
+  insert into public.show_series_team_invitations(event_id, team_id, status, invited_by)
+  values (p_event_id, p_team_id, 'invited', auth.uid())
+  on conflict (event_id, team_id) do update set status = excluded.status, invited_by = excluded.invited_by;
+  perform public.seed_series_invites(p_event_id, now(), now() + interval '365 days');
+end; $$;
+grant execute on function public.invite_team_to_series(uuid, uuid) to authenticated;
+
+drop function if exists public.cancel_team_series_invite(p_event_id uuid, p_team_id uuid);
+create or replace function public.cancel_team_series_invite(p_event_id uuid, p_team_id uuid)
+returns void language plpgsql security definer set search_path=public as $$
+begin
+  update public.show_series_team_invitations set status = 'canceled' where event_id = p_event_id and team_id = p_team_id;
+end; $$;
+grant execute on function public.cancel_team_series_invite(uuid, uuid) to authenticated;
+
+drop function if exists public.remove_team_from_series(p_event_id uuid, p_team_id uuid);
+create or replace function public.remove_team_from_series(p_event_id uuid, p_team_id uuid)
+returns void language plpgsql security definer set search_path=public as $$
+begin
+  delete from public.show_series_team_invitations where event_id = p_event_id and team_id = p_team_id;
+end; $$;
+grant execute on function public.remove_team_from_series(uuid, uuid) to authenticated;
+
+drop function if exists public.upsert_occ_lineup_status(p_event_id uuid, p_occ_start timestamptz, p_team_id uuid, p_status text);
+create or replace function public.upsert_occ_lineup_status(p_event_id uuid, p_occ_start timestamptz, p_team_id uuid, p_status text)
+returns void language plpgsql security definer set search_path=public as $$
+begin
+  insert into public.show_team_invitations(event_id, occ_start, team_id, status, invited_by)
+  values (p_event_id, p_occ_start, p_team_id, coalesce(p_status,'invited'), auth.uid())
+  on conflict (event_id, occ_start, team_id) do update set status = excluded.status;
+end; $$;
+grant execute on function public.upsert_occ_lineup_status(uuid, timestamptz, uuid, text) to authenticated;
+
+notify pgrst, 'reload schema';
+
+-- Clear per-occurrence override: reverts to series default visibility
+drop function if exists public.clear_occ_lineup_override(p_event_id uuid, p_occ_start timestamptz, p_team_id uuid);
+create or replace function public.clear_occ_lineup_override(p_event_id uuid, p_occ_start timestamptz, p_team_id uuid)
+returns void language sql security definer set search_path=public as $$
+  delete from public.show_team_invitations
+  where event_id = p_event_id and occ_start = p_occ_start and team_id = p_team_id;
+$$;
+grant execute on function public.clear_occ_lineup_override(uuid, timestamptz, uuid) to authenticated;
+
+notify pgrst, 'reload schema';
+
+-- Keep lineup occ_start in sync for single (non-recurring) shows when time changes
+drop function if exists public.trg_sync_lineup_on_show_time_change();
+create or replace function public.trg_sync_lineup_on_show_time_change()
+returns trigger
+language plpgsql
+security definer
+set search_path = public
+as $$
+begin
+  -- Only for non-recurring shows, and only when starts_at changed
+  if (TG_OP = 'UPDATE') and (NEW.recur_freq = 'none') and (NEW.starts_at is distinct from OLD.starts_at) then
+    update public.show_team_invitations
+    set occ_start = NEW.starts_at
+    where event_id = NEW.id;
+  end if;
+  return NEW;
+end; $$;
+
+drop trigger if exists trg_sync_lineup_on_show_time_change on public.show_events;
+create trigger trg_sync_lineup_on_show_time_change
+after update on public.show_events
+for each row execute procedure public.trg_sync_lineup_on_show_time_change();
+
+notify pgrst, 'reload schema';
+
 notify pgrst, 'reload schema';
 
 -- ====================================================
@@ -1536,6 +2181,11 @@ security definer
 set search_path = public
 as $$
 begin
+  -- Skip logging if team no longer exists (e.g., during cascading delete)
+  if not exists (select 1 from public.teams t where t.id = p_team_id) then
+    return;
+  end if;
+
   insert into public.team_change_log(team_id, actor_user_id, action, details)
   values (p_team_id, auth.uid(), p_action, coalesce(p_details, '{}'::jsonb));
 end;

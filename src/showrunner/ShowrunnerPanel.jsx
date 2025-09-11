@@ -18,7 +18,7 @@ export default function ShowrunnerPanel() {
     (async () => {
       setErr(""); setMsg(""); setLoading(true);
       try { setSeries(await listMySeries()); }
-      catch (e) { setErr(e.message || "Failed to load series"); }
+      catch (e) { setErr(e.message || "Failed to load productions"); }
       finally { setLoading(false); }
     })();
   }, []);
@@ -29,31 +29,31 @@ export default function ShowrunnerPanel() {
     try {
       const s = await createSeries(newName.trim());
       setSeries((xs)=>[s, ...xs]); setNewName(""); setSelected(s);
-      setMsg("Series created.");
-    } catch (e) { setErr(e.message || "Failed to create series"); }
+      setMsg("Production created.");
+    } catch (e) { setErr(e.message || "Failed to create production"); }
     finally { setCreating(false); }
   };
 
   const backToList = () => { setSelected(null); setMsg(""); setErr(""); };
 
   const rename = async () => {
-    const name = window.prompt("Rename series", selected?.name || "");
+    const name = window.prompt("Rename production", selected?.name || "");
     if (!name || !name.trim()) return;
     try {
       await renameSeriesRPC(selected.id, name.trim());
       setSelected({ ...selected, name: name.trim() });
       setSeries(xs => xs.map(s => s.id === selected.id ? { ...s, name: name.trim() } : s));
-      setMsg("Series renamed.");
+      setMsg("Production renamed.");
     } catch (e) { setErr(e.message || "Failed to rename"); }
   };
 
   const remove = async () => {
-    if (!window.confirm("Delete this series? This cannot be undone.")) return;
+    if (!window.confirm("Delete this production? This cannot be undone.")) return;
     try {
       await deleteSeriesRPC(selected.id);
       setSeries(xs => xs.filter(s => s.id !== selected.id));
-      backToList(); setMsg("Series deleted.");
-    } catch (e) { setErr(e.message || "Failed to delete"); }
+      backToList(); setMsg("Production deleted.");
+    } catch (e) { setErr(e.message || "Failed to delete production"); }
   };
 
   if (loading) return <p style={{ opacity: 0.8 }}>Loading…</p>;
@@ -67,16 +67,16 @@ export default function ShowrunnerPanel() {
       {!selected ? (
         <>
           <Label>
-            Create new series
+            Create new production
             <Row>
-              <Input placeholder="Series name" value={newName} onChange={(e)=>setNewName(e.target.value)} style={{ minWidth: 260 }} />
+              <Input placeholder="Production name" value={newName} onChange={(e)=>setNewName(e.target.value)} style={{ minWidth: 260 }} />
               <Button disabled={creating || !newName.trim()} onClick={createNew}>{creating ? "Creating…" : "Create"}</Button>
             </Row>
           </Label>
           <div style={{ marginTop: 20 }}>
-            <h3 style={{ margin: "8px 0 8px", fontSize: 16 }}>Your series</h3>
+            <h3 style={{ margin: "8px 0 8px", fontSize: 16 }}>Your productions</h3>
             {series.length === 0 ? (
-              <p style={{ opacity: 0.8 }}>No series yet. Create one above.</p>
+              <p style={{ opacity: 0.8 }}>No productions yet. Create one above.</p>
             ) : (
               <ul style={{ listStyle: "none", padding: 0, margin: 0 }}>
                 {series.map((s) => (
@@ -100,7 +100,7 @@ export default function ShowrunnerPanel() {
             <GhostButton onClick={backToList}>← Back</GhostButton>
             <div style={{ flex: 1 }} />
             <GhostButton onClick={rename}>Rename</GhostButton>
-            <DangerButton onClick={remove}>Delete series</DangerButton>
+            <DangerButton onClick={remove}>Delete production</DangerButton>
           </Row>
           <div style={{ marginTop: 16 }}>
             <h3 style={{ margin: "0 0 4px", fontSize: 18 }}>{selected.name}</h3>
