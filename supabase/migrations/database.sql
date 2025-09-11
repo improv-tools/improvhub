@@ -929,7 +929,8 @@ begin
          jsonb_build_object('event_id', v_event, 'occ_start', v_occ, 'title', v_title, 'by', auth.uid(), 'by_name', public.user_display_name(auth.uid()))
   from public.show_team_invitations sti
   join public.team_members m on m.team_id = sti.team_id
-  where sti.event_id = v_event and sti.occ_start = v_occ and coalesce(sti.status,'') <> 'dismissed';
+  where sti.event_id = v_event and sti.occ_start = v_occ and coalesce(sti.status,'') <> 'dismissed'
+    and m.user_id <> auth.uid();
 
   -- For each team: accepted → log removed booking; invited → delete prior invite log (no new entry)
   for l in
@@ -983,7 +984,8 @@ begin
          )
   from public.show_team_invitations sti
   join public.team_members m on m.team_id = sti.team_id
-  where sti.event_id = OLD.id and coalesce(sti.status,'') <> 'dismissed';
+  where sti.event_id = OLD.id and coalesce(sti.status,'') <> 'dismissed'
+    and m.user_id <> auth.uid();
 
   -- Team change log cleanup vs removal notice
   -- If a team never accepted any lineup for this event, delete prior invitation logs.
@@ -2787,19 +2789,23 @@ select
   l.id,
   l.team_id,
   l.actor_user_id,
-  coalesce(
-    l.details->>'production_name',
-    u.raw_user_meta_data->>'display_name',
-    u.raw_user_meta_data->>'full_name',
-    u.raw_user_meta_data->>'name',
-    split_part(u.email, '@', 1),
-    'Unknown'
-  ) as actor_name,
+  (case
+     when l.action = 'show_lineup_accepted' then coalesce(t.name, 'Team')
+     else coalesce(
+       l.details->>'production_name',
+       u.raw_user_meta_data->>'display_name',
+       u.raw_user_meta_data->>'full_name',
+       u.raw_user_meta_data->>'name',
+       split_part(u.email, '@', 1),
+       'Unknown'
+     )
+   end) as actor_name,
   l.action,
   l.details,
   l.created_at
 from public.team_change_log l
-left join auth.users u on u.id = l.actor_user_id;
+left join auth.users u on u.id = l.actor_user_id
+left join public.teams t on t.id = l.team_id;
 
 grant select on public.team_change_log_with_names to authenticated;
 

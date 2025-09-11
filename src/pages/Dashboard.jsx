@@ -138,6 +138,15 @@ export default function Dashboard() {
                             const by = p.by_name ? ` (by ${p.by_name})` : '';
                             return `Occurrence updated: ${p.title || p.event_id || ''} · ${when(p.occ_start)}${by}${parts.length ? ' · ' + parts.join(', ') : ''}`;
                           }
+                          case 'show_occurrence_canceled':
+                          case 'show_occurance_canceled': { // accept legacy misspelling if present
+                            const by = p.by_name ? ` (by ${p.by_name})` : '';
+                            return `Show night canceled: ${p.title || p.event_id || ''} · ${when(p.occ_start)}${by}`;
+                          }
+                          case 'show_series_canceled': {
+                            const by = p.by_name ? ` (by ${p.by_name})` : '';
+                            return `Show series deleted: ${p.title || p.event_id || ''}${by}`;
+                          }
                           default:
                             return n.kind;
                         }
