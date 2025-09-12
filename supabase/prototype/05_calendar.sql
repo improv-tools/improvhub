@@ -141,6 +141,7 @@ create table if not exists event_attendees (
   rsvp             boolean,
   cutype           text check (cutype in ('INDIVIDUAL','GROUP','RESOURCE','ROOM','UNKNOWN')),
   member_of        text[],
+  member_of_user_id uuid references users(id),     // FIX THIS FKEY  !!!!!!!!!!!!!!!!!!
   delegated_to     citext[],
   delegated_from   citext[],
   sent_by          citext,
