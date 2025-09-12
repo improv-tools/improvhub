@@ -134,6 +134,7 @@ create table if not exists event_attendees (
   event_id         uuid not null references events(id) on delete cascade,
   override_id      uuid references event_overrides(id) on delete cascade,  -- NULL => series-level
   email            citext not null,
+  user_id          uuid references users(id),     // FIX THIS FKEY  !!!!!!!!!!!!!!!!!!
   cn               text,
   role             attendee_role,
   partstat         attendee_partstat,
@@ -145,6 +146,9 @@ create table if not exists event_attendees (
   sent_by          citext,
   params           jsonb not null default '{}'::jsonb,
   unique (event_id, coalesce(override_id, '00000000-0000-0000-0000-000000000000'::uuid), email)
+  
+  constraint chk_attendee_identity_one
+    check ( (user_id is null) <> (email is null) )
 );
 create index if not exists idx_attendees_event on event_attendees (event_id);
 create index if not exists idx_attendees_override on event_attendees (override_id);
