@@ -146,13 +146,24 @@ create table if not exists event_attendees (
   delegated_from   citext[],
   sent_by          citext,
   params           jsonb not null default '{}'::jsonb,
-  unique (event_id, coalesce(override_id, '00000000-0000-0000-0000-000000000000'::uuid), email)
   
   constraint chk_attendee_identity_one
     check ( (user_id is null) <> (email is null) )
 );
 create index if not exists idx_attendees_event on event_attendees (event_id);
 create index if not exists idx_attendees_override on event_attendees (override_id);
+create index if not exists idx_attendees_user      on event_attendees (user_id);
+create index if not exists idx_attendees_email     on event_attendees (email);
+
+-- uniqueness per (event, occurrence-or-series, identity)
+-- treats NULL override_id as equal across rows
+create unique index if not exists uniq_attendee_slot_user
+  on event_attendees (event_id, override_id, user_id) nulls not distinct
+  where user_id is not null;
+
+create unique index if not exists uniq_attendee_slot_email
+  on event_attendees (event_id, override_id, email) nulls not distinct
+  where user_id is null;
 
 -- =========================
 -- SEQUENCE/EDITOR TRIGGERS
