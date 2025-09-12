@@ -1,159 +1,102 @@
--- =========================
--- 0) EXTENSIONS & ENUMS
--- =========================
--- WHY: pgcrypto -> UUIDs without round-tripping; citext -> case-insensitive emails.
-create extension if not exists pgcrypto;
-create extension if not exists citext;
+-- ============================================================
+-- calendar.sql
+-- Run order: 1) utils.sql  2) user.sql  3) calendar.sql
+-- WHY: This file defines calendars (owned by generic owners), sharing,
+--      RFC 5545 event storage (events/overrides/attendees), RLS policies,
+--      and RPC functions for CRUD. The heavy RFC logic (RRULE expansion,
+--      ICS import/export) should live in Edge Functions.
+-- ============================================================
 
--- WHY: Roles as ENUMs prevent typos and make RLS logic simpler & faster.
-do $$ begin
-  create type cal_role as enum ('owner','writer','reader');
-exception when duplicate_object then null; end $$;
-
--- WHY: Map common ATTENDEE params to enums for data integrity & easy filtering.
-do $$ begin
-  create type attendee_role as enum ('REQ-PARTICIPANT','OPT-PARTICIPANT','NON-PARTICIPANT','CHAIR');
-exception when duplicate_object then null; end $$;
-
-do $$ begin
-  create type attendee_partstat as enum
-    ('NEEDS-ACTION','ACCEPTED','DECLINED','TENTATIVE','DELEGATED','COMPLETED','IN-PROCESS');
-exception when duplicate_object then null; end $$;
-
--- WHY: Generic trigger to keep updated_at fresh everywhere.
-create or replace function _touch_updated_at() returns trigger
-language plpgsql as $$
-begin new.updated_at := now(); return new; end $$;
-
-
--- =========================
--- 1) USER COUPLING
--- =========================
--- WHY: Keep external directory/CRM linkage separate from calendar rows.
--- Lets you join auth.users -> your systems without polluting core tables.
-create table if not exists user_profiles (
-  user_id          uuid primary key,            -- WHY: equals auth.users.id for joins in RLS & UI.
-  external_user_id text,                        -- WHY: map to HR/CRM/etc.
-  user_type        text,                        -- WHY: 'employee','contractor','guest'... free-form.
-  privilege_level  int not null default 0,      -- WHY: your app-specific ladder (feature flags, etc.).
-  created_at       timestamptz not null default now(),
-  updated_at       timestamptz not null default now()
-);
-
-drop trigger if exists trg_user_profiles_touch on user_profiles;
-create trigger trg_user_profiles_touch
-before update on user_profiles
-for each row execute function _touch_updated_at();
-
-
--- =========================
--- 2) CALENDARS & MEMBERSHIP
--- =========================
--- WHY: A calendar has an owner & default TZ; members table drives RLS.
-create table calendars (
+-- CALENDARS (owned by owners.id), plus calendar-level members for ad-hoc sharing
+create table if not exists calendars (
   id               uuid primary key default gen_random_uuid(),
-  owner_user_id    uuid not null,                -- WHY: auth.users.id; owner is ultimate writer.
-  name             text not null,                -- WHY: simple, searchable.
+  owner_id         uuid not null references owners(id) on delete cascade, -- WHY: generic ownership abstraction
+  name             text not null,
   description      text,
-  color            text,                         -- WHY: UI hint only.
-  timezone_default text not null,                -- WHY: IANA TZ for display & ICS round-trip.
+  color            text,
+  timezone_default text not null,
   created_at       timestamptz not null default now(),
   updated_at       timestamptz not null default now()
 );
-
--- WHY: Members with roles enable shared calendars; fuels RLS checks.
-create table calendar_members (
-  calendar_id      uuid references calendars(id) on delete cascade,
-  user_id          uuid not null,                -- WHY: auth.users.id
-  role             cal_role not null,            -- WHY: 'reader' vs 'writer' in policies.
-  primary key (calendar_id, user_id)
-);
-
-create index on calendars (owner_user_id);
-create index on calendar_members (user_id);
-
 drop trigger if exists trg_cal_touch on calendars;
 create trigger trg_cal_touch
 before update on calendars
 for each row execute function _touch_updated_at();
 
-
+create table if not exists calendar_members (
+  calendar_id uuid not null references calendars(id) on delete cascade,
+  user_id     uuid not null references auth.users(id) on delete cascade,
+  role        cal_role not null,              -- WHY: 'writer'/'reader' sharers alongside owner_users
+  primary key (calendar_id, user_id)
+);
+create index if not exists idx_cal_members_user on calendar_members(user_id);
 
 -- =========================
--- 3) EVENTS (VEVENT master)
+-- RFC 5545 TABLES
 -- =========================
--- WHY: Store raw RFC fields to preserve ICS fidelity; expansion happens in Edge, not SQL.
-create table events (
+
+-- Master events (VEVENT)
+create table if not exists events (
   id               uuid primary key default gen_random_uuid(),
   calendar_id      uuid not null references calendars(id) on delete cascade,
 
-  -- WHY: UID+SEQUENCE are how iTIP clients detect newer versions.
-  uid              text not null,                -- WHY: globally unique per calendar.
-  sequence         int  not null default 0,      -- WHY: bumped by trigger on meaningful change.
-  last_modified    timestamptz not null default now(), -- WHY: sync-friendly timestamp.
+  uid              text not null,                    -- WHY: iTIP identity per calendar
+  sequence         int  not null default 0,          -- WHY: bump on meaningful change
+  last_modified    timestamptz not null default now(),
 
-  -- WHY: Always store UTC; keep original TZID for round-trip ICS exports.
-  dtstart          timestamptz not null,
-  dtend            timestamptz,                  -- WHY: RFC allows either DTEND or DURATION.
-  duration_sec     int,                          -- WHY: XOR with dtend to avoid ambiguity.
-  tzid             text,                         -- WHY: preserves DTSTART local zone for ICS.
-  all_day          boolean not null default false, -- WHY: UI/rendering hint.
+  dtstart          timestamptz not null,             -- store UTC
+  dtend            timestamptz,                      -- XOR with duration_sec
+  duration_sec     int,
+  tzid             text,                             -- original zone for DTSTART
+  all_day          boolean not null default false,
 
-  -- WHY: Recurrence is stored raw; expansion via libraries (rrule.js/dateutil/etc).
-  rrule            text,
-  rdate            timestamptz[],                -- WHY: explicit inclusions (UTC).
-  exdate           timestamptz[],                -- WHY: explicit exclusions (UTC).
+  rrule            text,                             -- raw RFC strings; expansion in Edge
+  rdate            timestamptz[],
+  exdate           timestamptz[],
 
-  -- WHY: Core ICS properties; 'extended' holds vendor X- props for lossless round-trip.
   summary          text,
   description      text,
   location         text,
   geo_lat          double precision,
   geo_lon          double precision,
   url              text,
-  status           text check (status in ('TENTATIVE','CONFIRMED','CANCELLED')),  -- WHY: RFC 5545 VEVENT.
-  transparency     text check (transparency in ('OPAQUE','TRANSPARENT')),         -- WHY: busy vs free.
+  status           text check (status in ('TENTATIVE','CONFIRMED','CANCELLED')),
+  transparency     text check (transparency in ('OPAQUE','TRANSPARENT')),
   organizer_email  citext,
   organizer_name   text,
   categories       text[],
   extended         jsonb not null default '{}'::jsonb,
 
+  created_by       uuid default auth.uid(),          -- optional audit
+  updated_by       uuid,                             -- optional audit
   created_at       timestamptz not null default now(),
   updated_at       timestamptz not null default now(),
 
-  -- WHY: prevent duplicate UIDs in same calendar; necessary for iTIP flow correctness.
   constraint events_uid_unique_per_cal unique (calendar_id, uid),
-
-  -- WHY: force a single definition of "end" to avoid conflicts.
   constraint events_time_choice check ((dtend is null) <> (duration_sec is null)),
-
-  -- WHY: basic sanity check for time ordering.
   constraint events_dt_order check (dtend is null or dtend > dtstart)
 );
-
-create index on events (calendar_id, dtstart);    -- WHY: common range queries per calendar.
-create index on events (calendar_id, uid);        -- WHY: iTIP lookups.
-create index on events using gin (categories);    -- WHY: tag filters.
-create index on events using gin (extended);      -- WHY: query X- props.
+create index if not exists idx_events_cal_dt on events (calendar_id, dtstart);
+create index if not exists idx_events_cal_uid on events (calendar_id, uid);
+create index if not exists idx_events_categories on events using gin (categories);
+create index if not exists idx_events_extended on events using gin (extended);
 
 drop trigger if exists trg_events_touch on events;
 create trigger trg_events_touch
 before update on events
 for each row execute function _touch_updated_at();
 
+drop trigger if exists trg_events_editor on events;
+create trigger trg_events_editor
+before update on events
+for each row execute function _stamp_editor();
 
-
--- =========================
--- 4) OVERRIDES (RECURRENCE-ID)
--- =========================
--- WHY: A detached occurrence with changes at a specific instance timestamp.
--- Move/cancel/change one date without altering the entire series.
-create table event_overrides (
+-- Detached per-instance overrides (RECURRENCE-ID)
+create table if not exists event_overrides (
   id               uuid primary key default gen_random_uuid(),
   parent_event_id  uuid not null references events(id) on delete cascade,
-  recurrence_id    timestamptz not null,         -- WHY: original instance start (UTC).
+  recurrence_id    timestamptz not null,             -- original instance start (UTC)
 
-  -- WHY: Any of these may be NULL to mean "inherit from master".
   dtstart          timestamptz,
   dtend            timestamptz,
   duration_sec     int,
@@ -174,40 +117,26 @@ create table event_overrides (
   created_at       timestamptz not null default now(),
   updated_at       timestamptz not null default now(),
 
-  -- WHY: Same XOR rule as master; avoid contradictory end definitions.
   constraint overrides_time_choice check (dtend is null or duration_sec is null),
-
-  -- WHY: If dtend provided, dtstart must exist and be after it.
   constraint overrides_dt_order check (dtend is null or (dtstart is not null and dtend > dtstart)),
-
-  -- WHY: Only one override per instance per event.
   constraint overrides_unique_instance unique (parent_event_id, recurrence_id)
 );
+create index if not exists idx_overrides_parent_rid on event_overrides (parent_event_id, recurrence_id);
 
-create index on event_overrides (parent_event_id, recurrence_id); -- WHY: fast instance matching.
-
-drop trigger if exists trg_ovr_touch on event_overrides;
-create trigger trg_ovr_touch
+drop trigger if exists trg_overrides_touch on event_overrides;
+create trigger trg_overrides_touch
 before update on event_overrides
 for each row execute function _touch_updated_at();
 
-
-
--- =========================
--- 5) ATTENDEES (ATTENDEE params)
--- =========================
--- WHY: Row per attendee per scope:
---   - series-level = override_id IS NULL
---   - per-occurrence change = override_id points to that override
--- Cleanly supports "accept series; decline one date".
-create table event_attendees (
+-- ATTENDEES (series-level or per-override)
+create table if not exists event_attendees (
   id               uuid primary key default gen_random_uuid(),
   event_id         uuid not null references events(id) on delete cascade,
   override_id      uuid references event_overrides(id) on delete cascade,  -- NULL => series-level
-  email            citext not null,               -- WHY: citext avoids casing issues.
+  email            citext not null,
   cn               text,
   role             attendee_role,
-  partstat         attendee_partstat,             -- WHY: attendee's reply (not event status!).
+  partstat         attendee_partstat,
   rsvp             boolean,
   cutype           text check (cutype in ('INDIVIDUAL','GROUP','RESOURCE','ROOM','UNKNOWN')),
   member_of        text[],
@@ -215,21 +144,15 @@ create table event_attendees (
   delegated_from   citext[],
   sent_by          citext,
   params           jsonb not null default '{}'::jsonb,
-
-  -- WHY: prevent duplicates within the same scope (series or specific instance).
   unique (event_id, coalesce(override_id, '00000000-0000-0000-0000-000000000000'::uuid), email)
 );
-
-create index on event_attendees (event_id);    -- WHY: common joins for UI.
-create index on event_attendees (override_id); -- WHY: per-instance attendee diffs.
-
-
+create index if not exists idx_attendees_event on event_attendees (event_id);
+create index if not exists idx_attendees_override on event_attendees (override_id);
 
 -- =========================
--- 6) VERSIONING TRIGGERS
+-- SEQUENCE/EDITOR TRIGGERS
 -- =========================
--- WHY: iTIP relies on SEQUENCE increasing for meaningful updates.
--- This trigger bumps SEQUENCE when fields that matter to clients change.
+
 create or replace function _bump_event_sequence() returns trigger
 language plpgsql as $$
 begin
@@ -241,19 +164,16 @@ begin
          OLD.summary, OLD.description, OLD.location, OLD.status, OLD.transparency,
          OLD.categories, OLD.extended)
   then
-    NEW.sequence := coalesce(OLD.sequence,0) + 1; -- WHY: signal "newer version".
-    NEW.last_modified := now();                   -- WHY: sync-friendly timestamp.
+    NEW.sequence := coalesce(OLD.sequence,0) + 1;
+    NEW.last_modified := now();
   end if;
   return NEW;
 end $$;
-
 drop trigger if exists trg_events_bump_seq on events;
 create trigger trg_events_bump_seq
 before update on events
 for each row execute function _bump_event_sequence();
 
--- WHY: Any change to an override also means the event version should advance
--- so subscribers can pick up the per-instance change.
 create or replace function _bump_parent_sequence_from_override() returns trigger
 language plpgsql as $$
 begin
@@ -264,19 +184,31 @@ begin
    where id = coalesce(NEW.parent_event_id, OLD.parent_event_id);
   return coalesce(NEW,OLD);
 end $$;
-
-drop trigger if exists trg_ovr_bump_parent on event_overrides;
-create trigger trg_ovr_bump_parent
+drop trigger if exists trg_overrides_bump_parent on event_overrides;
+create trigger trg_overrides_bump_parent
 after insert or update or delete on event_overrides
 for each row execute function _bump_parent_sequence_from_override();
 
+-- OPTIONAL: auto-add organizer as attendee (CHAIR). Comment out if not desired.
+create or replace function _auto_add_organizer_attendee() returns trigger
+language plpgsql as $$
+begin
+  if new.organizer_email is not null then
+    insert into event_attendees (event_id, email, cn, role, partstat, rsvp)
+    values (new.id, new.organizer_email, new.organizer_name, 'CHAIR', 'NEEDS-ACTION', false)
+    on conflict do nothing;
+  end if;
+  return new;
+end $$;
+drop trigger if exists trg_events_add_org_att on events;
+create trigger trg_events_add_org_att
+after insert on events
+for each row execute function _auto_add_organizer_attendee();
 
 -- =========================
--- 7) VIEWS FOR UI
+-- VIEWS (UI-friendly)
 -- =========================
--- WHY: Keep client queries simple & RLS-friendly by exposing pre-joined JSON.
 
--- Events with series-level attendees aggregated
 create or replace view v_events as
 select
   e.*,
@@ -290,7 +222,6 @@ select
   ) as attendees_series
 from events e;
 
--- Overrides with their per-occurrence attendees aggregated
 create or replace view v_event_overrides as
 select
   o.*,
@@ -304,8 +235,6 @@ select
   ) as attendees_override
 from event_overrides o;
 
--- Flat merged view (master + overrides). NOT an expansion: still 1 row per master or override.
--- WHY: Useful for building lists & for Edge expansion input.
 create or replace view v_events_with_overrides as
 select e.id as event_id, null::uuid as override_id, e.calendar_id, e.uid, e.sequence,
        e.dtstart, e.dtend, e.duration_sec, e.tzid, e.all_day,
@@ -336,104 +265,159 @@ select o.parent_event_id, o.id, e.calendar_id, e.uid, e.sequence,
 from event_overrides o
 join events e on e.id = o.parent_event_id;
 
-
 -- =========================
--- 8) ROW-LEVEL SECURITY (RLS)
+-- RLS HELPERS & POLICIES
 -- =========================
--- WHY: Make calendars safely multi-tenant. Members read; writers/owners write.
 
-alter table user_profiles      enable row level security;
-alter table calendars          enable row level security;
-alter table calendar_members   enable row level security;
-alter table events             enable row level security;
-alter table event_overrides    enable row level security;
-alter table event_attendees    enable row level security;
+alter table if exists calendars         enable row level security;
+alter table if exists calendar_members  enable row level security;
+alter table if exists events            enable row level security;
+alter table if exists event_overrides   enable row level security;
+alter table if exists event_attendees   enable row level security;
 
--- WHY: Helper checks keep policies readable & reusable.
-create or replace function is_member_of_calendar(cal_id uuid)
+-- Who is owner-level for a calendar? (admins of the owning entity)
+create or replace function is_owner_level(cal_id uuid)
 returns boolean language sql stable as $$
   select exists(
     select 1
     from calendars c
-    left join calendar_members m
-      on m.calendar_id = c.id and m.user_id = auth.uid()
+    join owner_users ou on ou.owner_id = c.owner_id
     where c.id = cal_id
-      and (c.owner_user_id = auth.uid() or m.user_id is not null)
+      and ou.user_id = auth.uid()
+      and ou.role in ('admin')
   );
 $$;
 
+-- Who can write a calendar? (owner admins OR per-calendar writers/owners)
 create or replace function can_write_calendar(cal_id uuid)
 returns boolean language sql stable as $$
   select exists(
     select 1
     from calendars c
-    left join calendar_members m
-      on m.calendar_id = c.id and m.user_id = auth.uid()
-    where c.id = cal_id
-      and (
-        c.owner_user_id = auth.uid()
-        or (m.user_id is not null and m.role in ('owner','writer'))
-      )
+    join owner_users ou on ou.owner_id = c.owner_id
+    where c.id = cal_id and ou.user_id = auth.uid() and ou.role in ('admin','editor')
+    union
+    select 1
+    from calendar_members m
+    where m.calendar_id = cal_id and m.user_id = auth.uid() and m.role in ('owner','writer')
   );
 $$;
 
--- Calendars: anyone who is a member can read; only owner can write/edit members.
+-- Who can read a calendar? (members or any operator of the owner entity)
+create or replace function is_member_of_calendar(cal_id uuid)
+returns boolean language sql stable as $$
+  select exists(
+    select 1 from calendar_members m where m.calendar_id = cal_id and m.user_id = auth.uid()
+    union
+    select 1 from calendars c join owner_users ou on ou.owner_id = c.owner_id
+      where c.id = cal_id and ou.user_id = auth.uid()
+  );
+$$;
+
+-- Calendar policies
 create policy cal_read on calendars for select
-  using (owner_user_id = auth.uid()
-     or exists (select 1 from calendar_members where calendar_id = calendars.id and user_id = auth.uid()));
+using (is_member_of_calendar(id));
 
 create policy cal_write on calendars for all
-  using (owner_user_id = auth.uid())
-  with check (owner_user_id = auth.uid());
+using (is_owner_level(id))
+with check (is_owner_level(id));
 
--- Members table managed by owner
+-- Calendar members
 create policy members_read on calendar_members for select
-  using (is_member_of_calendar(calendar_id));
+using (is_member_of_calendar(calendar_id));
 
 create policy members_write on calendar_members for all
-  using (exists (select 1 from calendars c where c.id = calendar_members.calendar_id and c.owner_user_id = auth.uid()))
-  with check (exists (select 1 from calendars c where c.id = calendar_members.calendar_id and c.owner_user_id = auth.uid()));
+using (is_owner_level(calendar_id))
+with check (is_owner_level(calendar_id));
 
 -- Events
 create policy events_read on events for select
-  using (is_member_of_calendar(calendar_id));
+using (is_member_of_calendar(calendar_id));
 
 create policy events_insert on events for insert
-  with check (can_write_calendar(calendar_id));
+with check (can_write_calendar(calendar_id));
 
 create policy events_update on events for update
-  using (can_write_calendar(calendar_id))
-  with check (can_write_calendar(calendar_id));
+using (can_write_calendar(calendar_id))
+with check (can_write_calendar(calendar_id));
 
 create policy events_delete on events for delete
-  using (can_write_calendar(calendar_id));
+using (can_write_calendar(calendar_id));
 
--- Overrides (scope via parent event)
+-- Overrides
 create policy overrides_read on event_overrides for select
-  using (is_member_of_calendar((select calendar_id from events where id = parent_event_id)));
+using (is_member_of_calendar((select calendar_id from events where id = parent_event_id)));
 
 create policy overrides_cud on event_overrides for all
-  using (can_write_calendar((select calendar_id from events where id = parent_event_id)))
-  with check (can_write_calendar((select calendar_id from events where id = parent_event_id)));
+using (can_write_calendar((select calendar_id from events where id = parent_event_id)))
+with check (can_write_calendar((select calendar_id from events where id = parent_event_id)));
 
--- Attendees (scope via event)
+-- Attendees
 create policy attendees_read on event_attendees for select
-  using (is_member_of_calendar((select calendar_id from events where id = event_id)));
+using (is_member_of_calendar((select calendar_id from events where id = event_id)));
 
 create policy attendees_cud on event_attendees for all
-  using (can_write_calendar((select calendar_id from events where id = event_id)))
-  with check (can_write_calendar((select calendar_id from events where id = event_id)));
-
+using (can_write_calendar((select calendar_id from events where id = event_id)))
+with check (can_write_calendar((select calendar_id from events where id = event_id)));
 
 -- =========================
--- 9) RPCs (SECURITY DEFINER)
+-- RPC API (SECURITY DEFINER)
 -- =========================
--- WHY: Single API surface for client. Centralizes validation & plays well with RLS.
 
 create schema if not exists api;
 
+-- Create calendar under a specific owner (kind + ref_id)
+create or replace function api.create_calendar_with_owner(p jsonb)
+returns calendars
+language plpgsql security definer set search_path=public as $$
+declare
+  v_owner owners;
+  v_cal   calendars;
+begin
+  if (p->>'kind') not in ('individual','act','producer') then
+    raise exception 'Invalid owner kind';
+  end if;
+
+  if p->>'kind' = 'individual' then
+    insert into owners(kind, individual_user_id, display_name)
+    values ('individual', coalesce(nullif(p->>'ref_id','')::uuid, auth.uid()), p->>'display_name')
+    on conflict do nothing;
+    select * into v_owner from owners
+     where kind='individual' and individual_user_id = coalesce(nullif(p->>'ref_id','')::uuid, auth.uid())
+     limit 1;
+  elsif p->>'kind' = 'act' then
+    if p->>'ref_id' is null then raise exception 'act ref_id required'; end if;
+    insert into owners(kind, act_id, display_name)
+    values ('act', (p->>'ref_id')::uuid, p->>'display_name')
+    on conflict do nothing;
+    select * into v_owner from owners where kind='act' and act_id=(p->>'ref_id')::uuid limit 1;
+  else
+    if p->>'ref_id' is null then raise exception 'producer ref_id required'; end if;
+    insert into owners(kind, producer_id, display_name)
+    values ('producer', (p->>'ref_id')::uuid, p->>'display_name')
+    on conflict do nothing;
+    select * into v_owner from owners where kind='producer' and producer_id=(p->>'ref_id')::uuid limit 1;
+  end if;
+
+  insert into calendars(owner_id, name, description, color, timezone_default)
+  values (
+    v_owner.id,
+    p->>'name',
+    nullif(p->>'description',''),
+    nullif(p->>'color',''),
+    coalesce(p->>'timezone_default','Europe/Dublin')
+  )
+  returning * into v_cal;
+
+  -- Convenience: add caller as writer member
+  insert into calendar_members(calendar_id, user_id, role)
+  values (v_cal.id, auth.uid(), 'writer')
+  on conflict do nothing;
+
+  return v_cal;
+end $$;
+
 -- Create Event
--- WHY: Accepts JSON to keep client simple; generates UID if missing.
 create or replace function api.create_event(p jsonb)
 returns events
 language plpgsql security definer set search_path=public as $$
@@ -470,10 +454,9 @@ begin
   )
   returning * into v;
   return v;
-end$$;
+end $$;
 
 -- Update Event (partial)
--- WHY: Patch-style updates so clients only send changed fields.
 create or replace function api.update_event(event_id uuid, p jsonb)
 returns events
 language plpgsql security definer set search_path=public as $$
@@ -506,17 +489,15 @@ begin
   where id = event_id
   returning * into v;
   return v;
-end$$;
+end $$;
 
 -- Delete Event
--- WHY: Simple hard-delete; rely on ON DELETE CASCADE to clean overrides/attendees.
 create or replace function api.delete_event(event_id uuid)
 returns void language sql security definer set search_path=public as $$
   delete from events where id = event_id;
 $$;
 
 -- Upsert Override
--- WHY: Create-or-update by (parent_event_id, recurrence_id) to match RFC RECURRENCE-ID semantics.
 create or replace function api.upsert_override(parent_event_id uuid, p jsonb)
 returns event_overrides
 language plpgsql security definer set search_path=public as $$
@@ -564,18 +545,16 @@ begin
       extended       = coalesce(excluded.extended, event_overrides.extended)
   returning * into o;
   return o;
-end$$;
+end $$;
 
 -- Delete Override
--- WHY: Target by (parent_event_id, recurrence_id) which uniquely identifies the instance.
 create or replace function api.delete_override(parent_event_id uuid, recurrence_id timestamptz)
 returns void language sql security definer set search_path=public as $$
   delete from event_overrides
   where parent_event_id = $1 and recurrence_id = $2;
 $$;
 
--- Upsert Attendee (series or per-occurrence)
--- WHY: Same shape for both scopes; override_id distinguishes them.
+-- Upsert Attendee (series or per-occurrence via override_id)
 create or replace function api.upsert_attendee(p jsonb)
 returns event_attendees
 language plpgsql security definer set search_path=public as $$
@@ -614,10 +593,9 @@ begin
     params     = coalesce(excluded.params, event_attendees.params)
   returning * into a;
   return a;
-end$$;
+end $$;
 
 -- Delete Attendee
--- WHY: Optional override_id allows deleting series-level OR instance-level row.
 create or replace function api.delete_attendee(event_id uuid, attendee_email citext, override_id uuid default null)
 returns void language sql security definer set search_path=public as $$
   delete from event_attendees
