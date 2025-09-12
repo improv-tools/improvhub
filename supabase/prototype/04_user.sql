@@ -1,28 +1,12 @@
 -- ============================================================
--- user.sql
--- Run order: 1) utils.sql  2) user.sql  3) calendar.sql
--- WHY: This file defines generic OWNERS (polymorphic), the ACT/PRODUCER
---      entities and their memberships, and the projection of those memberships
---      into owner_users for RLS. Also includes user_profiles & auth trigger.
+-- producers.sql
+-- Run order: 1) utils.sql  2) acts.sql  3) producers.sql  4) user.sql  5) calendar.sql
+-- WHY: Define PRODUCER entity and membership so owners/user.sql can sync it into owner_users.
 -- ============================================================
-
--- Minimal placeholder entity tables (replace with your real ones if you have them already)
-create table if not exists acts (
-  id uuid primary key default gen_random_uuid(),
-  name text not null
-);
 
 create table if not exists producers (
   id uuid primary key default gen_random_uuid(),
   name text not null
-);
-
--- Membership tables: who "runs" each entity
-create table if not exists act_users (
-  act_id uuid not null references acts(id) on delete cascade,
-  user_id uuid not null references auth.users(id) on delete cascade,
-  role entity_user_role not null default 'viewer',
-  primary key (act_id, user_id)
 );
 
 create table if not exists producer_users (
@@ -32,10 +16,26 @@ create table if not exists producer_users (
   primary key (producer_id, user_id)
 );
 
--- Polymorphic owners table (WHY: one calendar owner can be an individual, an act, or a producer)
+-- Optional RLS (enable if you want to restrict direct selects to operators)
+-- alter table producers enable row level security;
+-- alter table producer_users enable row level security;
+-- create policy producer_users_self on producer_users for select using (user_id = auth.uid());
+""")
+
+# Build updated owners/user.sql (generic pieces only + sync triggers referencing entity tables)
+owners_sql = textwrap.dedent("""\
+-- ============================================================
+-- user.sql  (generic owners & profile utilities)
+-- Run order: 1) utils.sql  2) acts.sql  3) producers.sql  4) user.sql  5) calendar.sql
+-- WHY: Polymorphic OWNERS, OWNER_USERS, auth bootstrap, and functions/triggers
+--      that sync entity memberships (act_users/producer_users) into owner_users.
+--      Keep all generic bits here; entities live in their own files.
+-- ============================================================
+
+-- Polymorphic owners table
 create table if not exists owners (
   id uuid primary key default gen_random_uuid(),
-  kind owner_kind not null,
+  kind owner_kind not null,                         -- 'individual' | 'act' | 'producer'
   individual_user_id uuid references auth.users(id) on delete cascade,
   act_id uuid references acts(id) on delete cascade,
   producer_id uuid references producers(id) on delete cascade,
@@ -53,7 +53,7 @@ create trigger trg_owners_touch
 before update on owners
 for each row execute function _touch_updated_at();
 
--- Normalized link: which users can operate a given owner (admin/editor/viewer)
+-- Which users can operate a given owner (admin/editor/viewer)
 create table if not exists owner_users (
   owner_id uuid not null references owners(id) on delete cascade,
   user_id  uuid not null references auth.users(id) on delete cascade,
@@ -62,7 +62,7 @@ create table if not exists owner_users (
 );
 create index if not exists idx_owner_users_user on owner_users(user_id);
 
--- Auto-link individual owners to themselves as 'admin' (WHY: an individual always controls their owner record)
+-- Auto-link individual owners to themselves as 'admin'
 create or replace function _link_individual_owner() returns trigger
 language plpgsql as $$
 begin
@@ -78,7 +78,7 @@ create trigger trg_owners_autolink_individual
 after insert on owners
 for each row execute function _link_individual_owner();
 
--- Helpers to resolve owners for entity records (used by sync triggers)
+-- Helpers to resolve owners for entity records
 create or replace function _owner_id_for_act(aid uuid) returns uuid
 language sql stable as $$
   select id from owners where kind='act' and act_id = aid
@@ -89,7 +89,7 @@ language sql stable as $$
   select id from owners where kind='producer' and producer_id = pid
 $$;
 
--- Sync act_users into owner_users (WHY: unify RLS checks via owner_users)
+-- Sync act_users -> owner_users (requires acts.sql to be run first)
 create or replace function _sync_owner_users_from_act() returns trigger
 language plpgsql as $$
 declare oid uuid;
@@ -108,12 +108,13 @@ begin
 
   return new;
 end $$;
+
 drop trigger if exists trg_sync_act_users_iud on act_users;
 create trigger trg_sync_act_users_iud
 after insert or update or delete on act_users
 for each row execute function _sync_owner_users_from_act();
 
--- Sync producer_users into owner_users
+-- Sync producer_users -> owner_users (requires producers.sql first)
 create or replace function _sync_owner_users_from_producer() returns trigger
 language plpgsql as $$
 declare oid uuid;
@@ -132,12 +133,13 @@ begin
 
   return new;
 end $$;
+
 drop trigger if exists trg_sync_producer_users_iud on producer_users;
 create trigger trg_sync_producer_users_iud
 after insert or update or delete on producer_users
 for each row execute function _sync_owner_users_from_producer();
 
--- Optional: user profiles to attach external ids/types (kept separate from calendars)
+-- Optional: user profiles & signup bootstrap
 create table if not exists user_profiles (
   user_id uuid primary key,                -- equals auth.users.id
   external_user_id text,
@@ -151,7 +153,6 @@ create trigger trg_user_profiles_touch
 before update on user_profiles
 for each row execute function _touch_updated_at();
 
--- Bootstrap a user_profiles row on signup (WHY: downstream joins never 404)
 create or replace function public.handle_new_user()
 returns trigger
 language plpgsql
@@ -168,7 +169,7 @@ create trigger on_auth_user_created
 after insert on auth.users
 for each row execute function public.handle_new_user();
 
--- RLS (expose owner/owner_users cautiously; adjust as your product needs)
+-- RLS exposure for owners/owner_users (adjust to taste)
 alter table if exists owners      enable row level security;
 alter table if exists owner_users enable row level security;
 
