@@ -25,11 +25,11 @@ for each row execute function _touch_updated_at();
 
 create table if not exists calendar_members (
   calendar_id uuid not null references calendars(id) on delete cascade,
-  user_id     uuid not null references auth.users(id) on delete cascade,
+  owner_id     uuid not null references auth.users(id) on delete cascade,
   role        cal_role not null,              -- WHY: 'writer'/'reader' sharers alongside owner_users
-  primary key (calendar_id, user_id)
+  primary key (calendar_id, owner_id)
 );
-create index if not exists idx_cal_members_user on calendar_members(user_id);
+create index if not exists idx_cal_members_user on calendar_members(owner_id);
 
 -- =========================
 -- RFC 5545 TABLES
@@ -131,40 +131,113 @@ for each row execute function _touch_updated_at();
 -- ATTENDEES (series-level or per-override)
 create table if not exists event_attendees (
   id               uuid primary key default gen_random_uuid(),
+  -- Canonical scope
   event_id         uuid not null references events(id) on delete cascade,
   override_id      uuid references event_overrides(id) on delete cascade,  -- NULL => series-level
-  email            citext not null,
-  user_id          uuid references users(id),     // FIX THIS FKEY  !!!!!!!!!!!!!!!!!!
+  slot_id          uuid references slots(id),
+
+  owner_id         uuid references owners(id),  -- canonical internal attendee (user/act/producer)                               -- when attendees differ per slot
+
+  -- Canonical identity for attendee (one of these must be present)
+  owner_id         uuid references owners(id),  -- internal canonical owner (user/act/producer)
+  email            citext,                      -- external CAL-ADDRESS for iTIP; NULL when using owner_id only
+
+  -- RFC5545 attendee parameters/state
   cn               text,
   role             attendee_role,
   partstat         attendee_partstat,
   rsvp             boolean,
   cutype           text check (cutype in ('INDIVIDUAL','GROUP','RESOURCE','ROOM','UNKNOWN')),
-  member_of        text[],
-  member_of_user_id uuid references users(id),     // FIX THIS FKEY  !!!!!!!!!!!!!!!!!!
+
+  -- Group context (for MEMBER= and lineage)
+  member_of                     text[],   -- legacy email-based (DLs / externals)
+  member_of_owner_ids           uuid[],   -- structured owner-based groups (internal)
+
   delegated_to     citext[],
   delegated_from   citext[],
   sent_by          citext,
+
   params           jsonb not null default '{}'::jsonb,
-  
-  constraint chk_attendee_identity_one
-    check ( (user_id is null) <> (email is null) )
-);
+
+  created_at       timestamptz not null default now(),
+  updated_at       timestamptz not null default now(),
+
+  -- Either slot-scoped OR (event/override)-scoped
+  constraint attendees_scope_ck check (
+    (slot_id is not null and override_id is null)
+    or
+    (slot_id is null)
+  ),
+
+  -- Require at least one identity
+  constraint attendees_identity_ck check (owner_id is not null or email is not null)
+)
+
+
+-- ============================================================
+-- Constraint trigger: ensure slot-scoped attendees' member_of_owner_ids
+-- are a subset of the owners actually assigned to that slot (via slot_acts → owners(kind='act')).
+-- ============================================================
+create or replace function _chk_attendee_member_of_slot_owners()
+returns trigger
+language plpgsql as $$
+declare
+  invalid uuid[];
+begin
+  -- Only enforce for slot-scoped rows with a non-empty member_of_owner_ids array
+  if new.slot_id is null or new.member_of_owner_ids is null or array_length(new.member_of_owner_ids,1) is null then
+    return new;
+  end if;
+
+  -- Compute which owner_ids (if any) are not present in v_slot_owners for this slot
+  select coalesce(array_agg(x.owner_id), '{}') into invalid
+  from unnest(new.member_of_owner_ids) as mo(owner_id)
+  left join v_slot_owners x on x.slot_id = new.slot_id and x.owner_id = mo.owner_id
+  where x.owner_id is null;
+
+  if invalid is not null and array_length(invalid,1) is not null then
+    raise exception 'member_of_owner_ids must reference owners assigned to this slot. Invalid: %', invalid;
+  end if;
+
+  return new;
+end $$;
+
+drop trigger if exists trg_chk_attendee_member_of_slot_owners on event_attendees;
+create constraint trigger trg_chk_attendee_member_of_slot_owners
+after insert or update on event_attendees
+deferrable initially deferred
+for each row execute function _chk_attendee_member_of_slot_owners();
+
+;
+
+-- Scope-aware uniqueness:
+--  - Internal canonical attendees: (scope, owner_id)
+--  - External email attendees:     (scope, lower(email))
+create unique index if not exists uq_event_attendees_scope_owner
+    on event_attendees (
+      coalesce(slot_id,      '00000000-0000-0000-0000-000000000000'::uuid),
+      coalesce(override_id,  '00000000-0000-0000-0000-000000000000'::uuid),
+      coalesce(owner_id,     '00000000-0000-0000-0000-000000000000'::uuid)
+    )
+    where owner_id is not null;
+
+  create unique index if not exists uq_event_attendees_scope_email
+    on event_attendees (
+      coalesce(slot_id,      '00000000-0000-0000-0000-000000000000'::uuid),
+      coalesce(override_id,  '00000000-0000-0000-0000-000000000000'::uuid),
+      lower(email)
+    )
+    where owner_id is null and email is not null;
+exception when duplicate_object then null; end $$;
+
+
 create index if not exists idx_attendees_event on event_attendees (event_id);
 create index if not exists idx_attendees_override on event_attendees (override_id);
-create index if not exists idx_attendees_user      on event_attendees (user_id);
+create index if not exists idx_attendees_user      on event_attendees (owner_id);
 create index if not exists idx_attendees_email     on event_attendees (email);
 
 -- uniqueness per (event, occurrence-or-series, identity)
 -- treats NULL override_id as equal across rows
-create unique index if not exists uniq_attendee_slot_user
-  on event_attendees (event_id, override_id, user_id) nulls not distinct
-  where user_id is not null;
-
-create unique index if not exists uniq_attendee_slot_email
-  on event_attendees (event_id, override_id, email) nulls not distinct
-  where user_id is null;
-
 -- =========================
 -- SEQUENCE/EDITOR TRIGGERS
 -- =========================
@@ -299,7 +372,7 @@ returns boolean language sql stable as $$
     from calendars c
     join owner_users ou on ou.owner_id = c.owner_id
     where c.id = cal_id
-      and ou.user_id = auth.uid()
+      and ou.owner_id = auth.uid()
       and ou.role in ('admin')
   );
 $$;
@@ -311,28 +384,28 @@ returns boolean language sql stable as $$
     select 1
     from calendars c
     join owner_users ou on ou.owner_id = c.owner_id
-    where c.id = cal_id and ou.user_id = auth.uid() and ou.role in ('admin','editor')
+    where c.id = cal_id and ou.owner_id = auth.uid() and ou.role in ('admin','editor')
     union
     select 1
     from calendar_members m
-    where m.calendar_id = cal_id and m.user_id = auth.uid() and m.role in ('owner','writer')
+    where m.calendar_id = cal_id and m.owner_id = auth.uid() and m.role in ('owner','writer')
   );
 $$;
 
 -- Who can read a calendar? (members or any operator of the owner entity)
-create or replace function is_member_of_calendar(cal_id uuid)
+create or replace function is_member_of (emails)_calendar(cal_id uuid)
 returns boolean language sql stable as $$
   select exists(
-    select 1 from calendar_members m where m.calendar_id = cal_id and m.user_id = auth.uid()
+    select 1 from calendar_members m where m.calendar_id = cal_id and m.owner_id = auth.uid()
     union
     select 1 from calendars c join owner_users ou on ou.owner_id = c.owner_id
-      where c.id = cal_id and ou.user_id = auth.uid()
+      where c.id = cal_id and ou.owner_id = auth.uid()
   );
 $$;
 
 -- Calendar policies
 create policy cal_read on calendars for select
-using (is_member_of_calendar(id));
+using (is_member_of (emails)_calendar(id));
 
 create policy cal_write on calendars for all
 using (is_owner_level(id))
@@ -340,7 +413,7 @@ with check (is_owner_level(id));
 
 -- Calendar members
 create policy members_read on calendar_members for select
-using (is_member_of_calendar(calendar_id));
+using (is_member_of (emails)_calendar(calendar_id));
 
 create policy members_write on calendar_members for all
 using (is_owner_level(calendar_id))
@@ -348,7 +421,7 @@ with check (is_owner_level(calendar_id));
 
 -- Events
 create policy events_read on events for select
-using (is_member_of_calendar(calendar_id));
+using (is_member_of (emails)_calendar(calendar_id));
 
 create policy events_insert on events for insert
 with check (can_write_calendar(calendar_id));
@@ -362,15 +435,27 @@ using (can_write_calendar(calendar_id));
 
 -- Overrides
 create policy overrides_read on event_overrides for select
-using (is_member_of_calendar((select calendar_id from events where id = parent_event_id)));
+using (is_member_of (emails)_calendar((select calendar_id from events where id = parent_event_id)));
 
 create policy overrides_cud on event_overrides for all
 using (can_write_calendar((select calendar_id from events where id = parent_event_id)))
 with check (can_write_calendar((select calendar_id from events where id = parent_event_id)));
 
+
+-- ============================================================
+-- Attendee identity uses canonical owner_id (owners.id) or external email
+-- WHY: Owners are our canonical entity (user/act/producer). Attendees may be:
+--   * internal owner (owner_id UUID)
+--   * external via email (CAL-ADDRESS)
+-- We retain 'email' for external attendees. We also add 'member_of (emails)_owner_ids'
+-- to carry structured group membership alongside the existing text[] 'member_of (emails)'.
+-- ============================================================
+-- NOTE: We are deprecating 'owner_id'. Keep the column for now if it exists for backward-compat,
+-- but new writes should use owner_id. Migration step can backfill owner_id from owner_id -> owners(id).
+
 -- Attendees
 create policy attendees_read on event_attendees for select
-using (is_member_of_calendar((select calendar_id from events where id = event_id)));
+using (is_member_of (emails)_calendar((select calendar_id from events where id = event_id)));
 
 create policy attendees_cud on event_attendees for all
 using (can_write_calendar((select calendar_id from events where id = event_id)))
@@ -395,18 +480,18 @@ begin
   end if;
 
   if p->>'kind' = 'individual' then
-    insert into owners(kind, individual_user_id, display_name)
+    insert into owners(kind, individual_owner_id, display_name)
     values ('individual', coalesce(nullif(p->>'ref_id','')::uuid, auth.uid()), p->>'display_name')
     on conflict do nothing;
     select * into v_owner from owners
-     where kind='individual' and individual_user_id = coalesce(nullif(p->>'ref_id','')::uuid, auth.uid())
+     where kind='individual' and individual_owner_id = coalesce(nullif(p->>'ref_id','')::uuid, auth.uid())
      limit 1;
   elsif p->>'kind' = 'act' then
     if p->>'ref_id' is null then raise exception 'act ref_id required'; end if;
-    insert into owners(kind, act_id, display_name)
+    insert into owners(kind, owner_id, display_name)
     values ('act', (p->>'ref_id')::uuid, p->>'display_name')
     on conflict do nothing;
-    select * into v_owner from owners where kind='act' and act_id=(p->>'ref_id')::uuid limit 1;
+    select * into v_owner from owners where kind='act' and owner_id=(p->>'ref_id')::uuid limit 1;
   else
     if p->>'ref_id' is null then raise exception 'producer ref_id required'; end if;
     insert into owners(kind, producer_id, display_name)
@@ -426,7 +511,7 @@ begin
   returning * into v_cal;
 
   -- Convenience: add caller as writer member
-  insert into calendar_members(calendar_id, user_id, role)
+  insert into calendar_members(calendar_id, owner_id, role)
   values (v_cal.id, auth.uid(), 'writer')
   on conflict do nothing;
 
@@ -574,11 +659,12 @@ $$;
 create or replace function api.upsert_attendee(p jsonb)
 returns event_attendees
 language plpgsql security definer set search_path=public as $$
-declare a event_attendees;
+declare
+  v_owner_id uuid := nullif(p->>'owner_id','')::uuid; a event_attendees;
 begin
   insert into event_attendees (
     event_id, override_id, email, cn, role, partstat, rsvp, cutype,
-    member_of, delegated_to, delegated_from, sent_by, params
+    member_of (emails), delegated_to, delegated_from, sent_by, params
   )
   values (
     (p->>'event_id')::uuid,
@@ -589,7 +675,7 @@ begin
     nullif(p->>'partstat','')::attendee_partstat,
     coalesce((p->>'rsvp')::bool, false),
     nullif(p->>'cutype',''),
-    case when p ? 'member_of' then (select array_agg(value::text) from jsonb_array_elements(p->'member_of')) end,
+    case when p ? 'member_of (emails)' then (select array_agg(value::text) from jsonb_array_elements(p->'member_of (emails)')) end,
     case when p ? 'delegated_to' then (select array_agg(value::citext) from jsonb_array_elements_text(p->'delegated_to')) end,
     case when p ? 'delegated_from' then (select array_agg(value::citext) from jsonb_array_elements_text(p->'delegated_from')) end,
     nullif(p->>'sent_by','')::citext,
@@ -602,7 +688,7 @@ begin
     partstat   = coalesce(excluded.partstat, event_attendees.partstat),
     rsvp       = coalesce(excluded.rsvp, event_attendees.rsvp),
     cutype     = coalesce(excluded.cutype, event_attendees.cutype),
-    member_of  = coalesce(excluded.member_of, event_attendees.member_of),
+    member_of (emails)  = coalesce(excluded.member_of (emails), event_attendees.member_of (emails)),
     delegated_to   = coalesce(excluded.delegated_to, event_attendees.delegated_to),
     delegated_from = coalesce(excluded.delegated_from, event_attendees.delegated_from),
     sent_by    = coalesce(excluded.sent_by, event_attendees.sent_by),
@@ -619,3 +705,27 @@ returns void language sql security definer set search_path=public as $$
     and email = $2
     and ( (override_id is null and $3 is null) or (override_id = $3) );
 $$;
+
+
+
+-- Scope-aware uniqueness:
+--  - For internal canonical attendees: unique by (slot or override scope, owner_id)
+--  - For external attendees:        unique by (slot or override scope, lower(email))
+do $$ begin
+  exception when duplicate_object then null; end $$;
+
+
+
+-- ============================================================
+-- Helper view: slot → owners (derived from slot_acts with kind='act')
+-- Used by constraints to validate member_of_owner_ids on slot-scoped attendees.
+-- ============================================================
+create or replace view v_slot_owners as
+select
+  sa.slot_id,
+  o.id as owner_id
+from slot_acts sa
+join owners o
+  on o.kind = 'act'
+ and o.act_id = sa.act_id;
+
