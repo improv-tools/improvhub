@@ -1,62 +1,48 @@
--- ============================================================
--- utils.sql
--- Run order: 1) utils.sql  2) user.sql  3) calendar.sql
--- WHY: This file contains generic, table-agnostic utilities that other files depend on:
---      * common extensions
---      * shared enums
---      * generic helper triggers
---      Keeping these separate ensures no forward references to tables.
--- ============================================================
+-- 00_util.sql
+-- =============================================================================
+-- PURPOSE
+--   Shared enums and helper functions used across the schema.
+--   This file defines:
+--     - owner_kind:       the two canonical "who" types (individual user | group)
+--     - group_role:       roles within a group for governance and access
+--     - role_kind:        event-credit roles (performer/producer/etc.)
+--     - role_kind:        also used on slots for operational roles (guest tech, etc.)
+--     - _touch_updated_at: helper to maintain updated_at columns
+--     - _stamp_editor:     stub for recording the actor (if you wire one)
+--
+-- PHILOSOPHY
+--   Keep the polymorphism minimal and explicit:
+--     * Individuals are rows in auth.users.
+--     * Groups are rows in "group".
+--     * Everywhere else references a single "owners(id)" that points to either.
+-- =============================================================================
 
--- Extensions (WHY: pgcrypto for gen_random_uuid(); citext for case-insensitive emails)
-create extension if not exists pgcrypto;
-create extension if not exists citext;
+-- === Enums ==============================================================
 
--- Owner kind for generic ownership (individual user, act, producer)
-do $$ begin
-  create type owner_kind as enum ('individual','act','producer');
-exception when duplicate_object then null; end $$;
+-- Top-level "who" type used across the schema
+CREATE TYPE owner_kind AS ENUM ('individual','group');
 
--- Calendar member roles (reader/writer/owner)
-do $$ begin
-  create type cal_role as enum ('owner','writer','reader');
-exception when duplicate_object then null; end $$;
+-- Roles within a group (access/roster)
+CREATE TYPE group_role AS ENUM ('admin','manager','member');
 
--- Event attendee roles (subset of RFC parameters)
-do $$ begin
-  create type attendee_role as enum ('REQ-PARTICIPANT','OPT-PARTICIPANT','NON-PARTICIPANT','CHAIR');
-exception when duplicate_object then null; end $$;
+-- Event credit roles (per-series defaults and per-occurrence overrides)
+CREATE TYPE role_kind AS ENUM ('performer','producer','host','promoter','crew');
 
--- Event attendee participation status (RFC-style)
-do $$ begin
-  create type attendee_partstat as enum
-    ('NEEDS-ACTION','ACCEPTED','DECLINED','TENTATIVE','DELEGATED','COMPLETED','IN-PROCESS');
-exception when duplicate_object then null; end $$;
+-- === Helpers ============================================================
 
--- Entity-user role for acts/producers control surface
-do $$ begin
-  create type entity_user_role as enum ('admin','editor','viewer');
-exception when duplicate_object then null; end $$;
+-- Generic "touch" trigger to maintain updated_at columns on UPDATE
+CREATE OR REPLACE FUNCTION _touch_updated_at()
+RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+  NEW.updated_at := now();
+  RETURN NEW;
+END $$;
 
--- Generic timestamp touch trigger (WHY: standardize updated_at bookkeeping)
-create or replace function _touch_updated_at() returns trigger
-language plpgsql as $$
-begin
-  new.updated_at := now();
-  return new;
-end $$;
-
--- Optional: stamp the editor (auth.uid()) on update (calendar.sql may add updated_by column)
-create or replace function _stamp_editor() returns trigger
-language plpgsql as $$
-begin
-  -- This function assumes a column named updated_by exists on the target table.
-  -- If it doesn't, attach this trigger only where available.
-  begin
-    new.updated_by := auth.uid();
-  exception when undefined_column then
-    -- ignore if column doesn't exist on the target table
-    null;
-  end;
-  return new;
-end $$;
+-- (Optional) editor stamping helper — wire to your session logic if needed.
+-- For example, set "app.user_id" at session start and record it here.
+CREATE OR REPLACE FUNCTION _stamp_editor()
+RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+  -- NEW.updated_by := current_setting('app.user_id', true)::uuid;
+  RETURN NEW;
+END $$;
