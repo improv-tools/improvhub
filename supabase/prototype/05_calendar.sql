@@ -1,731 +1,294 @@
--- ============================================================
--- calendar.sql
--- Run order: 1) utils.sql  2) user.sql  3) calendar.sql
--- WHY: This file defines calendars (owned by generic owners), sharing,
---      RFC 5545 event storage (events/overrides/attendees), RLS policies,
---      and RPC functions for CRUD. The heavy RFC logic (RRULE expansion,
---      ICS import/export) should live in Edge Functions.
--- ============================================================
+-- 05_calendar.sql
+-- =============================================================================
+-- PURPOSE
+--   Calendar schema including:
+--     • slots (operational containers)
+--     • events and materialized occurrences (per-date)
+--     • event staff roles:
+--         – defaults on event (series)
+--         – per-occurrence overrides
+--     • slot-level staff roles (ops only, does NOT gate invites)
+--     • attendees model keyed by occurrence
+--     • integrity:
+--         – member_of must be groups only
+--         – member_of subset of resolved event staff for that occurrence
+--         – auto-drop of future invites that become ineligible
+--
+-- DESIGN NOTES
+--   • Eligibility is based on event credits (resolved per occurrence),
+--     NOT on slot staff. Slot staff is operational (e.g., guest tech).
+--   • Direct individual invites are always allowed (member_of empty).
+--   • Group-based invites require member_of to list credited group owners.
+-- =============================================================================
 
--- CALENDARS (owned by owners.id), plus calendar-level members for ad-hoc sharing
-create table if not exists calendars (
-  id               uuid primary key default gen_random_uuid(),
-  owner_id         uuid not null references owners(id) on delete cascade, -- WHY: generic ownership abstraction
-  name             text not null,
-  description      text,
-  color            text,
-  timezone_default text not null,
-  created_at       timestamptz not null default now(),
-  updated_at       timestamptz not null default now()
+-- === Core calendar tables ===============================================
+
+-- Operational "container" a show/date runs in
+CREATE TABLE slots (
+  id         uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  name       text,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  updated_at timestamptz NOT NULL DEFAULT now()
 );
-drop trigger if exists trg_cal_touch on calendars;
-create trigger trg_cal_touch
-before update on calendars
-for each row execute function _touch_updated_at();
 
-create table if not exists calendar_members (
-  calendar_id uuid not null references calendars(id) on delete cascade,
-  owner_id     uuid not null references auth.users(id) on delete cascade,
-  role        cal_role not null,              -- WHY: 'writer'/'reader' sharers alongside owner_users
-  primary key (calendar_id, owner_id)
+CREATE TRIGGER trg_slots_touch
+BEFORE UPDATE ON slots
+FOR EACH ROW EXECUTE FUNCTION _touch_updated_at();
+
+-- Event series (defaults live here)
+CREATE TABLE events (
+  id         uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  title      text NOT NULL,
+  slot_id    uuid REFERENCES slots(id),          -- default slot for the series (optional)
+  starts_at  timestamptz,                        -- optional anchor
+  ends_at    timestamptz,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  updated_at timestamptz NOT NULL DEFAULT now()
 );
-create index if not exists idx_cal_members_user on calendar_members(owner_id);
 
--- =========================
--- RFC 5545 TABLES
--- =========================
+CREATE TRIGGER trg_events_touch
+BEFORE UPDATE ON events
+FOR EACH ROW EXECUTE FUNCTION _touch_updated_at();
 
--- Master events (VEVENT)
-create table if not exists events (
-  id               uuid primary key default gen_random_uuid(),
-  calendar_id      uuid not null references calendars(id) on delete cascade,
-
-  uid              text not null,                    -- WHY: iTIP identity per calendar
-  sequence         int  not null default 0,          -- WHY: bump on meaningful change
-  last_modified    timestamptz not null default now(),
-
-  dtstart          timestamptz not null,             -- store UTC
-  dtend            timestamptz,                      -- XOR with duration_sec
-  duration_sec     int,
-  tzid             text,                             -- original zone for DTSTART
-  all_day          boolean not null default false,
-
-  rrule            text,                             -- raw RFC strings; expansion in Edge
-  rdate            timestamptz[],
-  exdate           timestamptz[],
-
-  summary          text,
-  description      text,
-  location         text,
-  geo_lat          double precision,
-  geo_lon          double precision,
-  url              text,
-  status           text check (status in ('TENTATIVE','CONFIRMED','CANCELLED')),
-  transparency     text check (transparency in ('OPAQUE','TRANSPARENT')),
-  organizer_email  citext,
-  organizer_name   text,
-  categories       text[],
-  extended         jsonb not null default '{}'::jsonb,
-
-  created_by       uuid default auth.uid(),          -- optional audit
-  updated_by       uuid,                             -- optional audit
-  created_at       timestamptz not null default now(),
-  updated_at       timestamptz not null default now(),
-
-  constraint events_uid_unique_per_cal unique (calendar_id, uid),
-  constraint events_time_choice check ((dtend is null) <> (duration_sec is null)),
-  constraint events_dt_order check (dtend is null or dtend > dtstart)
+-- Materialized occurrences so per-date logic is easy and correct
+CREATE TABLE event_occurrence (
+  occurrence_id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  event_id      uuid NOT NULL REFERENCES events(id) ON DELETE CASCADE,
+  starts_at     timestamptz NOT NULL,
+  ends_at       timestamptz,
+  slot_id       uuid REFERENCES slots(id),       -- resolved slot for the date
+  is_cancelled  boolean NOT NULL DEFAULT false
 );
-create index if not exists idx_events_cal_dt on events (calendar_id, dtstart);
-create index if not exists idx_events_cal_uid on events (calendar_id, uid);
-create index if not exists idx_events_categories on events using gin (categories);
-create index if not exists idx_events_extended on events using gin (extended);
+CREATE INDEX idx_occ_event ON event_occurrence(event_id, starts_at);
 
-drop trigger if exists trg_events_touch on events;
-create trigger trg_events_touch
-before update on events
-for each row execute function _touch_updated_at();
-
-drop trigger if exists trg_events_editor on events;
-create trigger trg_events_editor
-before update on events
-for each row execute function _stamp_editor();
-
--- Detached per-instance overrides (RECURRENCE-ID)
-create table if not exists event_overrides (
-  id               uuid primary key default gen_random_uuid(),
-  parent_event_id  uuid not null references events(id) on delete cascade,
-  recurrence_id    timestamptz not null,             -- original instance start (UTC)
-
-  dtstart          timestamptz,
-  dtend            timestamptz,
-  duration_sec     int,
-  tzid             text,
-  all_day          boolean,
-
-  summary          text,
-  description      text,
-  location         text,
-  geo_lat          double precision,
-  geo_lon          double precision,
-  url              text,
-  status           text check (status in ('TENTATIVE','CONFIRMED','CANCELLED')),
-  transparency     text check (transparency in ('OPAQUE','TRANSPARENT')),
-  categories       text[],
-  extended         jsonb,
-
-  created_at       timestamptz not null default now(),
-  updated_at       timestamptz not null default now(),
-
-  constraint overrides_time_choice check (dtend is null or duration_sec is null),
-  constraint overrides_dt_order check (dtend is null or (dtstart is not null and dtend > dtstart)),
-  constraint overrides_unique_instance unique (parent_event_id, recurrence_id)
+-- === Event staff roles (credits) ========================================
+-- Defaults applied to each occurrence unless overridden
+CREATE TABLE event_staff_default (
+  event_id     uuid NOT NULL REFERENCES events(id) ON DELETE CASCADE,
+  owner_id     uuid NOT NULL REFERENCES owners(id) ON DELETE CASCADE,  -- individual or group
+  role         role_kind NOT NULL,
+  billing_name text,
+  billing_ord  int,
+  notes        text,
+  PRIMARY KEY (event_id, owner_id, role)
 );
-create index if not exists idx_overrides_parent_rid on event_overrides (parent_event_id, recurrence_id);
+CREATE INDEX esd_event_idx ON event_staff_default(event_id, role, billing_ord);
+CREATE INDEX esd_owner_idx ON event_staff_default(owner_id, role);
 
-drop trigger if exists trg_overrides_touch on event_overrides;
-create trigger trg_overrides_touch
-before update on event_overrides
-for each row execute function _touch_updated_at();
+-- Per-occurrence overrides: store only rows that differ from defaults
+CREATE TABLE event_staff_occurrence (
+  occurrence_id uuid NOT NULL REFERENCES event_occurrence(occurrence_id) ON DELETE CASCADE,
+  owner_id      uuid NOT NULL REFERENCES owners(id) ON DELETE CASCADE,
+  role          role_kind NOT NULL,
+  billing_name  text,
+  billing_ord   int,
+  notes         text,
+  PRIMARY KEY (occurrence_id, owner_id, role)
+);
+CREATE INDEX eso_occ_idx   ON event_staff_occurrence(occurrence_id, role, billing_ord);
+CREATE INDEX eso_owner_idx ON event_staff_occurrence(owner_id, role);
 
--- ATTENDEES (series-level or per-override)
-create table if not exists event_attendees (
-  id               uuid primary key default gen_random_uuid(),
-  -- Canonical scope
-  event_id         uuid not null references events(id) on delete cascade,
-  override_id      uuid references event_overrides(id) on delete cascade,  -- NULL => series-level
-  slot_id          uuid references slots(id),
-
-  owner_id         uuid references owners(id),  -- canonical internal attendee (user/act/producer)                               -- when attendees differ per slot
-
-  -- Canonical identity for attendee (one of these must be present)
-  owner_id         uuid references owners(id),  -- internal canonical owner (user/act/producer)
-  email            citext,                      -- external CAL-ADDRESS for iTIP; NULL when using owner_id only
-
-  -- RFC5545 attendee parameters/state
-  cn               text,
-  role             attendee_role,
-  partstat         attendee_partstat,
-  rsvp             boolean,
-  cutype           text check (cutype in ('INDIVIDUAL','GROUP','RESOURCE','ROOM','UNKNOWN')),
-
-  -- Group context (for MEMBER= and lineage)
-  member_of                     text[],   -- legacy email-based (DLs / externals)
-  member_of_owner_ids           uuid[],   -- structured owner-based groups (internal)
-
-  delegated_to     citext[],
-  delegated_from   citext[],
-  sent_by          citext,
-
-  params           jsonb not null default '{}'::jsonb,
-
-  created_at       timestamptz not null default now(),
-  updated_at       timestamptz not null default now(),
-
-  -- Either slot-scoped OR (event/override)-scoped
-  constraint attendees_scope_ck check (
-    (slot_id is not null and override_id is null)
-    or
-    (slot_id is null)
-  ),
-
-  -- Require at least one identity
-  constraint attendees_identity_ck check (owner_id is not null or email is not null)
+-- Resolved view = overrides ∪ (defaults minus overridden pairs)
+-- This is the source of truth for "who is credited on this occurrence".
+CREATE OR REPLACE VIEW v_event_staff_resolved AS
+WITH dft AS (
+  SELECT eo.occurrence_id, esd.owner_id, esd.role, esd.billing_name, esd.billing_ord, esd.notes
+  FROM event_staff_default esd
+  JOIN event_occurrence eo ON eo.event_id = esd.event_id
+),
+ovr AS (
+  SELECT occurrence_id, owner_id, role, billing_name, billing_ord, notes
+  FROM event_staff_occurrence
+),
+dft_filtered AS (
+  SELECT d.*
+  FROM dft d
+  WHERE NOT EXISTS (
+    SELECT 1 FROM ovr
+    WHERE ovr.occurrence_id = d.occurrence_id
+      AND ovr.owner_id      = d.owner_id
+      AND ovr.role          = d.role
+  )
 )
+SELECT * FROM ovr
+UNION ALL
+SELECT * FROM dft_filtered;
 
+-- === Slot-level operational staff (guest tech, etc.) =====================
+-- These roles are for logistics and DO NOT gate invitations.
+-- Uses the same role_kind enum as event credits (e.g., 'crew'/'host').
+CREATE TABLE slot_staff (
+  slot_id uuid NOT NULL REFERENCES slots(id) ON DELETE CASCADE,
+  owner_id uuid NOT NULL REFERENCES owners(id) ON DELETE CASCADE,
+  role    role_kind NOT NULL DEFAULT 'crew',
+  notes   text,
+  PRIMARY KEY (slot_id, owner_id, role)
+);
+CREATE INDEX idx_slot_staff_slot_role  ON slot_staff(slot_id, role);
+CREATE INDEX idx_slot_staff_owner_role ON slot_staff(owner_id, role);
 
--- ============================================================
--- Constraint trigger: ensure slot-scoped attendees' member_of_owner_ids
--- are a subset of the owners actually assigned to that slot (via slot_acts → owners(kind='act')).
--- ============================================================
-create or replace function _chk_attendee_member_of_slot_owners()
-returns trigger
-language plpgsql as $$
-declare
-  invalid uuid[];
-begin
-  -- Only enforce for slot-scoped rows with a non-empty member_of_owner_ids array
-  if new.slot_id is null or new.member_of_owner_ids is null or array_length(new.member_of_owner_ids,1) is null then
-    return new;
-  end if;
+-- === Attendees & integrity ==============================================
 
-  -- Compute which owner_ids (if any) are not present in v_slot_owners for this slot
-  select coalesce(array_agg(x.owner_id), '{}') into invalid
-  from unnest(new.member_of_owner_ids) as mo(owner_id)
-  left join v_slot_owners x on x.slot_id = new.slot_id and x.owner_id = mo.owner_id
-  where x.owner_id is null;
+-- Unified attendees: the invitee (owner_id) can be an individual or a group.
+-- If the invite is "as part of" a group, member_of_owner_ids must list group
+-- owners that are credited on this specific occurrence.
+CREATE TABLE event_attendees (
+  occurrence_id        uuid NOT NULL REFERENCES event_occurrence(occurrence_id) ON DELETE CASCADE,
+  owner_id             uuid NOT NULL REFERENCES owners(id) ON DELETE CASCADE,  -- invitee
+  member_of_owner_ids  uuid[],                                                -- groups they attend under
+  invited_by_owner_id  uuid REFERENCES owners(id) ON DELETE SET NULL,
+  notes                text,
+  PRIMARY KEY (occurrence_id, owner_id)
+);
 
-  if invalid is not null and array_length(invalid,1) is not null then
-    raise exception 'member_of_owner_ids must reference owners assigned to this slot. Invalid: %', invalid;
-  end if;
+-- (A) Guarantee member_of references GROUP owners only (never individuals).
+CREATE OR REPLACE FUNCTION _chk_member_of_are_groups()
+RETURNS trigger LANGUAGE plpgsql AS $$
+DECLARE bad uuid[];
+BEGIN
+  IF NEW.member_of_owner_ids IS NULL OR array_length(NEW.member_of_owner_ids,1) IS NULL THEN
+    RETURN NEW;
+  END IF;
 
-  return new;
-end $$;
+  SELECT COALESCE(array_agg(o.id), '{}'::uuid[])
+    INTO bad
+  FROM unnest(NEW.member_of_owner_ids) z(id)
+  JOIN owners o ON o.id = z.id
+  WHERE o.kind <> 'group';
 
-drop trigger if exists trg_chk_attendee_member_of_slot_owners on event_attendees;
-create constraint trigger trg_chk_attendee_member_of_slot_owners
-after insert or update on event_attendees
-deferrable initially deferred
-for each row execute function _chk_attendee_member_of_slot_owners();
+  IF array_length(bad,1) IS NOT NULL THEN
+    RAISE EXCEPTION 'member_of_owner_ids must reference group owners only: %', bad
+      USING ERRCODE='23514';
+  END IF;
 
-;
+  RETURN NEW;
+END $$;
 
--- Scope-aware uniqueness:
---  - Internal canonical attendees: (scope, owner_id)
---  - External email attendees:     (scope, lower(email))
-create unique index if not exists uq_event_attendees_scope_owner
-    on event_attendees (
-      coalesce(slot_id,      '00000000-0000-0000-0000-000000000000'::uuid),
-      coalesce(override_id,  '00000000-0000-0000-0000-000000000000'::uuid),
-      coalesce(owner_id,     '00000000-0000-0000-0000-000000000000'::uuid)
-    )
-    where owner_id is not null;
+CREATE CONSTRAINT TRIGGER trg_chk_member_of_are_groups
+AFTER INSERT OR UPDATE ON event_attendees
+DEFERRABLE INITIALLY DEFERRED
+FOR EACH ROW EXECUTE FUNCTION _chk_member_of_are_groups();
 
-  create unique index if not exists uq_event_attendees_scope_email
-    on event_attendees (
-      coalesce(slot_id,      '00000000-0000-0000-0000-000000000000'::uuid),
-      coalesce(override_id,  '00000000-0000-0000-0000-000000000000'::uuid),
-      lower(email)
-    )
-    where owner_id is null and email is not null;
-exception when duplicate_object then null; end $$;
+-- (B) Guarantee member_of is a subset of the RESOLVED event staff for this occurrence.
+--     This ties eligibility to the per-date credited groups, not slot ops staff.
+CREATE OR REPLACE FUNCTION _chk_attendee_member_of_event_staff()
+RETURNS trigger LANGUAGE plpgsql AS $$
+DECLARE
+  missing uuid[];
+BEGIN
+  IF NEW.member_of_owner_ids IS NULL OR array_length(NEW.member_of_owner_ids,1) IS NULL THEN
+    RETURN NEW;
+  END IF;
 
+  SELECT COALESCE(array_agg(z.owner_id), '{}'::uuid[])
+    INTO missing
+  FROM unnest(NEW.member_of_owner_ids) AS z(owner_id)
+  LEFT JOIN (
+    SELECT DISTINCT owner_id
+    FROM v_event_staff_resolved
+    WHERE occurrence_id = NEW.occurrence_id
+  ) allowed ON allowed.owner_id = z.owner_id
+  WHERE allowed.owner_id IS NULL;
 
-create index if not exists idx_attendees_event on event_attendees (event_id);
-create index if not exists idx_attendees_override on event_attendees (override_id);
-create index if not exists idx_attendees_user      on event_attendees (owner_id);
-create index if not exists idx_attendees_email     on event_attendees (email);
+  IF array_length(missing,1) IS NOT NULL THEN
+    RAISE EXCEPTION 'member_of contains owners not on resolved event staff: %', missing
+      USING ERRCODE='23514';
+  END IF;
 
--- uniqueness per (event, occurrence-or-series, identity)
--- treats NULL override_id as equal across rows
--- =========================
--- SEQUENCE/EDITOR TRIGGERS
--- =========================
+  RETURN NEW;
+END $$;
 
-create or replace function _bump_event_sequence() returns trigger
-language plpgsql as $$
-begin
-  if row(NEW.dtstart, NEW.dtend, NEW.duration_sec, NEW.rrule, NEW.rdate, NEW.exdate,
-         NEW.summary, NEW.description, NEW.location, NEW.status, NEW.transparency,
-         NEW.categories, NEW.extended)
-     is distinct from
-     row(OLD.dtstart, OLD.dtend, OLD.duration_sec, OLD.rrule, OLD.rdate, OLD.exdate,
-         OLD.summary, OLD.description, OLD.location, OLD.status, OLD.transparency,
-         OLD.categories, OLD.extended)
-  then
-    NEW.sequence := coalesce(OLD.sequence,0) + 1;
-    NEW.last_modified := now();
-  end if;
-  return NEW;
-end $$;
-drop trigger if exists trg_events_bump_seq on events;
-create trigger trg_events_bump_seq
-before update on events
-for each row execute function _bump_event_sequence();
+CREATE CONSTRAINT TRIGGER trg_chk_attendee_member_of_event_staff
+AFTER INSERT OR UPDATE ON event_attendees
+DEFERRABLE INITIALLY DEFERRED
+FOR EACH ROW EXECUTE FUNCTION _chk_attendee_member_of_event_staff();
 
-create or replace function _bump_parent_sequence_from_override() returns trigger
-language plpgsql as $$
-begin
-  update events
-     set sequence = sequence + 1,
-         last_modified = now(),
-         updated_at = now()
-   where id = coalesce(NEW.parent_event_id, OLD.parent_event_id);
-  return coalesce(NEW,OLD);
-end $$;
-drop trigger if exists trg_overrides_bump_parent on event_overrides;
-create trigger trg_overrides_bump_parent
-after insert or update or delete on event_overrides
-for each row execute function _bump_parent_sequence_from_override();
+-- === Auto-drop ineligible invitations (future occurrences only) =========
+-- These triggers proactively REMOVE now-invalid invites when the world changes:
+--   1) a user leaves a group they were attending under
+--   2) per-occurrence staff changes
+--   3) default staff changes (fan-out to all future occurrences)
 
--- OPTIONAL: auto-add organizer as attendee (CHAIR). Comment out if not desired.
-create or replace function _auto_add_organizer_attendee() returns trigger
-language plpgsql as $$
-begin
-  if new.organizer_email is not null then
-    insert into event_attendees (event_id, email, cn, role, partstat, rsvp)
-    values (new.id, new.organizer_email, new.organizer_name, 'CHAIR', 'NEEDS-ACTION', false)
-    on conflict do nothing;
-  end if;
-  return new;
-end $$;
-drop trigger if exists trg_events_add_org_att on events;
-create trigger trg_events_add_org_att
-after insert on events
-for each row execute function _auto_add_organizer_attendee();
+-- Convenience lookups for owners
+CREATE OR REPLACE FUNCTION _owner_id_for_group(g uuid) RETURNS uuid LANGUAGE sql AS
+  $$ SELECT id FROM owners WHERE kind='group' AND group_id=g $$;
 
--- =========================
--- VIEWS (UI-friendly)
--- =========================
+CREATE OR REPLACE FUNCTION _owner_id_for_user(u uuid) RETURNS uuid LANGUAGE sql AS
+  $$ SELECT id FROM owners WHERE kind='individual' AND individual_user_id=u $$;
 
-create or replace view v_events as
-select
-  e.*,
-  (
-    select jsonb_agg(jsonb_build_object(
-      'email', a.email, 'cn', a.cn, 'role', a.role, 'partstat', a.partstat,
-      'rsvp', a.rsvp, 'params', a.params
-    ) order by a.email)
-    from event_attendees a
-    where a.event_id = e.id and a.override_id is null
-  ) as attendees_series
-from events e;
+-- (1) Membership end/removal ⇒ drop future invites where attendee is that user and member_of includes the group
+CREATE OR REPLACE FUNCTION drop_invites_on_membership_end()
+RETURNS trigger LANGUAGE plpgsql AS $$
+DECLARE
+  grp_owner_id uuid;
+  usr_owner_id uuid;
+BEGIN
+  SELECT _owner_id_for_group(COALESCE(NEW.group_id, OLD.group_id)) INTO grp_owner_id;
+  SELECT _owner_id_for_user(COALESCE(NEW.user_id, OLD.user_id))   INTO usr_owner_id;
 
-create or replace view v_event_overrides as
-select
-  o.*,
-  (
-    select jsonb_agg(jsonb_build_object(
-      'email', a.email, 'cn', a.cn, 'role', a.role, 'partstat', a.partstat,
-      'rsvp', a.rsvp, 'params', a.params
-    ) order by a.email)
-    from event_attendees a
-    where a.override_id = o.id
-  ) as attendees_override
-from event_overrides o;
+  IF grp_owner_id IS NULL OR usr_owner_id IS NULL THEN
+    RETURN COALESCE(NEW,OLD);
+  END IF;
 
-create or replace view v_events_with_overrides as
-select e.id as event_id, null::uuid as override_id, e.calendar_id, e.uid, e.sequence,
-       e.dtstart, e.dtend, e.duration_sec, e.tzid, e.all_day,
-       e.rrule, e.rdate, e.exdate,
-       e.summary, e.description, e.location, e.geo_lat, e.geo_lon, e.url,
-       e.status, e.transparency, e.categories, e.extended,
-       e.created_at, e.updated_at, e.last_modified
-from events e
-union all
-select o.parent_event_id, o.id, e.calendar_id, e.uid, e.sequence,
-       coalesce(o.dtstart, e.dtstart),
-       coalesce(o.dtend,   e.dtend),
-       coalesce(o.duration_sec, e.duration_sec),
-       coalesce(o.tzid, e.tzid),
-       coalesce(o.all_day, e.all_day),
-       e.rrule, e.rdate, e.exdate,
-       coalesce(o.summary, e.summary),
-       coalesce(o.description, e.description),
-       coalesce(o.location, e.location),
-       coalesce(o.geo_lat, e.geo_lat),
-       coalesce(o.geo_lon, e.geo_lon),
-       coalesce(o.url, e.url),
-       coalesce(o.status, e.status),
-       coalesce(o.transparency, e.transparency),
-       coalesce(o.categories, e.categories),
-       coalesce(o.extended, e.extended),
-       o.created_at, o.updated_at, e.last_modified
-from event_overrides o
-join events e on e.id = o.parent_event_id;
+  DELETE FROM event_attendees ea
+  USING event_occurrence eo
+  WHERE ea.occurrence_id = eo.occurrence_id
+    AND eo.starts_at >= now()
+    AND ea.owner_id = usr_owner_id
+    AND ea.member_of_owner_ids @> ARRAY[grp_owner_id]::uuid[];
 
--- =========================
--- RLS HELPERS & POLICIES
--- =========================
+  RETURN COALESCE(NEW,OLD);
+END $$;
 
-alter table if exists calendars         enable row level security;
-alter table if exists calendar_members  enable row level security;
-alter table if exists events            enable row level security;
-alter table if exists event_overrides   enable row level security;
-alter table if exists event_attendees   enable row level security;
+CREATE TRIGGER trg_drop_on_membership_end
+AFTER UPDATE OF ended_on OR DELETE ON group_membership
+FOR EACH ROW EXECUTE FUNCTION drop_invites_on_membership_end();
 
--- Who is owner-level for a calendar? (admins of the owning entity)
-create or replace function is_owner_level(cal_id uuid)
-returns boolean language sql stable as $$
-  select exists(
-    select 1
-    from calendars c
-    join owner_users ou on ou.owner_id = c.owner_id
-    where c.id = cal_id
-      and ou.owner_id = auth.uid()
-      and ou.role in ('admin')
-  );
-$$;
+-- (2) Occurrence staff changes ⇒ drop invites referencing owners no longer present
+CREATE OR REPLACE FUNCTION drop_invites_on_occurrence_staff_change()
+RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+  DELETE FROM event_attendees ea
+  WHERE ea.occurrence_id = COALESCE(NEW.occurrence_id, OLD.occurrence_id)
+    AND EXISTS (
+      SELECT 1
+      FROM unnest(ea.member_of_owner_ids) m(owner_id)
+      WHERE NOT EXISTS (
+        SELECT 1
+        FROM v_event_staff_resolved r
+        WHERE r.occurrence_id = COALESCE(NEW.occurrence_id, OLD.occurrence_id)
+          AND r.owner_id = m.owner_id
+      )
+    );
+  RETURN COALESCE(NEW,OLD);
+END $$;
 
--- Who can write a calendar? (owner admins OR per-calendar writers/owners)
-create or replace function can_write_calendar(cal_id uuid)
-returns boolean language sql stable as $$
-  select exists(
-    select 1
-    from calendars c
-    join owner_users ou on ou.owner_id = c.owner_id
-    where c.id = cal_id and ou.owner_id = auth.uid() and ou.role in ('admin','editor')
-    union
-    select 1
-    from calendar_members m
-    where m.calendar_id = cal_id and m.owner_id = auth.uid() and m.role in ('owner','writer')
-  );
-$$;
+CREATE TRIGGER trg_drop_on_occ_staff_iud
+AFTER INSERT OR UPDATE OR DELETE ON event_staff_occurrence
+FOR EACH ROW EXECUTE FUNCTION drop_invites_on_occurrence_staff_change();
 
--- Who can read a calendar? (members or any operator of the owner entity)
-create or replace function is_member_of (emails)_calendar(cal_id uuid)
-returns boolean language sql stable as $$
-  select exists(
-    select 1 from calendar_members m where m.calendar_id = cal_id and m.owner_id = auth.uid()
-    union
-    select 1 from calendars c join owner_users ou on ou.owner_id = c.owner_id
-      where c.id = cal_id and ou.owner_id = auth.uid()
-  );
-$$;
+-- (3) Default staff changes ⇒ drop invites for all affected future occurrences
+CREATE OR REPLACE FUNCTION drop_invites_on_default_staff_change()
+RETURNS trigger LANGUAGE plpgsql AS $$
+BEGIN
+  DELETE FROM event_attendees ea
+  USING event_occurrence eo
+  WHERE eo.event_id = COALESCE(NEW.event_id, OLD.event_id)
+    AND eo.starts_at >= now()
+    AND ea.occurrence_id = eo.occurrence_id
+    AND EXISTS (
+      SELECT 1
+      FROM unnest(ea.member_of_owner_ids) m(owner_id)
+      WHERE NOT EXISTS (
+        SELECT 1
+        FROM v_event_staff_resolved r
+        WHERE r.occurrence_id = eo.occurrence_id
+          AND r.owner_id = m.owner_id
+      )
+    );
+  RETURN COALESCE(NEW,OLD);
+END $$;
 
--- Calendar policies
-create policy cal_read on calendars for select
-using (is_member_of (emails)_calendar(id));
-
-create policy cal_write on calendars for all
-using (is_owner_level(id))
-with check (is_owner_level(id));
-
--- Calendar members
-create policy members_read on calendar_members for select
-using (is_member_of (emails)_calendar(calendar_id));
-
-create policy members_write on calendar_members for all
-using (is_owner_level(calendar_id))
-with check (is_owner_level(calendar_id));
-
--- Events
-create policy events_read on events for select
-using (is_member_of (emails)_calendar(calendar_id));
-
-create policy events_insert on events for insert
-with check (can_write_calendar(calendar_id));
-
-create policy events_update on events for update
-using (can_write_calendar(calendar_id))
-with check (can_write_calendar(calendar_id));
-
-create policy events_delete on events for delete
-using (can_write_calendar(calendar_id));
-
--- Overrides
-create policy overrides_read on event_overrides for select
-using (is_member_of (emails)_calendar((select calendar_id from events where id = parent_event_id)));
-
-create policy overrides_cud on event_overrides for all
-using (can_write_calendar((select calendar_id from events where id = parent_event_id)))
-with check (can_write_calendar((select calendar_id from events where id = parent_event_id)));
-
-
--- ============================================================
--- Attendee identity uses canonical owner_id (owners.id) or external email
--- WHY: Owners are our canonical entity (user/act/producer). Attendees may be:
---   * internal owner (owner_id UUID)
---   * external via email (CAL-ADDRESS)
--- We retain 'email' for external attendees. We also add 'member_of (emails)_owner_ids'
--- to carry structured group membership alongside the existing text[] 'member_of (emails)'.
--- ============================================================
--- NOTE: We are deprecating 'owner_id'. Keep the column for now if it exists for backward-compat,
--- but new writes should use owner_id. Migration step can backfill owner_id from owner_id -> owners(id).
-
--- Attendees
-create policy attendees_read on event_attendees for select
-using (is_member_of (emails)_calendar((select calendar_id from events where id = event_id)));
-
-create policy attendees_cud on event_attendees for all
-using (can_write_calendar((select calendar_id from events where id = event_id)))
-with check (can_write_calendar((select calendar_id from events where id = event_id)));
-
--- =========================
--- RPC API (SECURITY DEFINER)
--- =========================
-
-create schema if not exists api;
-
--- Create calendar under a specific owner (kind + ref_id)
-create or replace function api.create_calendar_with_owner(p jsonb)
-returns calendars
-language plpgsql security definer set search_path=public as $$
-declare
-  v_owner owners;
-  v_cal   calendars;
-begin
-  if (p->>'kind') not in ('individual','act','producer') then
-    raise exception 'Invalid owner kind';
-  end if;
-
-  if p->>'kind' = 'individual' then
-    insert into owners(kind, individual_owner_id, display_name)
-    values ('individual', coalesce(nullif(p->>'ref_id','')::uuid, auth.uid()), p->>'display_name')
-    on conflict do nothing;
-    select * into v_owner from owners
-     where kind='individual' and individual_owner_id = coalesce(nullif(p->>'ref_id','')::uuid, auth.uid())
-     limit 1;
-  elsif p->>'kind' = 'act' then
-    if p->>'ref_id' is null then raise exception 'act ref_id required'; end if;
-    insert into owners(kind, owner_id, display_name)
-    values ('act', (p->>'ref_id')::uuid, p->>'display_name')
-    on conflict do nothing;
-    select * into v_owner from owners where kind='act' and owner_id=(p->>'ref_id')::uuid limit 1;
-  else
-    if p->>'ref_id' is null then raise exception 'producer ref_id required'; end if;
-    insert into owners(kind, producer_id, display_name)
-    values ('producer', (p->>'ref_id')::uuid, p->>'display_name')
-    on conflict do nothing;
-    select * into v_owner from owners where kind='producer' and producer_id=(p->>'ref_id')::uuid limit 1;
-  end if;
-
-  insert into calendars(owner_id, name, description, color, timezone_default)
-  values (
-    v_owner.id,
-    p->>'name',
-    nullif(p->>'description',''),
-    nullif(p->>'color',''),
-    coalesce(p->>'timezone_default','Europe/Dublin')
-  )
-  returning * into v_cal;
-
-  -- Convenience: add caller as writer member
-  insert into calendar_members(calendar_id, owner_id, role)
-  values (v_cal.id, auth.uid(), 'writer')
-  on conflict do nothing;
-
-  return v_cal;
-end $$;
-
--- Create Event
-create or replace function api.create_event(p jsonb)
-returns events
-language plpgsql security definer set search_path=public as $$
-declare v events;
-begin
-  insert into events (
-    calendar_id, uid, dtstart, dtend, duration_sec, tzid, all_day,
-    rrule, rdate, exdate, summary, description, location, geo_lat, geo_lon,
-    url, status, transparency, organizer_email, organizer_name, categories, extended
-  )
-  values (
-    (p->>'calendar_id')::uuid,
-    coalesce(p->>'uid', gen_random_uuid()::text),
-    (p->>'dtstart')::timestamptz,
-    nullif(p->>'dtend','')::timestamptz,
-    nullif(p->>'duration_sec','')::int,
-    nullif(p->>'tzid',''),
-    coalesce((p->>'all_day')::bool,false),
-    nullif(p->>'rrule',''),
-    case when p ? 'rdate' then (select array_agg((x)::timestamptz) from jsonb_array_elements_text(p->'rdate') x) end,
-    case when p ? 'exdate' then (select array_agg((x)::timestamptz) from jsonb_array_elements_text(p->'exdate') x) end,
-    nullif(p->>'summary',''),
-    nullif(p->>'description',''),
-    nullif(p->>'location',''),
-    nullif(p->>'geo_lat','')::double precision,
-    nullif(p->>'geo_lon','')::double precision,
-    nullif(p->>'url',''),
-    nullif(upper(p->>'status'),''),
-    nullif(upper(p->>'transparency'),''),
-    nullif(p->>'organizer_email',''),
-    nullif(p->>'organizer_name',''),
-    case when p ? 'categories' then (select array_agg(value::text) from jsonb_array_elements(p->'categories')) end,
-    coalesce(p->'extended','{}'::jsonb)
-  )
-  returning * into v;
-  return v;
-end $$;
-
--- Update Event (partial)
-create or replace function api.update_event(event_id uuid, p jsonb)
-returns events
-language plpgsql security definer set search_path=public as $$
-declare v events;
-begin
-  update events set
-    dtstart        = coalesce((p->>'dtstart')::timestamptz, dtstart),
-    dtend          = coalesce(nullif(p->>'dtend','')::timestamptz, dtend),
-    duration_sec   = coalesce(nullif(p->>'duration_sec','')::int, duration_sec),
-    tzid           = coalesce(nullif(p->>'tzid',''), tzid),
-    all_day        = coalesce((p->>'all_day')::bool, all_day),
-    rrule          = coalesce(nullif(p->>'rrule',''), rrule),
-    rdate          = coalesce(case when p ? 'rdate'
-                       then (select array_agg((x)::timestamptz) from jsonb_array_elements_text(p->'rdate') x) end, rdate),
-    exdate         = coalesce(case when p ? 'exdate'
-                       then (select array_agg((x)::timestamptz) from jsonb_array_elements_text(p->'exdate') x) end, exdate),
-    summary        = coalesce(nullif(p->>'summary',''), summary),
-    description    = coalesce(nullif(p->>'description',''), description),
-    location       = coalesce(nullif(p->>'location',''), location),
-    geo_lat        = coalesce(nullif(p->>'geo_lat','')::double precision, geo_lat),
-    geo_lon        = coalesce(nullif(p->>'geo_lon','')::double precision, geo_lon),
-    url            = coalesce(nullif(p->>'url',''), url),
-    status         = coalesce(nullif(upper(p->>'status'),''), status),
-    transparency   = coalesce(nullif(upper(p->>'transparency'),''), transparency),
-    organizer_email= coalesce(nullif(p->>'organizer_email',''), organizer_email),
-    organizer_name = coalesce(nullif(p->>'organizer_name',''), organizer_name),
-    categories     = coalesce(case when p ? 'categories'
-                       then (select array_agg(value::text) from jsonb_array_elements(p->'categories')) end, categories),
-    extended       = coalesce(p->'extended', extended)
-  where id = event_id
-  returning * into v;
-  return v;
-end $$;
-
--- Delete Event
-create or replace function api.delete_event(event_id uuid)
-returns void language sql security definer set search_path=public as $$
-  delete from events where id = event_id;
-$$;
-
--- Upsert Override
-create or replace function api.upsert_override(parent_event_id uuid, p jsonb)
-returns event_overrides
-language plpgsql security definer set search_path=public as $$
-declare o event_overrides;
-begin
-  insert into event_overrides (
-    parent_event_id, recurrence_id, dtstart, dtend, duration_sec, tzid, all_day,
-    summary, description, location, geo_lat, geo_lon, url, status, transparency,
-    categories, extended
-  )
-  values (
-    parent_event_id,
-    (p->>'recurrence_id')::timestamptz,
-    nullif(p->>'dtstart','')::timestamptz,
-    nullif(p->>'dtend','')::timestamptz,
-    nullif(p->>'duration_sec','')::int,
-    nullif(p->>'tzid',''),
-    (p->>'all_day')::bool,
-    nullif(p->>'summary',''),
-    nullif(p->>'description',''),
-    nullif(p->>'location',''),
-    nullif(p->>'geo_lat','')::double precision,
-    nullif(p->>'geo_lon','')::double precision,
-    nullif(p->>'url',''),
-    nullif(upper(p->>'status'),''),
-    nullif(upper(p->>'transparency'),''),
-    case when p ? 'categories' then (select array_agg(value::text) from jsonb_array_elements(p->'categories')) end,
-    case when p ? 'extended' then p->'extended' end
-  )
-  on conflict (parent_event_id, recurrence_id) do update
-  set dtstart        = coalesce(excluded.dtstart, event_overrides.dtstart),
-      dtend          = coalesce(excluded.dtend, event_overrides.dtend),
-      duration_sec   = coalesce(excluded.duration_sec, event_overrides.duration_sec),
-      tzid           = coalesce(excluded.tzid, event_overrides.tzid),
-      all_day        = coalesce(excluded.all_day, event_overrides.all_day),
-      summary        = coalesce(excluded.summary, event_overrides.summary),
-      description    = coalesce(excluded.description, event_overrides.description),
-      location       = coalesce(excluded.location, event_overrides.location),
-      geo_lat        = coalesce(excluded.geo_lat, event_overrides.geo_lat),
-      geo_lon        = coalesce(excluded.geo_lon, event_overrides.geo_lon),
-      url            = coalesce(excluded.url, event_overrides.url),
-      status         = coalesce(excluded.status, event_overrides.status),
-      transparency   = coalesce(excluded.transparency, event_overrides.transparency),
-      categories     = coalesce(excluded.categories, event_overrides.categories),
-      extended       = coalesce(excluded.extended, event_overrides.extended)
-  returning * into o;
-  return o;
-end $$;
-
--- Delete Override
-create or replace function api.delete_override(parent_event_id uuid, recurrence_id timestamptz)
-returns void language sql security definer set search_path=public as $$
-  delete from event_overrides
-  where parent_event_id = $1 and recurrence_id = $2;
-$$;
-
--- Upsert Attendee (series or per-occurrence via override_id)
-create or replace function api.upsert_attendee(p jsonb)
-returns event_attendees
-language plpgsql security definer set search_path=public as $$
-declare
-  v_owner_id uuid := nullif(p->>'owner_id','')::uuid; a event_attendees;
-begin
-  insert into event_attendees (
-    event_id, override_id, email, cn, role, partstat, rsvp, cutype,
-    member_of (emails), delegated_to, delegated_from, sent_by, params
-  )
-  values (
-    (p->>'event_id')::uuid,
-    nullif(p->>'override_id','')::uuid,
-    (p->>'email')::citext,
-    nullif(p->>'cn',''),
-    nullif(p->>'role','')::attendee_role,
-    nullif(p->>'partstat','')::attendee_partstat,
-    coalesce((p->>'rsvp')::bool, false),
-    nullif(p->>'cutype',''),
-    case when p ? 'member_of (emails)' then (select array_agg(value::text) from jsonb_array_elements(p->'member_of (emails)')) end,
-    case when p ? 'delegated_to' then (select array_agg(value::citext) from jsonb_array_elements_text(p->'delegated_to')) end,
-    case when p ? 'delegated_from' then (select array_agg(value::citext) from jsonb_array_elements_text(p->'delegated_from')) end,
-    nullif(p->>'sent_by','')::citext,
-    coalesce(p->'params','{}'::jsonb)
-  )
-  on conflict (event_id, coalesce(override_id, '00000000-0000-0000-0000-000000000000'::uuid), email)
-  do update set
-    cn         = coalesce(excluded.cn, event_attendees.cn),
-    role       = coalesce(excluded.role, event_attendees.role),
-    partstat   = coalesce(excluded.partstat, event_attendees.partstat),
-    rsvp       = coalesce(excluded.rsvp, event_attendees.rsvp),
-    cutype     = coalesce(excluded.cutype, event_attendees.cutype),
-    member_of (emails)  = coalesce(excluded.member_of (emails), event_attendees.member_of (emails)),
-    delegated_to   = coalesce(excluded.delegated_to, event_attendees.delegated_to),
-    delegated_from = coalesce(excluded.delegated_from, event_attendees.delegated_from),
-    sent_by    = coalesce(excluded.sent_by, event_attendees.sent_by),
-    params     = coalesce(excluded.params, event_attendees.params)
-  returning * into a;
-  return a;
-end $$;
-
--- Delete Attendee
-create or replace function api.delete_attendee(event_id uuid, attendee_email citext, override_id uuid default null)
-returns void language sql security definer set search_path=public as $$
-  delete from event_attendees
-  where event_id = $1
-    and email = $2
-    and ( (override_id is null and $3 is null) or (override_id = $3) );
-$$;
-
-
-
--- Scope-aware uniqueness:
---  - For internal canonical attendees: unique by (slot or override scope, owner_id)
---  - For external attendees:        unique by (slot or override scope, lower(email))
-do $$ begin
-  exception when duplicate_object then null; end $$;
-
-
-
--- ============================================================
--- Helper view: slot → owners (derived from slot_acts with kind='act')
--- Used by constraints to validate member_of_owner_ids on slot-scoped attendees.
--- ============================================================
-create or replace view v_slot_owners as
-select
-  sa.slot_id,
-  o.id as owner_id
-from slot_acts sa
-join owners o
-  on o.kind = 'act'
- and o.act_id = sa.act_id;
-
+CREATE TRIGGER trg_drop_on_default_staff_iud
+AFTER INSERT OR UPDATE OR DELETE ON event_staff_default
+FOR EACH ROW EXECUTE FUNCTION drop_invites_on_default_staff_change();
