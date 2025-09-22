@@ -67,9 +67,15 @@ exception when duplicate_object then null; end $$;
 
 -- Ensure owners row exists for a user; return owners.id
 CREATE OR REPLACE FUNCTION ensure_owner_for_user(u uuid) RETURNS uuid LANGUAGE sql AS $$
-  WITH ins AS (
+  WITH src AS (
+    SELECT id, email::text AS email, raw_user_meta_data
+    FROM auth.users
+    WHERE id = u
+  ), ins AS (
     INSERT INTO owners(kind, individual_user_id, display_name)
-    SELECT 'individual', u, COALESCE((SELECT email::text FROM auth.users WHERE id=u), 'user')
+    SELECT 'individual', u,
+           COALESCE(NULLIF(src.raw_user_meta_data->>'display_name',''), split_part(src.email,'@',1), src.email)
+    FROM src
     WHERE NOT EXISTS (SELECT 1 FROM owners WHERE kind='individual' AND individual_user_id=u)
     RETURNING id
   )
@@ -108,6 +114,55 @@ returns uuid language sql stable set search_path = public as $$
   select id from owners where kind='group' and group_id=g limit 1;
 $$;
 grant execute on function get_owner_for_group(uuid) to authenticated;
+
+-- Auto-create/keep owners display_name in sync with auth.users profile changes.
+-- First, drop any old trigger that referenced the legacy function before dropping it.
+do $$ begin
+  drop trigger if exists trg_auth_users_owner on auth.users;
+exception when undefined_object then null; end $$;
+
+-- Now it's safe to drop the legacy function the old trigger depended on.
+drop function if exists _ensure_owner_on_signup();
+
+-- Replace with the new sync function (idempotent drop/create)
+drop function if exists _sync_owner_display_from_auth();
+create or replace function _sync_owner_display_from_auth()
+returns trigger language plpgsql security definer set search_path = public, auth as $$
+declare v_owner uuid; v_disp text;
+begin
+  -- Compute preferred display name from auth.users row
+  v_disp := coalesce(nullif(NEW.raw_user_meta_data->>'display_name',''), split_part(NEW.email::text,'@',1), NEW.email::text);
+  -- Ensure owner exists, then sync display_name if changed
+  v_owner := ensure_owner_for_user(NEW.id);
+  update owners set display_name = v_disp, updated_at = now()
+   where id = v_owner and (owners.display_name is distinct from v_disp);
+  return NEW;
+end $$;
+do $$ begin
+  create trigger trg_auth_users_owner
+  after insert or update on auth.users
+  for each row execute function _sync_owner_display_from_auth();
+exception when duplicate_object then null; end $$;
+
+-- Keep auth.users display name in sync when owners.display_name changes (individuals only)
+drop function if exists _sync_auth_display_from_owner();
+create or replace function _sync_auth_display_from_owner()
+returns trigger language plpgsql security definer set search_path = public, auth as $$
+begin
+  if NEW.kind = 'individual' and NEW.individual_user_id is not null then
+    update auth.users set raw_user_meta_data = coalesce(raw_user_meta_data, '{}'::jsonb)
+           || jsonb_build_object('display_name', coalesce(NEW.display_name, ''))
+    where id = NEW.individual_user_id
+      and coalesce(raw_user_meta_data->>'display_name','') is distinct from coalesce(NEW.display_name,'');
+  end if;
+  return NEW;
+end $$;
+
+do $$ begin
+  create trigger trg_owner_sync_auth_display
+  after update of display_name on owners
+  for each row execute function _sync_auth_display_from_owner();
+exception when duplicate_object then null; end $$;
 
 -- Keep owner_users in sync with group_membership (admins/managers only).
 -- Why AFTER? We want the row visible for the SELECTs used in sync.

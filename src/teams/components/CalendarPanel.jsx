@@ -1,11 +1,11 @@
 // src/teams/components/CalendarPanel.jsx
-import { useMemo, useState, useEffect } from "react";
+import { useMemo, useState, useEffect, useRef } from "react";
 import { Button, GhostButton, DangerButton, Label, Input, Textarea, ErrorText, InfoText, Row } from "components/ui";
 import { useAuth } from "auth/AuthContext";
 import useCalendarData from "../hooks/useCalendarData";
 import { composeStartEndISO, splitLocal, fmtRangeLocal, browserTZ } from "../utils/datetime";
 import { parseRRule, expandBaseOccurrences } from "../../calendar/expandOccurrences";
-import { deleteEventOverrideRPC, listAttendance, setAttendance, listGroupStaffCandidates, getEventStaffDefaults, getEventStaffInstance, resolveOwnerByEmail, resolveOwnerByUserId, resolveUserIdByEmail } from "../teams.api";
+import { deleteEventOverrideRPC, listAttendance, setAttendance, listGroupStaffCandidates, getEventStaffDefaults, getEventStaffInstance, resolveOwnerByEmail, resolveOwnerByUserId, resolveUserIdByEmail, setEventStaffInstance } from "../teams.api";
 
 const CATEGORIES = ["rehearsal", "social", "performance"];
 const TYPE_META = {
@@ -23,6 +23,16 @@ const styles = {
     border: "1px solid rgba(255,255,255,0.2)",
     borderRadius: 10,
     padding: "10px 12px",
+    outline: "none",
+  },
+  selectSm: {
+    background: "transparent",
+    color: "inherit",
+    border: "1px solid rgba(255,255,255,0.2)",
+    borderRadius: 8,
+    padding: "4px 8px",
+    fontSize: 12,
+    height: 28,
     outline: "none",
   },
   panel: { border: "1px solid rgba(255,255,255,0.1)", borderRadius: 10, padding: 12, marginBottom: 16 },
@@ -179,6 +189,7 @@ export default function CalendarPanel({ team }) {
     loading, err, occurrences, events,
     createBase, updateBase, deleteBase,
     editOccurrence, cancelOccurrence, clearOccurrenceOverride,
+    reload,
   } = useCalendarData(team?.id, windowStartIso, windowEndIso);
 
   const upcoming = useMemo(() => occurrences, [occurrences]);
@@ -556,6 +567,8 @@ export default function CalendarPanel({ team }) {
   /* ----------------------------- Edit Occurrence ---------------------------- */
   const [oEd, setOEd] = useState(null);
   const [instanceStaff, setInstanceStaff] = useState([]);
+  const [instanceStaffSeed, setInstanceStaffSeed] = useState(null); // for change detection
+  const [instanceSeedFromDefaults, setInstanceSeedFromDefaults] = useState(false);
   const openEditOccurrence = (occ) => {
     const s = splitLocal(occ.starts_at);
     const e = splitLocal(occ.ends_at);
@@ -573,7 +586,7 @@ export default function CalendarPanel({ team }) {
     });
     setBanner(""); setBannerErr("");
     setMode("editOcc");
-    // Load instance-level staff rows
+    // Load instance-level staff rows; if none, seed from series defaults
     (async()=>{
       try {
         const [cands, rows] = await Promise.all([
@@ -581,7 +594,23 @@ export default function CalendarPanel({ team }) {
           getEventStaffInstance(occ.event_id, occ.base_start),
         ]);
         setStaffCandidates(cands || []);
-        setInstanceStaff((rows || []).map(r => ({ owner_id: r.owner_id, role: r.role, billing_name: r.billing_name || '', billing_ord: r.billing_ord || null, notes: r.notes || '' })));
+        const mapped = (rows || []).map(r => ({ owner_id: r.owner_id, role: r.role, billing_name: r.billing_name || '', billing_ord: r.billing_ord || null, notes: r.notes || '' }));
+        if (!mapped.length) {
+          const dft = await getEventStaffDefaults(occ.event_id);
+          const mappedDft = (dft || []).map(r => ({ owner_id: r.owner_id, role: r.role, billing_name: r.billing_name || '', billing_ord: r.billing_ord || null, notes: r.notes || '' }));
+          // normalize order contiguous
+          const ordered = mappedDft
+            .slice()
+            .sort((a,b) => (a.billing_ord ?? 999999) - (b.billing_ord ?? 999999))
+            .map((r,i)=> ({ ...r, billing_ord: i+1 }));
+          setInstanceStaff(ordered);
+          setInstanceStaffSeed(ordered);
+          setInstanceSeedFromDefaults(true);
+        } else {
+          setInstanceStaff(mapped);
+          setInstanceStaffSeed(mapped);
+          setInstanceSeedFromDefaults(false);
+        }
       } catch(e) { console.warn('load instance staff failed', e); setInstanceStaff([]); }
     })();
   };
@@ -598,6 +627,17 @@ export default function CalendarPanel({ team }) {
     setBanner(""); setBannerErr("");
     try {
       const { startIso, endIso } = composeStartEndISO(oEd._sDate, oEd._sTime, oEd._eTime);
+      const staffChanged = (() => {
+        if (!Array.isArray(instanceStaffSeed) || !instanceSeedFromDefaults) return true; // send if there were existing overrides or no seed
+        const a = (instanceStaff || []).map(r => ({ owner_id: r.owner_id, role: r.role, billing_name: r.billing_name || null, billing_ord: r.billing_ord || null })).sort((x,y)=> (x.billing_ord??0)-(y.billing_ord??0));
+        const b = (instanceStaffSeed || []).map(r => ({ owner_id: r.owner_id, role: r.role, billing_name: r.billing_name || null, billing_ord: r.billing_ord || null })).sort((x,y)=> (x.billing_ord??0)-(y.billing_ord??0));
+        if (a.length !== b.length) return true;
+        for (let i=0;i<a.length;i++) {
+          const x=a[i], y=b[i];
+          if (x.owner_id!==y.owner_id || x.role!==y.role || (x.billing_name||'')!==(y.billing_name||'') || (x.billing_ord||null)!==(y.billing_ord||null)) return true;
+        }
+        return false;
+      })();
       await editOccurrence(oEd.event_id, oEd.base_start, {
         title: oEd.title.trim(),
         description: oEd.description.trim(),
@@ -606,7 +646,7 @@ export default function CalendarPanel({ team }) {
         tz,
         starts_at: startIso,
         ends_at: endIso,
-        instance_staff: instanceStaff,
+        ...(staffChanged ? { instance_staff: instanceStaff } : {}),
       });
       cancelEditOccurrence();
       setBanner("Occurrence updated.");
@@ -628,8 +668,18 @@ export default function CalendarPanel({ team }) {
     if (!oEd) return;
     setBanner(""); setBannerErr("");
     try {
+      // Clear both the visual override and any staff override so it pulls from series again
+      await setEventStaffInstance(oEd.event_id, oEd.base_start, []);
       await clearOccurrenceOverride(oEd.event_id, oEd.base_start);
-      cancelEditOccurrence();
+      // Stay on edit occurrence; reload and reopen the same occurrence
+      await reload();
+      const occ = (occurrences || []).find(x => x.event_id === oEd.event_id && x.base_start === oEd.base_start);
+      if (occ) {
+        openEditOccurrence(occ);
+      } else {
+        // Fallback: just close editor if not found
+        cancelEditOccurrence();
+      }
       setBanner("Occurrence override cleared.");
     } catch (e) { setBannerErr(e.message || "Failed to clear override"); }
   };
@@ -1177,18 +1227,49 @@ export default function CalendarPanel({ team }) {
 /* ------------------------------ Staff Editor ------------------------------ */
 const ROLE_KINDS = ['performer','producer','host','promoter','crew'];
 function StaffEditor({ staff, setStaff, candidates }) {
+  const containerRef = useRef(null);
   const [selOwner, setSelOwner] = useState("");
   const [selRole, setSelRole] = useState("performer");
   const [billingName, setBillingName] = useState("");
-  const [billingOrd, setBillingOrd] = useState("");
+  // Drag-and-drop reorder replaces manual order entry
   const [query, setQuery] = useState("");
   const [err, setErr] = useState("");
+  const [showSuggestions, setShowSuggestions] = useState(false);
+  const [dragIndex, setDragIndex] = useState(null);
+  const [roleOpenIdx, setRoleOpenIdx] = useState(null);
 
   const suggestions = (candidates || []).filter(c => {
     if (!query.trim()) return false;
     const q = query.toLowerCase();
     return (c.display_name || "").toLowerCase().includes(q);
   }).slice(0, 8);
+
+  const reindex = (arr) => arr.map((r, i) => ({ ...r, billing_ord: i + 1 }));
+
+  const changeRoleAt = (i, newRole) => {
+    const row = (staff || [])[i];
+    if (!row) return;
+    // Prevent duplicate owner+role combinations
+    if ((staff || []).some((r, idx) => idx !== i && r.owner_id === row.owner_id && r.role === newRole)) {
+      setErr('That person already has that role.');
+      return;
+    }
+    const next = (staff || []).map((r, idx) => idx === i ? { ...r, role: newRole } : r);
+    setErr("");
+    setStaff(next);
+  };
+
+  useEffect(() => {
+    const onDocMouseDown = (e) => {
+      if (!containerRef.current) return;
+      if (!containerRef.current.contains(e.target)) {
+        setShowSuggestions(false);
+        setRoleOpenIdx(null);
+      }
+    };
+    document.addEventListener('mousedown', onDocMouseDown);
+    return () => document.removeEventListener('mousedown', onDocMouseDown);
+  }, []);
 
   const add = async (ownerId) => {
     let owner_id = ownerId || selOwner;
@@ -1219,9 +1300,10 @@ function StaffEditor({ staff, setStaff, candidates }) {
       setErr('That person/role is already added.');
       return;
     }
-    const row = { owner_id, role, billing_name: billingName.trim() || null, billing_ord: billingOrd ? Number(billingOrd) : null, notes: null };
-    setStaff([...(staff || []), row]);
-    setSelOwner(""); setBillingName(""); setBillingOrd(""); setQuery(""); setErr("");
+    const row = { owner_id, role, billing_name: billingName.trim() || null, billing_ord: null, notes: null };
+    const next = reindex([...(staff || []), row]);
+    setStaff(next);
+    setSelOwner(""); setBillingName(""); setQuery(""); setErr(""); setShowSuggestions(false);
   };
 
   const removeAt = (i) => setStaff((staff || []).filter((_, idx) => idx !== i));
@@ -1232,22 +1314,25 @@ function StaffEditor({ staff, setStaff, candidates }) {
   };
 
   return (
-    <div>
+    <div ref={containerRef}>
       <div style={{ display: 'flex', gap: 8, alignItems: 'flex-start', flexWrap: 'wrap' }}>
         <div style={{ position: 'relative', minWidth: 260 }}>
           <Input
             placeholder="Type a name to search, or enter an email"
             value={query}
-            onChange={(e)=>{ setQuery(e.target.value); setSelOwner(""); setErr(""); }}
+            onChange={(e)=>{ setQuery(e.target.value); setSelOwner(""); setErr(""); setShowSuggestions(true); }}
+            onFocus={()=> setShowSuggestions(true)}
+            onBlur={()=> setTimeout(()=> setShowSuggestions(false), 120)}
             onKeyDown={async (e)=>{
               if (e.key === 'Enter') {
                 e.preventDefault();
                 e.stopPropagation();
                 await add();
+                setShowSuggestions(false);
               }
             }}
           />
-          {query.trim() && (
+          {query.trim() && showSuggestions && (
             <div style={{ position: 'absolute', zIndex: 20, background: '#0f0f14', border: '1px solid rgba(255,255,255,0.2)', borderRadius: 8, marginTop: 4, width: '100%' }}>
               {suggestions.length === 0 && !/.+@.+\..+/.test(query.trim()) && (
                 <div style={{ padding: '8px 10px', opacity: 0.7 }}>No matches</div>
@@ -1255,17 +1340,20 @@ function StaffEditor({ staff, setStaff, candidates }) {
               {suggestions.map(s => (
                 <div key={s.owner_id || s.user_id}
                   onClick={async ()=>{
+                    // Always reflect click in the input immediately
+                    setQuery(s.display_name);
+                    setErr(""); setShowSuggestions(false);
                     try {
-                      let oid = s.owner_id;
-                      if (!oid && s.user_id) {
-                        oid = await resolveOwnerByUserId(s.user_id);
+                      if (s.owner_id) {
+                        setSelOwner(s.owner_id);
+                        return;
                       }
-                      if (!oid) { setErr('Could not resolve owner for selection'); return; }
-                      // Set selection and let the Add button or Enter confirm
-                      setSelOwner(oid);
-                      setQuery(s.display_name);
-                      setErr("");
-                    } catch(e){ setErr(e.message || 'Failed to add'); }
+                      if (s.user_id) {
+                        const oid = await resolveOwnerByUserId(s.user_id);
+                        if (oid) setSelOwner(oid);
+                        // If still no oid, leave selection empty; Add will resolve again and show an error if needed
+                      }
+                    } catch(e){ setErr(e.message || 'Failed to resolve selection'); }
                   }}
                   style={{ padding: '6px 10px', cursor: 'pointer', borderBottom: '1px solid rgba(255,255,255,0.08)' }}>
                   {s.display_name} {s.kind==='group' ? '(group)' : ''}
@@ -1281,7 +1369,6 @@ function StaffEditor({ staff, setStaff, candidates }) {
           ))}
         </select>
         <Input placeholder="Billing name (optional)" value={billingName} onChange={(e) => setBillingName(e.target.value)} style={{ minWidth: 200 }} />
-        <Input type="number" placeholder="Order" value={billingOrd} onChange={(e) => setBillingOrd(e.target.value)} style={{ width: 100 }} />
         <Button onClick={() => add()} disabled={!selOwner && !query.trim()}>Add</Button>
       </div>
 
@@ -1290,16 +1377,63 @@ function StaffEditor({ staff, setStaff, candidates }) {
       ) : (
         <ul style={{ listStyle: 'none', padding: 0, marginTop: 8 }}>
           {staff.map((r, idx) => (
-            <li key={idx} style={{ display: 'flex', gap: 8, alignItems: 'center', justifyContent: 'space-between', border: '1px solid rgba(255,255,255,0.1)', borderRadius: 8, padding: '6px 8px', marginBottom: 6 }}>
-              <div>
-                <div style={{ fontWeight: 600 }}>{nameFor(r.owner_id)}</div>
-                <div style={{ opacity: 0.8, fontSize: 12 }}>
-                  {cap(r.role)}
-                  {r.billing_name ? ` · ${r.billing_name}` : ''}
-                  {Number.isFinite(r.billing_ord) ? ` · #${r.billing_ord}` : ''}
+            <li key={idx}
+                draggable
+                onDragStart={() => setDragIndex(idx)}
+                onDragOver={(e) => { e.preventDefault(); }}
+                onDrop={() => {
+                  if (dragIndex === null || dragIndex === idx) return;
+                  const arr = [...(staff || [])];
+                  const [moved] = arr.splice(dragIndex, 1);
+                  arr.splice(idx, 0, moved);
+                  setDragIndex(null);
+                  setStaff(reindex(arr));
+                }}
+                style={{ display: 'flex', gap: 8, alignItems: 'center', justifyContent: 'space-between', border: '1px solid rgba(255,255,255,0.1)', borderRadius: 8, padding: '6px 8px', marginBottom: 6 }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8, position: 'relative', width: '100%', justifyContent: 'space-between' }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                  <span title="Drag to reorder" style={{ cursor: 'grab', opacity: 0.7 }}>↕</span>
+                  <div>
+                    <div style={{ fontWeight: 600 }}>{nameFor(r.owner_id)}</div>
+                    <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginTop: 2 }}>
+                      <button
+                        type="button"
+                        onClick={() => setRoleOpenIdx(roleOpenIdx === idx ? null : idx)}
+                        style={{
+                          background: 'transparent',
+                          color: 'inherit',
+                          border: '1px solid rgba(255,255,255,0.2)',
+                          borderRadius: 999,
+                          padding: '2px 8px',
+                          fontSize: 12,
+                          cursor: 'pointer'
+                        }}
+                        aria-haspopup="listbox"
+                        aria-expanded={roleOpenIdx === idx}
+                      >
+                        {cap(r.role)} ▾
+                      </button>
+                      {roleOpenIdx === idx && (
+                        <div style={{ position: 'absolute', zIndex: 25, top: '100%', left: 30, background: '#0f0f14', border: '1px solid rgba(255,255,255,0.2)', borderRadius: 8, marginTop: 6, minWidth: 140 }} role="listbox">
+                          {ROLE_KINDS.map(role => (
+                            <div
+                              key={role}
+                              role="option"
+                              aria-selected={r.role === role}
+                              onClick={() => { changeRoleAt(idx, role); setRoleOpenIdx(null); }}
+                              style={{ padding: '6px 10px', cursor: 'pointer', background: r.role === role ? 'rgba(255,255,255,0.08)' : 'transparent' }}
+                            >
+                              {cap(role)}
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                      {r.billing_name ? <span style={{ opacity: 0.8, fontSize: 12 }}>· {r.billing_name}</span> : null}
+                    </div>
+                  </div>
                 </div>
+                <GhostButton onClick={() => removeAt(idx)}>Remove</GhostButton>
               </div>
-              <GhostButton onClick={() => removeAt(idx)}>Remove</GhostButton>
             </li>
           ))}
         </ul>
