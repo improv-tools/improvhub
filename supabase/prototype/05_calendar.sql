@@ -1068,22 +1068,31 @@ returns table(owner_id uuid, kind text, display_name text, user_id uuid)
 language sql stable security definer set search_path = public, auth as $$
   with me as (
     select 1 from group_membership gm where gm.group_id = p_group_id and gm.user_id = auth.uid() and gm.ended_on is null
-  )
-  , grp as (
-    select ensure_owner_for_group(p_group_id) as owner_id
-  )
-  , members as (
-    select ensure_owner_for_user(gm.user_id) as owner_id, gm.user_id
+  ), grp as (
+    -- read-only getter for group owner (owner row should already exist from creation trigger)
+    select get_owner_for_group(p_group_id) as owner_id
+  ), members as (
+    -- read-only getter; owner row may be null for some users
+    select gm.user_id, get_owner_for_user(gm.user_id) as owner_id
     from group_membership gm
     where gm.group_id = p_group_id and gm.ended_on is null
   )
-  select o.id as owner_id, o.kind::text as kind, o.display_name, null::uuid as user_id
+  -- Group owner row with fallback to group name
+  select o.id as owner_id, o.kind::text as kind,
+         coalesce(o.display_name, (select g.name from "group" g where g.group_id = p_group_id)) as display_name,
+         null::uuid as user_id
   from owners o join grp on grp.owner_id = o.id
   where exists (select 1 from me)
   union all
-  select o.id, o.kind::text, o.display_name, m.user_id
-  from owners o
-  join members m on m.owner_id = o.id
+  -- Member owners with fallback to auth.users display/email; include users lacking owner row
+  select m.owner_id,
+         coalesce(o.kind::text, 'individual') as kind,
+         coalesce(o.display_name,
+                  coalesce(nullif(u.raw_user_meta_data->>'display_name',''), split_part(u.email::text,'@',1), u.email::text)) as display_name,
+         m.user_id
+  from members m
+  left join owners o on o.id = m.owner_id
+  join auth.users u on u.id = m.user_id
   where exists (select 1 from me)
   order by kind desc, display_name asc
 $$;
@@ -1115,6 +1124,35 @@ language sql stable security definer set search_path = public as $$
   order by coalesce(esi.billing_ord, 999999), esi.owner_id;
 $$;
 grant execute on function get_event_staff_instance(uuid, timestamptz) to authenticated;
+
+-- Resolve an owner_id by user email (ensures owner row if user exists)
+drop function if exists owner_id_by_email(p_email text);
+create or replace function owner_id_by_email(p_email text)
+returns uuid
+language plpgsql stable security definer set search_path = public, auth as $$
+declare u_id uuid; o_id uuid;
+begin
+  if p_email is null or length(trim(p_email)) = 0 then
+    return null;
+  end if;
+  select id into u_id from auth.users where lower(email::text) = lower(trim(p_email)) limit 1;
+  if u_id is null then
+    return null;
+  end if;
+  -- Read-only resolution: do not create owners here to avoid writes in read-only transactions
+  select get_owner_for_user(u_id) into o_id;
+  return o_id;
+end $$;
+grant execute on function owner_id_by_email(text) to authenticated;
+
+-- Ensure and return owner_id for a given user_id (used when a member lacks an owner row)
+drop function if exists owner_id_by_userid(p_user_id uuid);
+create or replace function owner_id_by_userid(p_user_id uuid)
+returns uuid
+language sql security definer stable set search_path = public as $$
+  select ensure_owner_for_user(p_user_id);
+$$;
+grant execute on function owner_id_by_userid(uuid) to authenticated;
 
 -- Enforce recurrence policy: finite and bounded
 -- Rules:
@@ -1193,3 +1231,11 @@ end $$;
 create trigger trg_group_create_calendar
 after insert on "group"
 for each row execute procedure trg_group_create_calendar();
+-- Read-only: resolve a user_id by email (no writes)
+drop function if exists user_id_by_email(p_email text);
+create or replace function user_id_by_email(p_email text)
+returns uuid
+language sql stable security definer set search_path = public, auth as $$
+  select id from auth.users where lower(email::text) = lower(trim(p_email)) limit 1;
+$$;
+grant execute on function user_id_by_email(text) to authenticated;

@@ -231,6 +231,28 @@ export async function getEventStaffInstance(eventId, recurrenceIdIso) {
   return data || [];
 }
 
+export async function resolveOwnerByEmail(email) {
+  const { data, error } = await supabase.rpc('owner_id_by_email', { p_email: email });
+  if (error) throw new Error(error.message);
+  // PostgREST may return scalar or array depending on config
+  if (Array.isArray(data)) return data[0] ?? null;
+  return data ?? null;
+}
+
+export async function resolveUserIdByEmail(email) {
+  const { data, error } = await supabase.rpc('user_id_by_email', { p_email: email });
+  if (error) throw new Error(error.message);
+  if (Array.isArray(data)) return data[0] ?? null;
+  return data ?? null;
+}
+
+export async function resolveOwnerByUserId(userId) {
+  const { data, error } = await supabase.rpc('owner_id_by_userid', { p_user_id: userId });
+  if (error) throw new Error(error.message);
+  if (Array.isArray(data)) return data[0] ?? null;
+  return data ?? null;
+}
+
 /* ----------------------------- Team calendar API --------------------------- */
 /** Base events (series). */
 export async function fetchTeamEvents(teamId) {

@@ -5,7 +5,7 @@ import { useAuth } from "auth/AuthContext";
 import useCalendarData from "../hooks/useCalendarData";
 import { composeStartEndISO, splitLocal, fmtRangeLocal, browserTZ } from "../utils/datetime";
 import { parseRRule, expandBaseOccurrences } from "../../calendar/expandOccurrences";
-import { deleteEventOverrideRPC, listAttendance, setAttendance, listGroupStaffCandidates, getEventStaffDefaults, getEventStaffInstance } from "../teams.api";
+import { deleteEventOverrideRPC, listAttendance, setAttendance, listGroupStaffCandidates, getEventStaffDefaults, getEventStaffInstance, resolveOwnerByEmail, resolveOwnerByUserId, resolveUserIdByEmail } from "../teams.api";
 
 const CATEGORIES = ["rehearsal", "social", "performance"];
 const TYPE_META = {
@@ -1181,14 +1181,47 @@ function StaffEditor({ staff, setStaff, candidates }) {
   const [selRole, setSelRole] = useState("performer");
   const [billingName, setBillingName] = useState("");
   const [billingOrd, setBillingOrd] = useState("");
+  const [query, setQuery] = useState("");
+  const [err, setErr] = useState("");
 
-  const add = () => {
-    if (!selOwner) return;
-    const owner_id = selOwner;
+  const suggestions = (candidates || []).filter(c => {
+    if (!query.trim()) return false;
+    const q = query.toLowerCase();
+    return (c.display_name || "").toLowerCase().includes(q);
+  }).slice(0, 8);
+
+  const add = async (ownerId) => {
+    let owner_id = ownerId || selOwner;
+    // Fallbacks so Add works with just the input value
+    if (!owner_id) {
+      const q = (query || '').trim();
+      const isEmail = /.+@.+\..+/.test(q);
+      try {
+        if (isEmail) {
+          owner_id = await resolveOwnerByEmail(q);
+          if (!owner_id) {
+            // Fallback: create owner for existing user by email
+            const uid = await resolveUserIdByEmail(q);
+            if (uid) owner_id = await resolveOwnerByUserId(uid);
+          }
+        } else if (suggestions.length > 0) {
+          const top = suggestions[0];
+          owner_id = top.owner_id || (top.user_id ? await resolveOwnerByUserId(top.user_id) : null);
+        }
+      } catch(e) {
+        setErr(e?.message || 'Lookup failed');
+        return;
+      }
+      if (!owner_id) { setErr('Select a person or enter a valid email.'); return; }
+    }
     const role = selRole;
+    if ((staff || []).some(r => r.owner_id === owner_id && r.role === role)) {
+      setErr('That person/role is already added.');
+      return;
+    }
     const row = { owner_id, role, billing_name: billingName.trim() || null, billing_ord: billingOrd ? Number(billingOrd) : null, notes: null };
     setStaff([...(staff || []), row]);
-    setSelOwner(""); setBillingName(""); setBillingOrd("");
+    setSelOwner(""); setBillingName(""); setBillingOrd(""); setQuery(""); setErr("");
   };
 
   const removeAt = (i) => setStaff((staff || []).filter((_, idx) => idx !== i));
@@ -1200,15 +1233,48 @@ function StaffEditor({ staff, setStaff, candidates }) {
 
   return (
     <div>
-      <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
-        <select value={selOwner} onChange={(e) => setSelOwner(e.target.value)} style={styles.select}>
-          <option value="">Select person/group…</option>
-          {(candidates || []).map(c => (
-            <option key={c.owner_id} value={c.owner_id}>
-              {c.display_name} {c.kind === 'group' ? '(group)' : ''}
-            </option>
-          ))}
-        </select>
+      <div style={{ display: 'flex', gap: 8, alignItems: 'flex-start', flexWrap: 'wrap' }}>
+        <div style={{ position: 'relative', minWidth: 260 }}>
+          <Input
+            placeholder="Type a name to search, or enter an email"
+            value={query}
+            onChange={(e)=>{ setQuery(e.target.value); setSelOwner(""); setErr(""); }}
+            onKeyDown={async (e)=>{
+              if (e.key === 'Enter') {
+                e.preventDefault();
+                e.stopPropagation();
+                await add();
+              }
+            }}
+          />
+          {query.trim() && (
+            <div style={{ position: 'absolute', zIndex: 20, background: '#0f0f14', border: '1px solid rgba(255,255,255,0.2)', borderRadius: 8, marginTop: 4, width: '100%' }}>
+              {suggestions.length === 0 && !/.+@.+\..+/.test(query.trim()) && (
+                <div style={{ padding: '8px 10px', opacity: 0.7 }}>No matches</div>
+              )}
+              {suggestions.map(s => (
+                <div key={s.owner_id || s.user_id}
+                  onClick={async ()=>{
+                    try {
+                      let oid = s.owner_id;
+                      if (!oid && s.user_id) {
+                        oid = await resolveOwnerByUserId(s.user_id);
+                      }
+                      if (!oid) { setErr('Could not resolve owner for selection'); return; }
+                      // Set selection and let the Add button or Enter confirm
+                      setSelOwner(oid);
+                      setQuery(s.display_name);
+                      setErr("");
+                    } catch(e){ setErr(e.message || 'Failed to add'); }
+                  }}
+                  style={{ padding: '6px 10px', cursor: 'pointer', borderBottom: '1px solid rgba(255,255,255,0.08)' }}>
+                  {s.display_name} {s.kind==='group' ? '(group)' : ''}
+                </div>
+              ))}
+            </div>
+          )}
+          {err && <div style={{ color: '#ff6b6b', fontSize: 12, marginTop: 4 }}>{err}</div>}
+        </div>
         <select value={selRole} onChange={(e) => setSelRole(e.target.value)} style={styles.select}>
           {ROLE_KINDS.map(r => (
             <option key={r} value={r}>{cap(r)}</option>
@@ -1216,7 +1282,7 @@ function StaffEditor({ staff, setStaff, candidates }) {
         </select>
         <Input placeholder="Billing name (optional)" value={billingName} onChange={(e) => setBillingName(e.target.value)} style={{ minWidth: 200 }} />
         <Input type="number" placeholder="Order" value={billingOrd} onChange={(e) => setBillingOrd(e.target.value)} style={{ width: 100 }} />
-        <Button onClick={add} disabled={!selOwner}>Add</Button>
+        <Button onClick={() => add()} disabled={!selOwner && !query.trim()}>Add</Button>
       </div>
 
       {(staff || []).length === 0 ? (
