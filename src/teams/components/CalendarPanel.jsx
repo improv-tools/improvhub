@@ -768,10 +768,10 @@ export default function CalendarPanel({ team }) {
         </div>
       )}
 
-      {/* EDIT SERIES */}
+      {/* MANAGE SERIES / EVENT (series-level editor) */}
       {mode === "editSeries" && sEd && (
         <div style={styles.panel}>
-          <h4 style={{ margin: "0 0 10px", fontSize: 14 }}>Edit event</h4>
+          <h4 style={{ margin: "0 0 10px", fontSize: 14 }}>{sRecurrenceMode === 'none' ? 'Manage Event' : 'Manage Series'}</h4>
 
           {/* Switch: No recurrence / Until / Count */}
           <Row>
@@ -939,10 +939,10 @@ export default function CalendarPanel({ team }) {
         </div>
       )}
 
-      {/* EDIT OCCURRENCE */}
+      {/* MANAGE SINGLE OCCURRENCE (instance-level editor) */}
       {mode === "editOcc" && oEd && (
         <div style={styles.panel}>
-          <h4 style={{ margin: "0 0 10px", fontSize: 14 }}>Edit single occurrence</h4>
+          <h4 style={{ margin: "0 0 10px", fontSize: 14 }}>Manage Event</h4>
 
           {oTimeErrors.length > 0 && (
             <ErrorText>{oTimeErrors.map((e,i)=><div key={i}>• {e}</div>)}</ErrorText>
@@ -1116,12 +1116,12 @@ export default function CalendarPanel({ team }) {
                     <Row>
                       {isRecurring ? (
                         <>
-                          <GhostButton onClick={() => openEditSeries(occ.event_id)}>Edit series</GhostButton>
-                          <GhostButton onClick={() => openEditOccurrence(occ)}>Edit occurrence</GhostButton>
-                        </>
-                      ) : (
-                        <GhostButton onClick={() => openEditSeries(occ.event_id)}>Edit event</GhostButton>
-                      )}
+                        <GhostButton onClick={() => openEditSeries(occ.event_id)}>Manage Series</GhostButton>
+                        <GhostButton onClick={() => openEditOccurrence(occ)}>Manage Event</GhostButton>
+                      </>
+                    ) : (
+                        <GhostButton onClick={() => openEditSeries(occ.event_id)}>Manage Event</GhostButton>
+                    )}
                     </Row>
                   </li>
                 );
