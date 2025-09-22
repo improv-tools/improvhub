@@ -5,8 +5,7 @@ import { useAuth } from "auth/AuthContext";
 import useCalendarData from "../hooks/useCalendarData";
 import { composeStartEndISO, splitLocal, fmtRangeLocal, browserTZ } from "../utils/datetime";
 import { parseRRule, expandBaseOccurrences } from "../../calendar/expandOccurrences";
-import { deleteEventOverrideRPC } from "../teams.api";
-import { listAttendance, setAttendance } from "../teams.api";
+import { deleteEventOverrideRPC, listAttendance, setAttendance, listGroupStaffCandidates, getEventStaffDefaults, getEventStaffInstance } from "../teams.api";
 
 const CATEGORIES = ["rehearsal", "social", "performance"];
 const TYPE_META = {
@@ -332,6 +331,8 @@ export default function CalendarPanel({ team }) {
   const [sEd, setSEd] = useState(null);
   const [sEndTouched, setSEndTouched] = useState(false);
   const [sRecurrenceMode, setSRecurrenceMode] = useState("none"); // 'none'|'until'|'count'
+  const [seriesStaff, setSeriesStaff] = useState([]);
+  const [staffCandidates, setStaffCandidates] = useState([]);
 
   const openEditSeries = (eventId) => {
     const e = events.find((x) => x.id === eventId);
@@ -390,6 +391,20 @@ export default function CalendarPanel({ team }) {
     setSRecurrenceMode(mode);
     setBanner(""); setBannerErr("");
     setMode("editSeries");
+    // Load staff + candidates for this group/event
+    (async()=>{
+      try {
+        const [cands, rows] = await Promise.all([
+          team?.id ? listGroupStaffCandidates(team.id) : Promise.resolve([]),
+          getEventStaffDefaults(eventId),
+        ]);
+        setStaffCandidates(cands || []);
+        setSeriesStaff((rows || []).map(r => ({ owner_id: r.owner_id, role: r.role, billing_name: r.billing_name || '', billing_ord: r.billing_ord || null, notes: r.notes || '' })));
+      } catch(e) {
+        console.warn('load staff defaults failed', e);
+        setStaffCandidates([]); setSeriesStaff([]);
+      }
+    })();
   };
   const cancelEditSeries = () => { setSEd(null); setMode("list"); };
 
@@ -473,7 +488,6 @@ export default function CalendarPanel({ team }) {
           }
         }
       }
-
       const { startIso, endIso } = composeStartEndISO(sEd._s.date, sEd._s.time, sEd._e.time);
 
       await updateBase(sEd.id, {
@@ -491,6 +505,7 @@ export default function CalendarPanel({ team }) {
         recur_week_of_month,
         recur_until,
         recur_count,
+        staff_defaults: seriesStaff,
       });
 
       cancelEditSeries();
@@ -540,6 +555,7 @@ export default function CalendarPanel({ team }) {
 
   /* ----------------------------- Edit Occurrence ---------------------------- */
   const [oEd, setOEd] = useState(null);
+  const [instanceStaff, setInstanceStaff] = useState([]);
   const openEditOccurrence = (occ) => {
     const s = splitLocal(occ.starts_at);
     const e = splitLocal(occ.ends_at);
@@ -557,6 +573,17 @@ export default function CalendarPanel({ team }) {
     });
     setBanner(""); setBannerErr("");
     setMode("editOcc");
+    // Load instance-level staff rows
+    (async()=>{
+      try {
+        const [cands, rows] = await Promise.all([
+          team?.id ? listGroupStaffCandidates(team.id) : Promise.resolve([]),
+          getEventStaffInstance(occ.event_id, occ.base_start),
+        ]);
+        setStaffCandidates(cands || []);
+        setInstanceStaff((rows || []).map(r => ({ owner_id: r.owner_id, role: r.role, billing_name: r.billing_name || '', billing_ord: r.billing_ord || null, notes: r.notes || '' })));
+      } catch(e) { console.warn('load instance staff failed', e); setInstanceStaff([]); }
+    })();
   };
   const cancelEditOccurrence = () => { setOEd(null); setMode("list"); };
 
@@ -579,6 +606,7 @@ export default function CalendarPanel({ team }) {
         tz,
         starts_at: startIso,
         ends_at: endIso,
+        instance_staff: instanceStaff,
       });
       cancelEditOccurrence();
       setBanner("Occurrence updated.");
@@ -818,6 +846,12 @@ export default function CalendarPanel({ team }) {
             <Textarea placeholder="Description" value={sEd.description || ""} onChange={(e)=>setSEd({ ...sEd, description: e.target.value })} maxLength={500} rows={3} style={{ minWidth: 500 }} />
           </Row>
 
+          {/* Staff: series defaults */}
+          <div style={{ marginTop: 10, borderTop: '1px solid rgba(255,255,255,0.1)', paddingTop: 10 }}>
+            <div style={{ fontWeight: 600, marginBottom: 6 }}>Staff (series defaults)</div>
+            <StaffEditor staff={seriesStaff} setStaff={setSeriesStaff} candidates={staffCandidates} />
+          </div>
+
           <Row>
             <Input type="date" value={sEd._s.date} onChange={(ev)=>{
               const newDate = ev.target.value;
@@ -958,6 +992,12 @@ export default function CalendarPanel({ team }) {
           <Row>
             <Textarea placeholder="Description" value={oEd.description} onChange={(e)=>setOEd({ ...oEd, description: e.target.value })} maxLength={500} rows={3} style={{ minWidth: 500 }} />
           </Row>
+
+          {/* Staff: occurrence-specific */}
+          <div style={{ marginTop: 10, borderTop: '1px solid rgba(255,255,255,0.1)', paddingTop: 10 }}>
+            <div style={{ fontWeight: 600, marginBottom: 6 }}>Staff (this occurrence)</div>
+            <StaffEditor staff={instanceStaff} setStaff={setInstanceStaff} candidates={staffCandidates} />
+          </div>
           <Row>
             <Input type="date" value={oEd._sDate} onChange={(e)=>setOEd({ ...oEd, _sDate: e.target.value })} />
             <Input type="time" value={oEd._sTime} onChange={(e)=>setOEd({ ...oEd, _sTime: e.target.value })} />
@@ -1129,6 +1169,74 @@ export default function CalendarPanel({ team }) {
             </ul>
           )}
         </>
+      )}
+    </div>
+  );
+}
+
+/* ------------------------------ Staff Editor ------------------------------ */
+const ROLE_KINDS = ['performer','producer','host','promoter','crew'];
+function StaffEditor({ staff, setStaff, candidates }) {
+  const [selOwner, setSelOwner] = useState("");
+  const [selRole, setSelRole] = useState("performer");
+  const [billingName, setBillingName] = useState("");
+  const [billingOrd, setBillingOrd] = useState("");
+
+  const add = () => {
+    if (!selOwner) return;
+    const owner_id = selOwner;
+    const role = selRole;
+    const row = { owner_id, role, billing_name: billingName.trim() || null, billing_ord: billingOrd ? Number(billingOrd) : null, notes: null };
+    setStaff([...(staff || []), row]);
+    setSelOwner(""); setBillingName(""); setBillingOrd("");
+  };
+
+  const removeAt = (i) => setStaff((staff || []).filter((_, idx) => idx !== i));
+
+  const nameFor = (owner_id) => {
+    const c = (candidates || []).find(c => c.owner_id === owner_id);
+    return c ? c.display_name : owner_id;
+  };
+
+  return (
+    <div>
+      <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+        <select value={selOwner} onChange={(e) => setSelOwner(e.target.value)} style={styles.select}>
+          <option value="">Select person/group…</option>
+          {(candidates || []).map(c => (
+            <option key={c.owner_id} value={c.owner_id}>
+              {c.display_name} {c.kind === 'group' ? '(group)' : ''}
+            </option>
+          ))}
+        </select>
+        <select value={selRole} onChange={(e) => setSelRole(e.target.value)} style={styles.select}>
+          {ROLE_KINDS.map(r => (
+            <option key={r} value={r}>{cap(r)}</option>
+          ))}
+        </select>
+        <Input placeholder="Billing name (optional)" value={billingName} onChange={(e) => setBillingName(e.target.value)} style={{ minWidth: 200 }} />
+        <Input type="number" placeholder="Order" value={billingOrd} onChange={(e) => setBillingOrd(e.target.value)} style={{ width: 100 }} />
+        <Button onClick={add} disabled={!selOwner}>Add</Button>
+      </div>
+
+      {(staff || []).length === 0 ? (
+        <div style={{ opacity: 0.75, marginTop: 8 }}>No staff assigned.</div>
+      ) : (
+        <ul style={{ listStyle: 'none', padding: 0, marginTop: 8 }}>
+          {staff.map((r, idx) => (
+            <li key={idx} style={{ display: 'flex', gap: 8, alignItems: 'center', justifyContent: 'space-between', border: '1px solid rgba(255,255,255,0.1)', borderRadius: 8, padding: '6px 8px', marginBottom: 6 }}>
+              <div>
+                <div style={{ fontWeight: 600 }}>{nameFor(r.owner_id)}</div>
+                <div style={{ opacity: 0.8, fontSize: 12 }}>
+                  {cap(r.role)}
+                  {r.billing_name ? ` · ${r.billing_name}` : ''}
+                  {Number.isFinite(r.billing_ord) ? ` · #${r.billing_ord}` : ''}
+                </div>
+              </div>
+              <GhostButton onClick={() => removeAt(idx)}>Remove</GhostButton>
+            </li>
+          ))}
+        </ul>
       )}
     </div>
   );

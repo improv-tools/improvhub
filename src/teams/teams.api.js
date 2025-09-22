@@ -212,6 +212,25 @@ export async function moveEventOverride(eventId, fromRidIso, toRidIso) {
   if (error) throw new Error(error.message);
 }
 
+/* ------------------------------ Staff helpers ------------------------------ */
+export async function listGroupStaffCandidates(groupId) {
+  const { data, error } = await supabase.rpc('list_group_staff_candidates', { p_group_id: groupId });
+  if (error) throw new Error(error.message);
+  return data || [];
+}
+
+export async function getEventStaffDefaults(eventId) {
+  const { data, error } = await supabase.rpc('get_event_staff_defaults', { p_event_id: eventId });
+  if (error) throw new Error(error.message);
+  return data || [];
+}
+
+export async function getEventStaffInstance(eventId, recurrenceIdIso) {
+  const { data, error } = await supabase.rpc('get_event_staff_instance', { p_event_id: eventId, p_recurrence_id: recurrenceIdIso });
+  if (error) throw new Error(error.message);
+  return data || [];
+}
+
 /* ----------------------------- Team calendar API --------------------------- */
 /** Base events (series). */
 export async function fetchTeamEvents(teamId) {

@@ -1061,6 +1061,61 @@ begin
 end $$;
 grant execute on function update_event_and_prune(uuid, jsonb, timestamptz[]) to authenticated;
 
+-- List staff candidates for a group: the group owner and active member owners
+drop function if exists list_group_staff_candidates(p_group_id uuid);
+create or replace function list_group_staff_candidates(p_group_id uuid)
+returns table(owner_id uuid, kind text, display_name text, user_id uuid)
+language sql stable security definer set search_path = public, auth as $$
+  with me as (
+    select 1 from group_membership gm where gm.group_id = p_group_id and gm.user_id = auth.uid() and gm.ended_on is null
+  )
+  , grp as (
+    select ensure_owner_for_group(p_group_id) as owner_id
+  )
+  , members as (
+    select ensure_owner_for_user(gm.user_id) as owner_id, gm.user_id
+    from group_membership gm
+    where gm.group_id = p_group_id and gm.ended_on is null
+  )
+  select o.id as owner_id, o.kind::text as kind, o.display_name, null::uuid as user_id
+  from owners o join grp on grp.owner_id = o.id
+  where exists (select 1 from me)
+  union all
+  select o.id, o.kind::text, o.display_name, m.user_id
+  from owners o
+  join members m on m.owner_id = o.id
+  where exists (select 1 from me)
+  order by kind desc, display_name asc
+$$;
+grant execute on function list_group_staff_candidates(uuid) to authenticated;
+
+-- Read helpers for staff tables with calendar permission checks
+drop function if exists get_event_staff_defaults(p_event_id uuid);
+create or replace function get_event_staff_defaults(p_event_id uuid)
+returns setof event_staff_default
+language sql stable security definer set search_path = public as $$
+  select esd.*
+  from event_staff_default esd
+  join events e on e.id = esd.event_id
+  where esd.event_id = p_event_id
+    and can_read_calendar(e.calendar_id)
+  order by coalesce(esd.billing_ord, 999999), esd.owner_id;
+$$;
+grant execute on function get_event_staff_defaults(uuid) to authenticated;
+
+drop function if exists get_event_staff_instance(p_event_id uuid, p_recurrence_id timestamptz);
+create or replace function get_event_staff_instance(p_event_id uuid, p_recurrence_id timestamptz)
+returns setof event_staff_instance
+language sql stable security definer set search_path = public as $$
+  select esi.*
+  from event_staff_instance esi
+  join events e on e.id = esi.event_id
+  where esi.event_id = p_event_id and esi.recurrence_id = p_recurrence_id
+    and can_read_calendar(e.calendar_id)
+  order by coalesce(esi.billing_ord, 999999), esi.owner_id;
+$$;
+grant execute on function get_event_staff_instance(uuid, timestamptz) to authenticated;
+
 -- Enforce recurrence policy: finite and bounded
 -- Rules:
 --   - Max 12 total occurrences for RRULE via COUNT; otherwise require UNTIL within 12 months of dtstart

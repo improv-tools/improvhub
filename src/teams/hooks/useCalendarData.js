@@ -122,6 +122,9 @@ export default function useCalendarData(teamId, windowStartIso, windowEndIso) {
         return parts.join(';');
       })() : undefined,
     };
+    if (Array.isArray(patch.staff_defaults)) {
+      serverPatch.staff_defaults = patch.staff_defaults;
+    }
 
     // Compute authoritative valid recurrence_id set (no time window), capped by server policy (12/12months)
     try {
@@ -173,7 +176,8 @@ export default function useCalendarData(teamId, windowStartIso, windowEndIso) {
       tzid: patch.tz,
       dtstart: patch.starts_at,
       dtend: patch.ends_at,
-      status: 'CONFIRMED'
+      status: 'CONFIRMED',
+      ...(Array.isArray(patch.instance_staff) ? { instance_staff: patch.instance_staff } : {})
     });
     await load();
   };
