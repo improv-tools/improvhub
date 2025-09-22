@@ -16,7 +16,7 @@
 -- =============================================================================
 
 -- Polymorphic owners: individual (auth.users) OR group ("group")
-CREATE TABLE owners (
+CREATE TABLE IF NOT EXISTS owners (
   id                 uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   kind               owner_kind NOT NULL,  -- 'individual' | 'group'
   individual_user_id uuid UNIQUE REFERENCES auth.users(id)     ON DELETE CASCADE,
@@ -31,18 +31,20 @@ CREATE TABLE owners (
 );
 
 -- Maintain updated_at on change
-CREATE TRIGGER trg_owners_touch
-BEFORE UPDATE ON owners
-FOR EACH ROW EXECUTE FUNCTION _touch_updated_at();
+do $$ begin
+  create trigger trg_owners_touch
+  before update on owners
+  for each row execute function _touch_updated_at();
+exception when duplicate_object then null; end $$;
 
 -- Flat operator mapping: who can act on behalf of an owner
-CREATE TABLE owner_users (
+CREATE TABLE IF NOT EXISTS owner_users (
   owner_id uuid NOT NULL REFERENCES owners(id) ON DELETE CASCADE,
   user_id  uuid NOT NULL REFERENCES auth.users(id) ON DELETE CASCADE,
   role     group_role NOT NULL,
   PRIMARY KEY (owner_id, user_id)
 );
-CREATE INDEX idx_owner_users_user ON owner_users(user_id);
+CREATE INDEX IF NOT EXISTS idx_owner_users_user ON owner_users(user_id);
 
 -- Auto-link individual owners to themselves as admin.
 -- This fires when you insert an 'individual' row in owners.
@@ -57,9 +59,11 @@ BEGIN
   RETURN NEW;
 END $$;
 
-CREATE TRIGGER trg_owners_link_self
-AFTER INSERT ON owners
-FOR EACH ROW EXECUTE FUNCTION _link_individual_owner();
+do $$ begin
+  create trigger trg_owners_link_self
+  after insert on owners
+  for each row execute function _link_individual_owner();
+exception when duplicate_object then null; end $$;
 
 -- Ensure owners row exists for a user; return owners.id
 CREATE OR REPLACE FUNCTION ensure_owner_for_user(u uuid) RETURNS uuid LANGUAGE sql AS $$
@@ -75,6 +79,14 @@ CREATE OR REPLACE FUNCTION ensure_owner_for_user(u uuid) RETURNS uuid LANGUAGE s
   LIMIT 1;
 $$;
 
+-- Read-only getter: return owners.id for a user if it exists (no insert)
+drop function if exists get_owner_for_user(u uuid);
+create or replace function get_owner_for_user(u uuid)
+returns uuid language sql stable set search_path = public as $$
+  select id from owners where kind='individual' and individual_user_id=u limit 1;
+$$;
+grant execute on function get_owner_for_user(uuid) to authenticated;
+
 -- Ensure owners row exists for a group; return owners.id
 CREATE OR REPLACE FUNCTION ensure_owner_for_group(g uuid) RETURNS uuid LANGUAGE sql AS $$
   WITH ins AS (
@@ -88,6 +100,14 @@ CREATE OR REPLACE FUNCTION ensure_owner_for_group(g uuid) RETURNS uuid LANGUAGE 
   SELECT id FROM owners WHERE kind='group' AND group_id=g
   LIMIT 1;
 $$;
+
+-- Read-only getter: return owners.id for a group if it exists (no insert)
+drop function if exists get_owner_for_group(g uuid);
+create or replace function get_owner_for_group(g uuid)
+returns uuid language sql stable set search_path = public as $$
+  select id from owners where kind='group' and group_id=g limit 1;
+$$;
+grant execute on function get_owner_for_group(uuid) to authenticated;
 
 -- Keep owner_users in sync with group_membership (admins/managers only).
 -- Why AFTER? We want the row visible for the SELECTs used in sync.
@@ -119,6 +139,22 @@ BEGIN
   RETURN NEW;
 END $$;
 
-CREATE TRIGGER trg_sync_group_membership_iud
-AFTER INSERT OR UPDATE OR DELETE ON group_membership
-FOR EACH ROW EXECUTE FUNCTION _sync_owner_users_from_group_membership();
+do $$ begin
+  create trigger trg_sync_group_membership_iud
+  after insert or update or delete on group_membership
+  for each row execute function _sync_owner_users_from_group_membership();
+exception when duplicate_object then null; end $$;
+
+create or replace function can_admin_group(p_group_id uuid)
+returns boolean language sql stable set search_path = public as $$
+  select exists (
+    select 1
+    from owners o
+    join owner_users ou on ou.owner_id = o.id
+    where o.kind = 'group'
+      and o.group_id = p_group_id
+      and ou.user_id = auth.uid()
+      and ou.role = 'admin'
+  );
+$$;
+grant execute on function can_admin_group(uuid) to authenticated;

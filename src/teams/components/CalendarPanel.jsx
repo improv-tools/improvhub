@@ -4,7 +4,9 @@ import { Button, GhostButton, DangerButton, Label, Input, Textarea, ErrorText, I
 import { useAuth } from "auth/AuthContext";
 import useCalendarData from "../hooks/useCalendarData";
 import { composeStartEndISO, splitLocal, fmtRangeLocal, browserTZ } from "../utils/datetime";
-import { listAttendance, setAttendance, listTeamShowInvitations, acceptTeamShowInviteForTeam, declineTeamShowInviteForTeam, listTeamShowPerformances, cancelTeamShowBooking } from "../teams.api";
+import { parseRRule, expandBaseOccurrences } from "../../calendar/expandOccurrences";
+import { deleteEventOverrideRPC } from "../teams.api";
+import { listAttendance, setAttendance } from "../teams.api";
 
 const CATEGORIES = ["rehearsal", "social", "performance"];
 const TYPE_META = {
@@ -31,7 +33,7 @@ const cap = (s) => (s ? s.charAt(0).toUpperCase() + s.slice(1) : s);
 
 /* ------------------------------- Estimators ------------------------------- */
 /** Estimate number of occurrences from a local start (date+time) until local end date (inclusive), interval=1. */
-function estimateUntilCount({ recurFreq, startDate, startTime, untilDate, byday, byMonthday, weekOfMonth }) {
+function estimateUntilCount({ recurFreq, startDate, startTime, untilDate, byday, byMonthday, weekOfMonth, interval = 1 }) {
   if (!untilDate || !startDate || !startTime) return null;
   const pad = (n)=> String(n).padStart(2,"0");
   const start = new Date(`${startDate}T${startTime}:00`);      // local
@@ -65,10 +67,23 @@ function estimateUntilCount({ recurFreq, startDate, startTime, untilDate, byday,
   }
 
   if (recurFreq === "weekly") {
+    const intervalWeeks = Math.max(1, Number(interval) || 1);
     const set = new Set((Array.isArray(byday) && byday.length ? byday : [DOW[start.getDay()] ]));
     const cur = new Date(start);
+    const weekAnchor = (d) => {
+      const a = new Date(d.getFullYear(), d.getMonth(), d.getDate());
+      const dow = a.getDay(); // 0=Sun..6=Sat
+      const delta = (dow === 0 ? -6 : 1 - dow); // shift to Monday
+      a.setDate(a.getDate() + delta);
+      a.setHours(0,0,0,0);
+      return a;
+    };
+    const startWeekAnchor = weekAnchor(start);
     while (cur <= until) {
       if (set.has(DOW[cur.getDay()])) {
+        const curWeekAnchor = weekAnchor(cur);
+        const diffWeeks = Math.floor((curWeekAnchor - startWeekAnchor) / (7 * 24 * 60 * 60 * 1000));
+        if (diffWeeks % intervalWeeks !== 0) { cur.setDate(cur.getDate()+1); continue; }
         // same clock time as 'start'
         const occ = new Date(cur);
         occ.setHours(start.getHours(), start.getMinutes(), start.getSeconds(), 0);
@@ -84,7 +99,8 @@ function estimateUntilCount({ recurFreq, startDate, startTime, untilDate, byday,
     const endMonthStart = new Date(until.getFullYear(), until.getMonth(), 1);
     const monthsSpan = (endMonthStart.getFullYear() - startMonthStart.getFullYear()) * 12 +
                        (endMonthStart.getMonth() - startMonthStart.getMonth());
-    for (let i=0; i<=monthsSpan; i++) {
+    const step = Math.max(1, Number(interval) || 1);
+    for (let i=0; i<=monthsSpan; i+=step) {
       const y = startMonthStart.getFullYear() + Math.floor((startMonthStart.getMonth() + i)/12);
       const m = (startMonthStart.getMonth() + i) % 12;
 
@@ -168,35 +184,8 @@ export default function CalendarPanel({ team }) {
 
   const upcoming = useMemo(() => occurrences, [occurrences]);
 
-  // Accepted show bookings (Performance), merged into list
-  const [showBookings, setShowBookings] = useState([]);
-  const loadShowBookings = async () => {
-    if (!team?.id) return;
-    try {
-      const rows = await listTeamShowPerformances(team.id, windowStartIso, windowEndIso);
-      setShowBookings(rows || []);
-    } catch (e) {
-      console.warn('show bookings load failed:', e?.message || e);
-      // Surface error so users get feedback in the UI
-      setInvErr(e?.message || 'Failed to load show bookings');
-      setShowBookings([]);
-    }
-  };
-  useEffect(() => { loadShowBookings(); }, [team?.id, windowStartIso, windowEndIso]);
-
-  // -------- Show invitations (lineup) for this team --------
-  const [showInvites, setShowInvites] = useState([]);
-  const [invitesLoading, setInvitesLoading] = useState(true);
+  // Legacy show-bookings/invitations removed; prototype calendar shows only group-owned events
   const [invErr, setInvErr] = useState("");
-
-  const loadShowInvites = async () => {
-    if (!team?.id) return;
-    setInvErr(""); setInvitesLoading(true);
-    try { setShowInvites(await listTeamShowInvitations(team.id)); }
-    catch (e) { setInvErr(e.message || 'Failed to load show invites'); }
-    finally { setInvitesLoading(false); }
-  };
-  useEffect(() => { loadShowInvites(); }, [team?.id]);
 
   // ---------- Attendance (safe integration) ----------
   // Map key: `${event_id}|${occ_start ISO}` -> [{ name, isMe }]
@@ -251,6 +240,7 @@ export default function CalendarPanel({ team }) {
   const [banner, setBanner] = useState("");
   const [bannerErr, setBannerErr] = useState("");
   const [openDescKeys, setOpenDescKeys] = useState(() => new Set());
+  const [orphanFix, setOrphanFix] = useState(null); // { eventId, items:[{recurrence_id, display, suggestRid}] }
 
   const now = new Date();
   const pad = (n)=> String(n).padStart(2,"0");
@@ -272,14 +262,15 @@ export default function CalendarPanel({ team }) {
   const [cByday, setCByday] = useState(["MO"]);
   const [cByMonthday, setCByMonthday] = useState(0);
   const [cWeekOfMonth, setCWeekOfMonth] = useState(0);
+  const [cInterval, setCInterval] = useState(1);
   const [cEndMode, setCEndMode] = useState("count"); // 'until'|'count'
   const [cUntilDate, setCUntilDate] = useState("");
   const [cCount, setCCount] = useState(6);
 
   const cUntilEstimate = useMemo(() => cFreq === "none" || cEndMode !== "until" ? null : estimateUntilCount({
     recurFreq: cFreq, startDate: cStartDate, startTime: cStartTime, untilDate: cUntilDate,
-    byday: cByday, byMonthday: cByMonthday, weekOfMonth: cWeekOfMonth,
-  }), [cFreq, cEndMode, cStartDate, cStartTime, cUntilDate, cByday, cByMonthday, cWeekOfMonth]);
+    byday: cByday, byMonthday: cByMonthday, weekOfMonth: cWeekOfMonth, interval: cInterval,
+  }), [cFreq, cEndMode, cStartDate, cStartTime, cUntilDate, cByday, cByMonthday, cWeekOfMonth, cInterval]);
 
   const cRecurrenceErrors = useMemo(() => validateRecurrence({
     recurrenceMode: cFreq === "none" ? "none" : (cEndMode === "until" ? "until" : "count"),
@@ -320,7 +311,7 @@ export default function CalendarPanel({ team }) {
         starts_at: startIso,
         ends_at: endIso,
         recur_freq: cFreq,
-        recur_interval: 1,
+        recur_interval: Math.max(1, Number(cInterval) || 1),
         recur_byday: cFreq === "weekly" ? cByday : null,
         recur_bymonthday: cFreq === "monthly" && cByMonthday ? Number(cByMonthday) : null,
         recur_week_of_month: cFreq === "monthly" && cWeekOfMonth ? Number(cWeekOfMonth) : null,
@@ -330,7 +321,7 @@ export default function CalendarPanel({ team }) {
       // reset & close
       setCTitle(""); setCDescription(""); setCLocation(""); setCCategory("rehearsal");
       setCStartDate(defaultStartDate); setCStartTime(defaultStartTime); setCEndTime(defaultEndTime);
-      setCFreq("none"); setCByday(["MO"]); setCByMonthday(0); setCWeekOfMonth(0);
+      setCFreq("none"); setCByday(["MO"]); setCByMonthday(0); setCWeekOfMonth(0); setCInterval(1);
       setCEndMode("count"); setCUntilDate(""); setCCount(6);
       setMode("list");
       setBanner("Event created.");
@@ -357,7 +348,30 @@ export default function CalendarPanel({ team }) {
     if (e.recur_freq === "monthly" && !recur_bymonthday && !recur_week_of_month) {
       recur_bymonthday = new Date(e.starts_at).getUTCDate();
     }
-    const mode = (e.recur_freq === "none") ? "none" : (e.recur_until ? "until" : "count");
+    // Derive recurrence fields from RRULE if present
+    let recur_freq = e.recur_freq || "none";
+    let recur_interval = 1;
+    let recur_until = e.recur_until || null;
+    let recur_count = e.recur_count || null;
+    if (e.rrule) {
+      const rule = parseRRule(e.rrule);
+      if (rule && rule.freq) {
+        recur_freq = rule.freq.toLowerCase();
+        recur_interval = rule.interval || 1;
+        if (rule.until) recur_until = rule.until.toISOString();
+        if (rule.count) recur_count = rule.count;
+        if (rule.freq === 'WEEKLY') {
+          recur_byday = Array.isArray(rule.byday) && rule.byday.length ? rule.byday : recur_byday;
+        }
+        if (rule.freq === 'MONTHLY') {
+          // Prefer inline BYMONTHDAY if present
+          if (Array.isArray(rule.bymonthday) && rule.bymonthday.length) {
+            recur_bymonthday = rule.bymonthday[0];
+          }
+        }
+      }
+    }
+    const mode = (recur_freq === "none") ? "none" : (recur_until ? "until" : (recur_count ? "count" : "count"));
 
     const durationMin = Math.max(1, Math.round((new Date(e.ends_at) - new Date(e.starts_at)) / 60000));
     setSEd({
@@ -365,6 +379,9 @@ export default function CalendarPanel({ team }) {
       recur_byday,
       recur_bymonthday,
       recur_week_of_month,
+      recur_interval,
+      recur_until,
+      recur_count,
       _s: splitLocal(e.starts_at),
       _e: splitLocal(e.ends_at),
       _durMin: durationMin,
@@ -387,6 +404,7 @@ export default function CalendarPanel({ team }) {
       byday: sEd.recur_byday,
       byMonthday: sEd.recur_bymonthday,
       weekOfMonth: sEd.recur_week_of_month,
+      interval: sEd.recur_interval || 1,
     });
   }, [sEd, sRecurrenceMode]);
 
@@ -467,7 +485,7 @@ export default function CalendarPanel({ team }) {
         starts_at: startIso,
         ends_at: endIso,
         recur_freq,
-        recur_interval: 1,
+        recur_interval: Math.max(1, Number(sEd.recur_interval) || 1),
         recur_byday,
         recur_bymonthday,
         recur_week_of_month,
@@ -477,6 +495,33 @@ export default function CalendarPanel({ team }) {
 
       cancelEditSeries();
       setBanner(recur_freq === "none" ? "Event updated (recurrence removed)." : "Event updated.");
+      // After update, reload and check for orphan overrides for this series
+      try {
+        await reload();
+        const ev = events.find(e => e.id === sEd.id);
+        if (ev) {
+          const base = expandBaseOccurrences(ev, windowStartIso, windowEndIso, { hardCap: 500 });
+          const baseSet = new Set((base || []).map(b => new Date(b.recurrence_id).toISOString()));
+          const orphans = (overrides || []).filter(o => o.parent_event_id === sEd.id && !baseSet.has(new Date(o.recurrence_id).toISOString()));
+          if (orphans.length) {
+            // Build suggestions: nearest base occurrence to current override dtstart or recurrence_id
+            const baseDates = (base || []).map(b => new Date(b.recurrence_id).getTime());
+            const items = orphans.map(o => {
+              const cur = new Date(o.dtstart || o.recurrence_id).getTime();
+              let best = null, bestDiff = Infinity;
+              for (const t of baseDates) { const d = Math.abs(t - cur); if (d < bestDiff) { bestDiff = d; best = t; } }
+              return {
+                recurrence_id: new Date(o.recurrence_id).toISOString(),
+                display: new Date(o.dtstart || o.recurrence_id).toLocaleString(),
+                suggestRid: best ? new Date(best).toISOString() : null,
+              };
+            });
+            setOrphanFix({ eventId: sEd.id, items });
+          }
+        }
+      } catch (e) {
+        console.warn('orphan check failed', e);
+      }
     } catch (e) {
       setBannerErr(e.message || "Failed to update event");
     }
@@ -585,6 +630,33 @@ export default function CalendarPanel({ team }) {
       {err && <ErrorText>{err}</ErrorText>}
       {bannerErr && <ErrorText>{bannerErr}</ErrorText>}
       {banner && <InfoText>{banner}</InfoText>}
+      {orphanFix && orphanFix.items?.length > 0 && (
+        <div style={{ border: '1px solid rgba(255,255,255,0.2)', borderRadius: 8, padding: 12, marginBottom: 12 }}>
+          <div style={{ fontWeight: 600, marginBottom: 6 }}>Some edited occurrences no longer match the series</div>
+          <div style={{ opacity: 0.85, marginBottom: 8 }}>These overrides no longer align with the series. Dates shown are the override's actual occurrence time. You can prune them to revert to the series.</div>
+          <ul style={{ listStyle: 'none', padding: 0, margin: 0 }}>
+            {orphanFix.items.map((it, idx) => (
+              <li key={idx} style={{ display: 'flex', justifyContent: 'space-between', alignItems:'center', padding: '4px 0' }}>
+                <span>{it.display}</span>
+              </li>
+            ))}
+          </ul>
+          <Row style={{ marginTop: 8 }}>
+            <Button onClick={async ()=>{
+              if (!window.confirm(`Prune ${orphanFix.items.length} override(s)? This will remove their custom edits and revert to the series.`)) return;
+              try {
+                for (const it of orphanFix.items) {
+                  await deleteEventOverrideRPC(orphanFix.eventId, it.recurrence_id);
+                }
+                await reload();
+                setOrphanFix(null);
+                setBanner('Orphan overrides pruned.');
+              } catch(e) { setBannerErr(e?.message||'Failed to prune'); }
+            }}>Prune all</Button>
+            <GhostButton onClick={()=> setOrphanFix(null)}>Ignore</GhostButton>
+          </Row>
+        </div>
+      )}
 
       {/* New event button moved to header */}
 
@@ -661,6 +733,15 @@ export default function CalendarPanel({ team }) {
 
           {cFreq !== "none" && (
             <Row>
+              <Label>
+                Every
+                <Input type="number" min={1} max={12} value={cInterval}
+                       onChange={(e)=> setCInterval(Math.max(1, Math.min(12, Number(e.target.value) || 1)))}
+                       style={{ width: 90 }} />
+                <span style={{ marginLeft: 6 }}>
+                  {cFreq === 'weekly' ? (cInterval === 1 ? 'week' : 'weeks') : (cFreq === 'monthly' ? (cInterval === 1 ? 'month' : 'months') : 'intervals')}
+                </span>
+              </Label>
               <label style={{ display:"inline-flex", gap:8, alignItems:"center" }}>
                 <input type="radio" name="c_endmode" checked={cEndMode==="until"} onChange={()=>setCEndMode("until")} />
                 <span>Until</span>
@@ -716,6 +797,17 @@ export default function CalendarPanel({ team }) {
           )}
 
           <Row>
+            {sEd.recur_freq !== 'none' && (
+              <Label>
+                Every
+                <Input type="number" min={1} max={12} value={sEd.recur_interval || 1}
+                       onChange={(e)=> setSEd({ ...sEd, recur_interval: Math.max(1, Math.min(12, Number(e.target.value) || 1)) })}
+                       style={{ width: 90 }} />
+                <span style={{ marginLeft: 6 }}>
+                  {sEd.recur_freq === 'weekly' ? ((sEd.recur_interval||1) === 1 ? 'week' : 'weeks') : (sEd.recur_freq === 'monthly' ? ((sEd.recur_interval||1) === 1 ? 'month' : 'months') : 'intervals')}
+                </span>
+              </Label>
+            )}
             <Input value={sEd.title || ""} onChange={(e)=>setSEd({ ...sEd, title: e.target.value })} />
             <Input placeholder="Location" value={sEd.location || ""} onChange={(e)=>setSEd({ ...sEd, location: e.target.value })} />
             <select value={sEd.category || "rehearsal"} onChange={(e)=>setSEd({ ...sEd, category: e.target.value })} style={styles.select}>
@@ -886,50 +978,7 @@ export default function CalendarPanel({ team }) {
       {/* LIST */}
       {mode === "list" && (
         <>
-          {/* Show invitations at top */}
-          <div style={{ marginBottom: 12 }}>
-            <h4 style={{ margin: '0 0 6px', fontSize: 14 }}>Invitations</h4>
-            {invitesLoading ? (
-              <p style={{ opacity: 0.8 }}>Loading invites…</p>
-            ) : invErr ? (
-              <ErrorText>{invErr}</ErrorText>
-            ) : (
-              (() => {
-                const pending = (showInvites || []).filter(i => i.status === 'invited');
-                if (pending.length === 0) return <p style={{ opacity: 0.8, margin: 0 }}>No invitations.</p>;
-                return (
-                  <ul style={{ listStyle: 'none', padding: 0, margin: 0 }}>
-                    {pending.map((inv) => (
-                      <li key={`${inv.event_id}|${inv.occ_start}|${inv.team_id}`} style={{ border: '1px solid rgba(255,255,255,0.1)', borderRadius: 10, padding: 12, marginBottom: 8, display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                        <div>
-                          <div style={{ fontWeight: 600 }}>{inv.show_title || '(show)'} · {new Date(inv.occ_start).toLocaleString()}</div>
-                          <div style={{ opacity: 0.75, fontSize: 12 }}>Invited</div>
-                        </div>
-                        <div style={{ display:'flex', gap:8 }}>
-                          <Button onClick={async ()=> {
-                            try {
-                              await acceptTeamShowInviteForTeam(inv.event_id, inv.occ_start, inv.team_id);
-                              await loadShowInvites();
-                            } catch (e) {
-                              setInvErr(e?.message || 'Failed to accept invite');
-                            }
-                          }}>Accept</Button>
-                          <GhostButton onClick={async ()=> {
-                            try {
-                              await declineTeamShowInviteForTeam(inv.event_id, inv.occ_start, inv.team_id);
-                              await loadShowInvites();
-                            } catch (e) {
-                              setInvErr(e?.message || 'Failed to decline invite');
-                            }
-                          }}>Decline</GhostButton>
-                        </div>
-                      </li>
-                    ))}
-                  </ul>
-                );
-              })()
-            )}
-          </div>
+          {/* Legacy show invitations removed in prototype schema */}
 
           {loading ? (
             <p style={{ opacity: 0.8 }}>Loading calendar…</p>
@@ -937,17 +986,11 @@ export default function CalendarPanel({ team }) {
             <p style={{ opacity: 0.8 }}>No upcoming events.</p>
           ) : (
             <ul style={{ listStyle: "none", padding: 0, margin: 0 }}>
-              {[...upcoming.map(o => ({ kind:'team', o })), ...showBookings.map(b => ({ kind:'show', b }))]
-                .sort((a,b) => {
-                  const ta = a.kind==='team' ? new Date(a.o.starts_at).getTime() : new Date(a.b.starts_at).getTime();
-                  const tb = b.kind==='team' ? new Date(b.o.starts_at).getTime() : new Date(b.b.starts_at).getTime();
-                  return ta - tb;
-                })
-                .map((it) => {
-                if (it.kind === 'team') {
-                  const occ = it.o;
+              {upcoming
+                .sort((a,b) => new Date(a.starts_at).getTime() - new Date(b.starts_at).getTime())
+                .map((occ) => {
                 const series = events.find(e => e.id === occ.event_id);
-                const isRecurring = !!(series && series.recur_freq && series.recur_freq !== "none");
+                const isRecurring = !!(series && ((series.recur_freq && series.recur_freq !== "none") || series.rrule));
                 const key = `${occ.event_id}|${occ.base_start}`;
                 const typeMeta = TYPE_META[occ.category] || { icon: "📅", label: cap(occ.category || "event") };
                 return (
@@ -1082,40 +1125,6 @@ export default function CalendarPanel({ team }) {
                     </Row>
                   </li>
                 );
-                } else {
-                  const b = it.b;
-                  const key = `show|${b.event_id}|${b.occ_start}`;
-                  const typeMeta = TYPE_META['performance'];
-                  return (
-                    <li key={key} style={{ border: '1px solid rgba(255,255,255,0.1)', borderRadius: 10, padding: 12, marginBottom: 10, display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 12 }}>
-                      <div style={{ display: 'flex', gap: 10, alignItems: 'flex-start' }}>
-                        <span title={typeMeta.label} aria-label={typeMeta.label} style={{ fontSize: 18, lineHeight: '20px' }}>{typeMeta.icon}</span>
-                        <div>
-                          <div style={styles.titleLink}>
-                            {b.title || '(show)'} <span style={{ opacity: 0.7, fontSize: 12 }}>· Show booking</span>
-                          </div>
-                          <div style={{ opacity: 0.8, fontSize: 12 }}>
-                            {fmtRangeLocal(b.starts_at, b.ends_at, b.tz)}
-                            {b.location && (<>{' · '}{b.location}</>)}
-                          </div>
-                        </div>
-                      </div>
-                      <Row>
-                        <DangerButton onClick={async ()=>{
-                          if (!window.confirm('Cancel this booking?')) return;
-                          try {
-                            await cancelTeamShowBooking(b.event_id, b.occ_start);
-                            await loadShowBookings();
-                            await loadShowInvites();
-                          } catch(e) {
-                            console.warn(e);
-                            setInvErr(e?.message || 'Failed to cancel booking');
-                          }
-                        }}>Cancel</DangerButton>
-                      </Row>
-                    </li>
-                  );
-                }
               })}
             </ul>
           )}

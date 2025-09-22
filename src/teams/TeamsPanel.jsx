@@ -11,6 +11,8 @@ import {
   removeMemberRPC,
   renameTeamRPC,
   deleteTeamRPC,
+  updateGroupTypes,
+  updateGroupPublicListing,
 } from "./teams.api";
 import CalendarPanel from "./components/CalendarPanel";
 import TeamUpdates from "./components/TeamUpdates";
@@ -32,6 +34,10 @@ export default function TeamsPanel() {
   const [members, setMembers] = useState([]);
   const [invites, setInvites] = useState([]);
   const [teamTab, setTeamTab] = useState("updates"); // 'updates' | 'members' | 'calendar' | 'admin'
+  const [typesDraft, setTypesDraft] = useState([]);
+  const [savingTypes, setSavingTypes] = useState(false);
+  const [publicDraft, setPublicDraft] = useState(false);
+  const [savingPublic, setSavingPublic] = useState(false);
 
   // create team UI
   const [newName, setNewName] = useState("");
@@ -87,17 +93,11 @@ export default function TeamsPanel() {
     setErr("");
     setMsg("");
     setSelected(team);
+    setTypesDraft(Array.isArray(team?.types) ? [...team.types] : []);
+    setPublicDraft(!!team?.public_listing);
     setMembers([]);
     setTeamTab("updates");
     await loadMembers(team);
-    try {
-      const { listTeamInvitations } = await import('./teams.api');
-      const inv = await listTeamInvitations(team.id);
-      setInvites(inv);
-    } catch (e) {
-      console.warn('Failed to load invitations', e?.message || e);
-      setInvites([]);
-    }
   };
 
   const backToList = () => {
@@ -105,6 +105,8 @@ export default function TeamsPanel() {
     setErr("");
     setMsg("");
     setSelected(null);
+    setTypesDraft([]);
+    setPublicDraft(false);
     setMembers([]);
     setShowInvite(false);
     setInviteEmail("");
@@ -128,42 +130,42 @@ export default function TeamsPanel() {
   };
 
   const renameTeam = async () => {
-    const name = window.prompt("Rename team", selected?.name || "");
+    const name = window.prompt("Rename group", selected?.name || "");
     if (!name || !name.trim()) return;
     setErr(""); setMsg("");
     try {
       await renameTeamRPC(selected.id, name.trim());
       setSelected({ ...selected, name: name.trim() });
       setTeams((ts) => ts.map((t) => (t.id === selected.id ? { ...t, name: name.trim() } : t)));
-      setMsg("Team renamed.");
+      setMsg("Group renamed.");
     } catch (e) {
-      setErr(e.message || "Failed to rename team");
+      setErr(e.message || "Failed to rename group");
     }
   };
 
   const deleteTeam = async () => {
-    if (!window.confirm("Delete team? This cannot be undone.")) return;
+    if (!window.confirm("Delete group? This cannot be undone.")) return;
     setErr(""); setMsg("");
     try {
       await deleteTeamRPC(selected.id);
       setTeams((ts) => ts.filter((t) => t.id !== selected.id));
       backToList();
-      setMsg("Team deleted.");
+      setMsg("Group deleted.");
     } catch (e) {
-      setErr(e.message || "Failed to delete team");
+      setErr(e.message || "Failed to delete group");
     }
   };
 
   const leaveTeam = async () => {
-    if (!window.confirm("Leave this team?")) return;
+    if (!window.confirm("Leave this group?")) return;
     setErr(""); setMsg("");
     try {
       await removeMemberRPC(selected.id, currentUserId);
       setTeams((ts) => ts.filter((t) => t.id !== selected.id));
       backToList();
-      setMsg("You left the team.");
+      setMsg("You left the group.");
     } catch (e) {
-      setErr(e.message || "Failed to leave team");
+      setErr(e.message || "Failed to leave group");
     }
   };
 
@@ -188,6 +190,35 @@ export default function TeamsPanel() {
     } finally {
       setInviting(false);
     }
+  };
+
+  const TYPES = [
+    { key: 'act', label: 'Act' },
+    { key: 'practice_group', label: 'Practice Group' },
+    { key: 'school', label: 'School' },
+    { key: 'theatre', label: 'Theatre' },
+    { key: 'producer', label: 'Producer' },
+  ];
+
+  const toggleType = (key) => {
+    setTypesDraft((cur) => {
+      const set = new Set(cur || []);
+      if (set.has(key)) set.delete(key); else set.add(key);
+      return Array.from(set);
+    });
+  };
+
+  const saveTypes = async () => {
+    if (!selected?.id) return;
+    setSavingTypes(true); setErr(""); setMsg("");
+    try {
+      await updateGroupTypes(selected.id, typesDraft);
+      setSelected((s) => ({ ...s, types: [...typesDraft] }));
+      setTeams((ts) => ts.map((t) => t.id === selected.id ? { ...t, types: [...typesDraft] } : t));
+      setMsg('Group types updated.');
+    } catch (e) {
+      setErr(e.message || 'Failed to update group types');
+    } finally { setSavingTypes(false); }
   };
 
   // Handlers for TeamMembers component (accept teamId explicitly)
@@ -258,7 +289,7 @@ export default function TeamsPanel() {
   };
 
   const handleLeaveTeam = async (teamId, userId) => {
-    if (!window.confirm("Leave this team?")) return;
+    if (!window.confirm("Leave this group?")) return;
     setErr(""); setMsg("");
     try {
       await removeMemberRPC(teamId, userId);
@@ -269,36 +300,36 @@ export default function TeamsPanel() {
       } else if (selected?.id === teamId) {
         await loadMembers(selected);
       }
-      setMsg(userId === currentUserId ? "You left the team." : "Member removed.");
-    } catch (e) { setErr(e.message || "Failed to leave team"); }
+      setMsg(userId === currentUserId ? "You left the group." : "Member removed.");
+    } catch (e) { setErr(e.message || "Failed to leave group"); }
   };
 
   const handleDeleteTeam = async (teamId) => {
-    if (!window.confirm("Delete team? This cannot be undone.")) return;
+    if (!window.confirm("Delete group? This cannot be undone.")) return;
     setErr(""); setMsg("");
     try {
       await deleteTeamRPC(teamId);
       setTeams((ts) => ts.filter((t) => t.id !== teamId));
       if (selected?.id === teamId) backToList();
-      setMsg("Team deleted.");
-    } catch (e) { setErr(e.message || "Failed to delete team"); }
+      setMsg("Group deleted.");
+    } catch (e) { setErr(e.message || "Failed to delete group"); }
   };
 
-  if (loading) return <p style={{ opacity: 0.8 }}>Loading teams…</p>;
+  if (loading) return <p style={{ opacity: 0.8 }}>Loading groups…</p>;
 
   return (
     <Card style={{ marginTop: 16 }}>
-      {!selected && <H1>Teams</H1>}
+      {!selected && <H1>Groups</H1>}
       {err && <ErrorText style={{ marginBottom: 8 }}>{err}</ErrorText>}
       {msg && <InfoText style={{ marginBottom: 8 }}>{msg}</InfoText>}
 
       {!selected ? (
         <>
           <Label>
-            Create new team
+            Create new group
             <Row>
               <Input
-                placeholder="Team name"
+                placeholder="Group name"
                 value={newName}
                 onChange={(e) => setNewName(e.target.value)}
                 style={{ minWidth: 260 }}
@@ -310,9 +341,9 @@ export default function TeamsPanel() {
           </Label>
 
           <div style={{ marginTop: 20 }}>
-            <h3 style={{ margin: "8px 0 8px", fontSize: 16 }}>Your teams</h3>
+            <h3 style={{ margin: "8px 0 8px", fontSize: 16 }}>Your groups</h3>
             {teams.length === 0 ? (
-              <p style={{ opacity: 0.8 }}>No teams yet. Create one above.</p>
+              <p style={{ opacity: 0.8 }}>No groups yet. Create one above.</p>
             ) : (
               <ul style={{ listStyle: "none", padding: 0, margin: 0 }}>
                 {teams.map((t) => (
@@ -327,16 +358,17 @@ export default function TeamsPanel() {
                       justifyContent: "space-between",
                       alignItems: "center",
                     }}
-                  >
-                    <div>
-                      <div style={{ fontWeight: 600 }}>{t.name}</div>
-                      <div style={{ opacity: 0.7, fontSize: 12 }}>
-                        ID: {t.display_id} · you are {t.role}
+                    >
+                      <div>
+                        <div style={{ fontWeight: 600 }}>{t.name}</div>
+                        <div style={{ opacity: 0.7, fontSize: 12 }}>
+                        ID: {t.display_id} · you are {t.role}{t.public_listing ? ' · public' : ''}
+                        {Array.isArray(t.types) && t.types.length ? ` · types: ${t.types.map((x)=> (String(x).replace(/_/g,' '))).map(s => s.charAt(0).toUpperCase()+s.slice(1)).join(', ')}` : ''}
+                        </div>
                       </div>
-                    </div>
-                    <Row>
-                      <GhostButton onClick={() => openTeam(t)}>Open</GhostButton>
-                    </Row>
+                      <Row>
+                        <GhostButton onClick={() => openTeam(t)}>Open</GhostButton>
+                      </Row>
                   </li>
                 ))}
               </ul>
@@ -347,7 +379,7 @@ export default function TeamsPanel() {
         <>
           <Row style={{ marginTop: 0, marginBottom: 6 }}>
             <div style={{ display: "flex", alignItems: "center", gap: 10, fontSize: 20 }}>
-              <GhostButton onClick={backToList} style={{ padding: "6px 10px", fontSize: 16 }}>Teams</GhostButton>
+              <GhostButton onClick={backToList} style={{ padding: "6px 10px", fontSize: 16 }}>Groups</GhostButton>
               <span style={{ opacity: 0.6 }}>→</span>
               <span style={{ fontWeight: 800, fontSize: 22 }}>{selected.name}</span>
               <span style={{ opacity: 0.7, fontSize: 12 }}>ID: {selected.display_id}</span>
@@ -362,13 +394,12 @@ export default function TeamsPanel() {
               style={{ marginTop: 8, marginBottom: 16 }}
             >
               <Tab value="updates" label="Updates">
-                <TeamUpdates team={selected} />
+                <TeamUpdates team={selected} isAdmin={isAdmin} />
               </Tab>
               <Tab value="members" label="Members">
                 <TeamMembers
                   team={selected}
                   members={members}
-                  invites={invites}
                   currentUserId={currentUserId}
                   isAdmin={isAdmin}
                   onChangeRole={handleChangeRole}
@@ -376,7 +407,6 @@ export default function TeamsPanel() {
                   onRemoveMember={handleRemoveMember}
                   onLeaveTeam={handleLeaveTeam}
                   onDeleteTeam={handleDeleteTeam}
-                  onCancelInvite={cancelInvite}
                   showDeleteTeamControl={false}
                 />
               </Tab>
@@ -386,11 +416,39 @@ export default function TeamsPanel() {
               {isAdmin && (
                 <Tab value="admin" label="Admin">
                   <div style={{ display: "grid", gap: 12 }}>
-                    <h3 style={{ margin: "16px 0 6px", fontSize: 16 }}>Team administration</h3>
+                    <h3 style={{ margin: "16px 0 6px", fontSize: 16 }}>Group administration</h3>
                     <div style={{ borderTop: "1px solid rgba(255,255,255,0.1)", margin: "6px 0 12px" }} />
+                    <div>
+                      <h4 style={{ margin: '0 0 6px', fontSize: 14 }}>Group taxonomy</h4>
+                      <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
+                        {TYPES.map(t => (
+                          <label key={t.key} style={{ display:'inline-flex', alignItems:'center', gap:6, border:'1px solid rgba(255,255,255,0.15)', borderRadius:8, padding:'6px 10px' }}>
+                            <input type="checkbox" checked={typesDraft?.includes(t.key)} onChange={()=>toggleType(t.key)} />
+                            <span>{t.label}</span>
+                          </label>
+                        ))}
+                      </div>
+                      <Row style={{ marginTop: 8 }}>
+                        <Button onClick={saveTypes} disabled={savingTypes}>
+                          {savingTypes ? 'Saving…' : 'Save types'}
+                        </Button>
+                      </Row>
+                    </div>
+                    <div>
+                      <h4 style={{ margin: '12px 0 6px', fontSize: 14 }}>Public listing</h4>
+                      <label style={{ display:'inline-flex', alignItems:'center', gap:8 }}>
+                        <input type="checkbox" checked={!!publicDraft} onChange={(e)=> setPublicDraft(e.target.checked)} />
+                        <span>List this group publicly</span>
+                      </label>
+                      <Row style={{ marginTop: 8 }}>
+                        <Button onClick={async ()=> { setSavingPublic(true); setErr(''); setMsg(''); try { await updateGroupPublicListing(selected.id, publicDraft); setSelected(s=>({...s, public_listing: !!publicDraft})); setTeams(ts=> ts.map(t => t.id===selected.id ? { ...t, public_listing: !!publicDraft } : t)); setMsg('Public listing updated.'); } catch(e){ setErr(e.message||'Failed to update'); } finally { setSavingPublic(false); } }} disabled={savingPublic}>
+                          {savingPublic ? 'Saving…' : 'Save visibility'}
+                        </Button>
+                      </Row>
+                    </div>
                     <Row>
-                      <GhostButton onClick={renameTeam}>Rename team</GhostButton>
-                      <DangerButton onClick={deleteTeam}>Delete team</DangerButton>
+                      <GhostButton onClick={renameTeam}>Rename group</GhostButton>
+                      <DangerButton onClick={deleteTeam}>Delete group</DangerButton>
                     </Row>
                   </div>
                 </Tab>

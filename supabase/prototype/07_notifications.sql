@@ -111,11 +111,31 @@ alter table owner_notifications enable row level security;
 do $$ begin
   drop policy if exists on_read_owner_notifications on owner_notifications;
 exception when undefined_object then null; end $$;
+-- Broaden read: allow operators of recipient or sender, and allow all members
+-- of a GROUP owner to read notifications addressed to that group.
+create or replace function can_view_owner_notifications(p_owner_id uuid)
+returns boolean language sql stable set search_path = public as $$
+  select
+    -- Operators of the owner (admins/managers for group; self for individual)
+    exists (
+      select 1 from owner_users ou where ou.owner_id = p_owner_id and ou.user_id = auth.uid()
+    )
+    or
+    -- Any member of the group may view notifications to that group
+    exists (
+      select 1
+      from owners o
+      join group_membership gm on gm.group_id = o.group_id and gm.user_id = auth.uid() and gm.ended_on is null
+      where o.id = p_owner_id and o.kind = 'group'
+    );
+$$;
+grant execute on function can_view_owner_notifications(uuid) to authenticated;
+
 create policy on_read_owner_notifications
 on owner_notifications
 for select to authenticated
 using (
-  can_act_for_owner(to_owner_id) or (from_owner_id is not null and can_act_for_owner(from_owner_id))
+  can_view_owner_notifications(to_owner_id) or (from_owner_id is not null and can_act_for_owner(from_owner_id))
 );
 
 -- Update: recipient operators can update (e.g., dismiss; function will manage ack fields)
@@ -248,6 +268,8 @@ declare
   v_role        group_role := coalesce(p_role,'member')::group_role;
   v_group_name  text;
   v_notif_id    uuid;
+  v_inviter_name text;
+  v_target_name  text;
 begin
   -- Resolve the group owner and check caller can operate for it (admin/manager)
   v_group_owner := ensure_owner_for_group(p_group_id);
@@ -267,6 +289,14 @@ begin
 
   select name into v_group_name from "group" where group_id = p_group_id;
 
+  -- Resolve inviter and target display names (best-effort)
+  select coalesce(nullif(u.raw_user_meta_data->>'display_name',''), split_part(u.email::text,'@',1), u.email::text)
+    into v_inviter_name
+  from auth.users u where u.id = auth.uid();
+  select coalesce(nullif(u.raw_user_meta_data->>'display_name',''), split_part(u.email::text,'@',1), u.email::text)
+    into v_target_name
+  from auth.users u where u.id = v_user_id;
+
   insert into owner_notifications (
     to_owner_id, from_owner_id, type, title, body, payload,
     subject_kind, subject_uuid, subject_label
@@ -279,7 +309,11 @@ begin
       'group_id', p_group_id::text,
       'group_name', v_group_name,
       'role', v_role::text,
-      'invited_by_user', auth.uid()::text
+      'invited_by_user', auth.uid()::text,
+      'invited_by_name', v_inviter_name,
+      'target_user_id', v_user_id::text,
+      'target_user_email', p_email,
+      'target_user_name', v_target_name
     ),
     'group', p_group_id, v_group_name
   ) returning id into v_notif_id;
@@ -369,6 +403,115 @@ begin
   perform respond_owner_notification(p_notification_id, v_resp);
 end $$;
 grant execute on function respond_group_invite(uuid, text) to authenticated;
+
+-- ============================================================
+-- Convenience RPCs for listing notifications
+-- ============================================================
+
+-- List notifications for the caller's individual owner
+drop function if exists list_my_owner_notifications();
+create or replace function list_my_owner_notifications()
+returns setof owner_notifications
+language sql stable security definer set search_path = public as $$
+  select n.*
+  from owner_notifications n
+  where n.to_owner_id = get_owner_for_user(auth.uid())
+    and can_view_owner_notifications(n.to_owner_id)
+  order by n.created_at desc
+$$;
+grant execute on function list_my_owner_notifications() to authenticated;
+
+-- List notifications for a group (to_owner_id = group owner id)
+drop function if exists list_group_notifications(p_group_id uuid);
+create or replace function list_group_notifications(p_group_id uuid)
+returns setof owner_notifications
+language sql stable security definer set search_path = public as $$
+  select n.*
+  from owner_notifications n
+  where n.to_owner_id = get_owner_for_group(p_group_id)
+    and can_view_owner_notifications(n.to_owner_id)
+  order by n.created_at desc
+$$;
+grant execute on function list_group_notifications(uuid) to authenticated;
+
+-- List pending outgoing group invites (sender = group owner, kind = group_invite, not dismissed/responded)
+drop function if exists list_group_outgoing_invites(p_group_id uuid);
+create or replace function list_group_outgoing_invites(p_group_id uuid)
+returns setof owner_notifications
+language sql stable security definer set search_path = public as $$
+  with base as (
+    select n.*
+    from owner_notifications n
+    where n.from_owner_id = get_owner_for_group(p_group_id)
+      and (n.payload->>'kind') = 'group_invite'
+      and n.dismissed_at is null
+      and n.ack_response is null
+      and can_act_for_owner(n.from_owner_id)
+  )
+  select
+    b.id,
+    b.to_owner_id,
+    b.from_owner_id,
+    b.type,
+    b.title,
+    b.body,
+    (
+      coalesce(b.payload, '{}'::jsonb)
+      || jsonb_build_object(
+           'target_user_name', coalesce(b.payload->>'target_user_name',
+             (case when o.kind = 'individual' then coalesce(nullif(u.raw_user_meta_data->>'display_name',''), split_part(u.email::text,'@',1), u.email::text) end)
+           ),
+           'target_user_email', coalesce(b.payload->>'target_user_email', u.email::text),
+           'invited_by_name', coalesce(b.payload->>'invited_by_name', coalesce(nullif(inv.raw_user_meta_data->>'display_name',''), split_part(inv.email::text,'@',1), inv.email::text))
+         )
+    ) as payload,
+    b.subject_kind,
+    b.subject_uuid,
+    b.subject_label,
+    b.dismissed_at,
+    b.ack_response,
+    b.responded_at,
+    b.responded_by_user,
+    b.expires_at,
+    b.created_at,
+    b.updated_at
+  from base b
+  left join owners o on o.id = b.to_owner_id
+  left join auth.users u on o.kind = 'individual' and u.id = o.individual_user_id
+  left join auth.users inv on inv.id = nullif(b.payload->>'invited_by_user','')::uuid
+  order by b.created_at desc
+$$;
+grant execute on function list_group_outgoing_invites(uuid) to authenticated;
+
+-- Cancel an outstanding group invite (sender-side)
+drop function if exists cancel_group_invite(p_notification_id uuid);
+create or replace function cancel_group_invite(p_notification_id uuid)
+returns void
+language plpgsql security definer set search_path = public as $$
+declare v_from uuid; v_to uuid; v_payload jsonb; v_kind text;
+begin
+  select from_owner_id, to_owner_id, payload->>'kind'
+  into v_from, v_to, v_kind
+  from owner_notifications
+  where id = p_notification_id
+  for update;
+  if not found then raise exception 'notification not found' using errcode = 'P0002'; end if;
+  if v_kind <> 'group_invite' then raise exception 'not a group invite' using errcode = '22023'; end if;
+  if v_from is null or not can_act_for_owner(v_from) then raise exception 'not allowed' using errcode = '42501'; end if;
+
+  update owner_notifications
+     set dismissed_at = now(), payload = coalesce(payload,'{}'::jsonb) || jsonb_build_object('canceled', true)
+   where id = p_notification_id;
+
+  -- Inform recipient the invite was canceled
+  if v_to is not null then
+    insert into owner_notifications (to_owner_id, from_owner_id, type, title, body, payload)
+    values (
+      v_to, v_from, 'dismiss', 'Invitation withdrawn', 'The group invitation has been withdrawn.', jsonb_build_object('source_notification_id', p_notification_id::text, 'kind','group_invite_canceled')
+    );
+  end if;
+end $$;
+grant execute on function cancel_group_invite(uuid) to authenticated;
 
 -- ============================================================
 -- USAGE NOTES / EXAMPLES

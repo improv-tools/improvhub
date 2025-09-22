@@ -11,16 +11,16 @@ export default function TeamHeader({ team, onBack, isAdmin, onRename }) {
   return (
     <div style={styles.header}>
       <div style={styles.headerLeft}>
-        {team && <GhostButton style={styles.backBtn} onClick={onBack}>← All teams</GhostButton>}
-        {!team && <H1 style={{ margin: 0 }}>Teams</H1>}
+        {team && <GhostButton style={styles.backBtn} onClick={onBack}>← All groups</GhostButton>}
+        {!team && <H1 style={{ margin: 0 }}>Groups</H1>}
 
         {team && !editing && (
           <div style={styles.titleWrap}>
             <H1 style={styles.titleH1}>{team.name}</H1>
             {isAdmin && (
               <button
-                aria-label="Rename team"
-                title="Rename team"
+                aria-label="Rename group"
+                title="Rename group"
                 onClick={() => setEditing(true)}
                 style={styles.renameIcon}
               >✏️</button>

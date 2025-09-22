@@ -20,21 +20,33 @@ CREATE EXTENSION IF NOT EXISTS citext;
 -- === Enums ===================================================================
 
 -- Top-level "who" type used across the schema
-CREATE TYPE owner_kind AS ENUM ('individual','group');
+do $$ begin
+  create type owner_kind as enum ('individual','group');
+exception when duplicate_object then null; end $$;
 
 -- Roles within a group (access/roster)
-CREATE TYPE group_role AS ENUM ('admin','manager','member');
+do $$ begin
+  create type group_role as enum ('admin','manager','member');
+exception when duplicate_object then null; end $$;
 
 -- Event credit roles (per-series defaults and per-instance overrides).
 -- Also reused at slot level for operational staff (e.g., crew/host/producer/tech).
-CREATE TYPE role_kind AS ENUM ('performer','producer','host','promoter','crew');
+do $$ begin
+  create type role_kind as enum ('performer','producer','host','promoter','crew');
+exception when duplicate_object then null; end $$;
 
 -- Calendar sharing roles
-CREATE TYPE cal_role AS ENUM ('owner','writer','reader');
+do $$ begin
+  create type cal_role as enum ('owner','writer','reader');
+exception when duplicate_object then null; end $$;
 
 -- RFC 5545 ATTENDEE parameters
-CREATE TYPE attendee_role AS ENUM ('CHAIR','REQ-PARTICIPANT','OPT-PARTICIPANT','NON-PARTICIPANT');
-CREATE TYPE attendee_partstat AS ENUM ('NEEDS-ACTION','ACCEPTED','DECLINED','TENTATIVE','DELEGATED');
+do $$ begin
+  create type attendee_role as enum ('CHAIR','REQ-PARTICIPANT','OPT-PARTICIPANT','NON-PARTICIPANT');
+exception when duplicate_object then null; end $$;
+do $$ begin
+  create type attendee_partstat as enum ('NEEDS-ACTION','ACCEPTED','DECLINED','TENTATIVE','DELEGATED');
+exception when duplicate_object then null; end $$;
 
 -- === Helpers =================================================================
 

@@ -30,8 +30,8 @@ export default function TeamMembers({
   };
 
   const remove = async (m) => {
-    if (m.role === "admin" && adminCount === 1) { alert("You cannot remove the last admin from the team."); return; }
-    if (!window.confirm("Remove this member from the team?")) return;
+    if (m.role === "admin" && adminCount === 1) { alert("You cannot remove the last admin from the group."); return; }
+    if (!window.confirm("Remove this member from the group?")) return;
     try {
       await onRemoveMember(team.id, m.user_id);
       setMsg("Member removed ✓"); setTimeout(() => setMsg(""), 1500);
@@ -39,8 +39,8 @@ export default function TeamMembers({
   };
 
   const leave = async (m) => {
-    if (m.role === "admin" && adminCount === 1) { alert("You are the last admin and cannot leave the team."); return; }
-    if (!window.confirm("Leave this team?")) return;
+    if (m.role === "admin" && adminCount === 1) { alert("You are the last admin and cannot leave the group."); return; }
+    if (!window.confirm("Leave this group?")) return;
     await onLeaveTeam(team.id, m.user_id);
   };
 
@@ -131,47 +131,13 @@ export default function TeamMembers({
         </ul>
       )}
 
-      {/* Invited (pending) */}
-      {Array.isArray(invites) && invites.filter(i => i.status === 'invited').length > 0 && (
-        <div style={{ marginTop: 28 }}>
-          <h4 style={{ margin: '0 0 6px', fontSize: 14, opacity: 0.85 }}>Pending invitations</h4>
-          <ul style={{ listStyle: 'none', padding: 0, margin: 0 }}>
-            {invites.filter(i => i.status === 'invited').map((inv) => (
-              <li key={`${inv.team_id}|${inv.user_id}`} style={{
-                border: '1px solid rgba(255,255,255,0.1)',
-                borderRadius: 10,
-                padding: 12,
-                marginBottom: 10,
-                display: 'flex',
-                justifyContent: 'space-between',
-                alignItems: 'center'
-              }}>
-                <div>
-                  <div style={{ fontWeight: 600 }}>{inv.display_name || inv.email || inv.user_id}</div>
-                  <div style={{ opacity: 0.7, fontSize: 12 }}>{inv.role} · invited</div>
-                </div>
-                {isAdmin && (
-                  <GhostButton
-                    style={{ padding: '6px 10px' }}
-                    onClick={async () => {
-                      try { await onCancelInvite?.(team.id, inv.user_id); setMsg("Invitation canceled ✓"); setTimeout(()=>setMsg(""),1500); }
-                      catch (e) { setErr(e.message || 'Cancel invite failed'); }
-                    }}
-                  >
-                    Cancel invite
-                  </GhostButton>
-                )}
-              </li>
-            ))}
-          </ul>
-        </div>
-      )}
+      {/* Pending invitations removed; invites are handled via notifications */}
 
       {/* (invite toggle moved to header) */}
 
       {isAdmin && showDeleteTeamControl && (
         <div style={{ marginTop: 18 }}>
-          <DangerButton onClick={() => onDeleteTeam(team.id)}>Delete team</DangerButton>
+          <DangerButton onClick={() => onDeleteTeam(team.id)}>Delete group</DangerButton>
         </div>
       )}
     </>
