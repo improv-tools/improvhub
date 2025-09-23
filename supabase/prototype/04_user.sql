@@ -145,6 +145,11 @@ do $$ begin
 exception when duplicate_object then null; end $$;
 
 -- Keep auth.users display name in sync when owners.display_name changes (individuals only)
+-- Ensure old trigger is removed before recreating the function it depends on (rerunnable)
+do $$ begin
+  drop trigger if exists trg_owner_sync_auth_display on owners;
+exception when undefined_object then null; end $$;
+
 drop function if exists _sync_auth_display_from_owner();
 create or replace function _sync_auth_display_from_owner()
 returns trigger language plpgsql security definer set search_path = public, auth as $$

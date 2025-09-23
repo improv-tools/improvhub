@@ -3,9 +3,9 @@ import { useMemo, useState, useEffect, useRef } from "react";
 import { Button, GhostButton, DangerButton, Label, Input, Textarea, ErrorText, InfoText, Row } from "components/ui";
 import { useAuth } from "auth/AuthContext";
 import useCalendarData from "../hooks/useCalendarData";
-import { composeStartEndISO, splitLocal, fmtRangeLocal, browserTZ } from "../utils/datetime";
+import { composeStartEndISO, splitLocal, fmtRangeLocal, browserTZ, fmtTime, combineLocal } from "../utils/datetime";
 import { parseRRule, expandBaseOccurrences } from "../../calendar/expandOccurrences";
-import { deleteEventOverrideRPC, listAttendance, setAttendance, listGroupStaffCandidates, getEventStaffDefaults, getEventStaffInstance, resolveOwnerByEmail, resolveOwnerByUserId, resolveUserIdByEmail, setEventStaffInstance } from "../teams.api";
+import { deleteEventOverrideRPC, listAttendance, setAttendance, listGroupStaffCandidates, getEventStaffDefaults, getEventStaffInstance, resolveOwnerByEmail, resolveOwnerByUserId, resolveUserIdByEmail, setEventStaffInstance, listEventSlotsSeries, listEventSlotsInstance, setEventSlotsSeries, setEventSlotsInstance } from "../teams.api";
 
 const CATEGORIES = ["rehearsal", "social", "performance"];
 const TYPE_META = {
@@ -163,16 +163,19 @@ function validateRecurrence({ recurrenceMode, recurFreq, endUntilDate, endCount,
 
   return errs;
 }
-function validateTimes({ title, startDate, startTime, endTime }) {
+function validateTimes({ title, startDate, startTime, endDate, endTime }) {
   const errs = [];
   if (!title?.trim()) errs.push("Title is required.");
   if (!startDate) errs.push("Start date is required.");
   if (!startTime) errs.push("Start time is required.");
   if (!endTime) errs.push("End time is required.");
-  // Disallow end time earlier than or equal to start time on the same day
-  if (startTime && endTime && startDate) {
-    // 'HH:MM' string comparison is safe here
-    if (endTime <= startTime) errs.push("End time must be after start time.");
+  if (!endDate) errs.push("End date is required.");
+  // Disallow end before start
+  if (startDate && endDate) {
+    if (endDate < startDate) errs.push("End date must be the same day or after start date.");
+    else if (endDate === startDate && startTime && endTime && endTime <= startTime) {
+      errs.push("End time must be after start time on the same day.");
+    }
   }
   return errs;
 }
@@ -344,6 +347,7 @@ export default function CalendarPanel({ team }) {
   const [sRecurrenceMode, setSRecurrenceMode] = useState("none"); // 'none'|'until'|'count'
   const [seriesStaff, setSeriesStaff] = useState([]);
   const [staffCandidates, setStaffCandidates] = useState([]);
+  const [seriesSlots, setSeriesSlots] = useState([]);
 
   const openEditSeries = (eventId) => {
     const e = events.find((x) => x.id === eventId);
@@ -366,20 +370,43 @@ export default function CalendarPanel({ team }) {
     let recur_until = e.recur_until || null;
     let recur_count = e.recur_count || null;
     if (e.rrule) {
-      const rule = parseRRule(e.rrule);
-      if (rule && rule.freq) {
-        recur_freq = rule.freq.toLowerCase();
-        recur_interval = rule.interval || 1;
-        if (rule.until) recur_until = rule.until.toISOString();
-        if (rule.count) recur_count = rule.count;
-        if (rule.freq === 'WEEKLY') {
-          recur_byday = Array.isArray(rule.byday) && rule.byday.length ? rule.byday : recur_byday;
+      // Prefer lightweight regex parsing to avoid accidental defaults
+      const rr = e.rrule || '';
+      const freqMatch = rr.match(/(^|;)FREQ=([^;]+)/i);
+      if (freqMatch && freqMatch[2]) {
+        recur_freq = String(freqMatch[2]).toLowerCase();
+      }
+      const intervalMatch = rr.match(/(^|;)INTERVAL=(\d+)/i);
+      if (intervalMatch && intervalMatch[2]) {
+        recur_interval = parseInt(intervalMatch[2], 10) || 1;
+      }
+      const countMatch = rr.match(/(^|;)COUNT=(\d+)/i);
+      if (countMatch && countMatch[2]) {
+        recur_count = parseInt(countMatch[2], 10) || null;
+      }
+      const untilMatch = rr.match(/(^|;)UNTIL=([^;]+)/i);
+      if (untilMatch && untilMatch[2]) {
+        // Accept YYYYMMDD or YYYYMMDDTHHMMSSZ
+        const txt = untilMatch[2];
+        let dt = null;
+        if (/^\d{8}$/.test(txt)) {
+          dt = new Date(`${txt.substring(0,4)}-${txt.substring(4,6)}-${txt.substring(6,8)}T23:59:59Z`);
+        } else if (/^\d{8}T\d{6}Z?$/.test(txt)) {
+          dt = new Date(`${txt.substring(0,4)}-${txt.substring(4,6)}-${txt.substring(6,8)}T${txt.substring(9,11)}:${txt.substring(11,13)}:${txt.substring(13,15)}Z`);
         }
-        if (rule.freq === 'MONTHLY') {
-          // Prefer inline BYMONTHDAY if present
-          if (Array.isArray(rule.bymonthday) && rule.bymonthday.length) {
-            recur_bymonthday = rule.bymonthday[0];
-          }
+        if (dt && !isNaN(+dt)) recur_until = dt.toISOString();
+      }
+      if (recur_freq === 'weekly') {
+        const bydayMatch = rr.match(/(^|;)BYDAY=([^;]+)/i);
+        if (bydayMatch && bydayMatch[2]) {
+          recur_byday = bydayMatch[2].split(',').map(s => s.trim().toUpperCase()).filter(Boolean);
+        }
+      }
+      if (recur_freq === 'monthly') {
+        const bymdMatch = rr.match(/(^|;)BYMONTHDAY=([^;]+)/i);
+        if (bymdMatch && bymdMatch[2]) {
+          const n = parseInt(bymdMatch[2], 10);
+          if (!Number.isNaN(n)) recur_bymonthday = n;
         }
       }
     }
@@ -388,6 +415,7 @@ export default function CalendarPanel({ team }) {
     const durationMin = Math.max(1, Math.round((new Date(e.ends_at) - new Date(e.starts_at)) / 60000));
     setSEd({
       ...e,
+      recur_freq,
       recur_byday,
       recur_bymonthday,
       recur_week_of_month,
@@ -405,12 +433,14 @@ export default function CalendarPanel({ team }) {
     // Load staff + candidates for this group/event
     (async()=>{
       try {
-        const [cands, rows] = await Promise.all([
+        const [cands, rows, slots] = await Promise.all([
           team?.id ? listGroupStaffCandidates(team.id) : Promise.resolve([]),
           getEventStaffDefaults(eventId),
+          listEventSlotsSeries(eventId),
         ]);
         setStaffCandidates(cands || []);
         setSeriesStaff((rows || []).map(r => ({ owner_id: r.owner_id, role: r.role, billing_name: r.billing_name || '', billing_ord: r.billing_ord || null, notes: r.notes || '' })));
+        setSeriesSlots((slots || []).map(s => ({ slot_id: s.slot_id, name: s.name || '', ord: s.ord || null, info: s.info || {}, offset_sec: s.offset_sec || 0, duration_sec: s.duration_sec || 0, staff: Array.isArray(s.staff) ? s.staff : [] })));
       } catch(e) {
         console.warn('load staff defaults failed', e);
         setStaffCandidates([]); setSeriesStaff([]);
@@ -418,6 +448,22 @@ export default function CalendarPanel({ team }) {
     })();
   };
   const cancelEditSeries = () => { setSEd(null); setMode("list"); };
+
+  // Keep end datetime in sync with Running Order (series) in the UI
+  useEffect(() => {
+    if (!sEd) return;
+    if (!Array.isArray(seriesSlots) || seriesSlots.length === 0) return;
+    if (!sEd._s?.date || !sEd._s?.time) return;
+    try {
+      const start = new Date(`${sEd._s.date}T${sEd._s.time}:00`);
+      const maxSec = Math.max(0, ...seriesSlots.map(s => Math.max(0, Number(s.offset_sec)||0) + Math.max(0, Number(s.duration_sec)||0)));
+      const end = new Date(start.getTime() + maxSec*1000);
+      const pad = (n)=> String(n).padStart(2,'0');
+      const endDate = `${end.getFullYear()}-${pad(end.getMonth()+1)}-${pad(end.getDate())}`;
+      const endTime = `${pad(end.getHours())}:${pad(end.getMinutes())}`;
+      setSEd(prev => ({ ...prev, _e: { ...prev._e, date: endDate, time: endTime } }));
+    } catch {}
+  }, [seriesSlots, sEd?._s?.date, sEd?._s?.time]);
 
   const sUntilEstimate = useMemo(() => {
     if (!sEd || sRecurrenceMode !== "until") return null;
@@ -436,7 +482,7 @@ export default function CalendarPanel({ team }) {
 
   const sTimeErrors = useMemo(() => {
     if (!sEd) return [];
-    return validateTimes({ title: sEd.title, startDate: sEd._s.date, startTime: sEd._s.time, endTime: sEd._e.time });
+    return validateTimes({ title: sEd.title, startDate: sEd._s.date, startTime: sEd._s.time, endDate: sEd._e.date, endTime: sEd._e.time });
   }, [sEd]);
 
   const sRecurrenceErrors = useMemo(() => {
@@ -499,7 +545,14 @@ export default function CalendarPanel({ team }) {
           }
         }
       }
-      const { startIso, endIso } = composeStartEndISO(sEd._s.date, sEd._s.time, sEd._e.time);
+      // Compose start/end; if Running Order slots exist, force end to end-of-last-slot
+      const startIso = combineLocal(sEd._s.date, sEd._s.time);
+      let endIso = combineLocal(sEd._e.date || sEd._s.date, sEd._e.time);
+      if (Array.isArray(seriesSlots) && seriesSlots.length > 0) {
+        const maxEndSec = Math.max(0, ...seriesSlots.map(s => Math.max(0, Number(s.offset_sec)||0) + Math.max(0, Number(s.duration_sec)||0)));
+        const endMs = new Date(startIso).getTime() + maxEndSec * 1000;
+        endIso = new Date(endMs).toISOString();
+      }
 
       await updateBase(sEd.id, {
         title: sEd.title ?? "",
@@ -518,6 +571,17 @@ export default function CalendarPanel({ team }) {
         recur_count,
         staff_defaults: seriesStaff,
       });
+
+      // Commit slots in one go on Save
+      try {
+        await setEventSlotsSeries(sEd.id, (seriesSlots || [])
+          .slice()
+          .sort((a,b)=> (a.ord??999999)-(b.ord??999999))
+          .map(s => ({ name: s.name || null, info: s.info || {}, offset_sec: Math.max(0, Number(s.offset_sec)||0), duration_sec: Math.max(0, Number(s.duration_sec)||0), staff: Array.isArray(s.staff) ? s.staff : [] }))
+        );
+      } catch (slotErr) {
+        throw new Error(slotErr?.message || 'Failed to save slots');
+      }
 
       cancelEditSeries();
       setBanner(recur_freq === "none" ? "Event updated (recurrence removed)." : "Event updated.");
@@ -569,6 +633,7 @@ export default function CalendarPanel({ team }) {
   const [instanceStaff, setInstanceStaff] = useState([]);
   const [instanceStaffSeed, setInstanceStaffSeed] = useState(null); // for change detection
   const [instanceSeedFromDefaults, setInstanceSeedFromDefaults] = useState(false);
+  const [instanceSlots, setInstanceSlots] = useState([]);
   const openEditOccurrence = (occ) => {
     const s = splitLocal(occ.starts_at);
     const e = splitLocal(occ.ends_at);
@@ -581,6 +646,7 @@ export default function CalendarPanel({ team }) {
       category: occ.category || "rehearsal",
       _sDate: s.date,
       _sTime: s.time,
+      _eDate: e.date,
       _eTime: e.time,
       overridden: !!occ.overridden,
     });
@@ -589,9 +655,10 @@ export default function CalendarPanel({ team }) {
     // Load instance-level staff rows; if none, seed from series defaults
     (async()=>{
       try {
-        const [cands, rows] = await Promise.all([
+        const [cands, rows, slots] = await Promise.all([
           team?.id ? listGroupStaffCandidates(team.id) : Promise.resolve([]),
           getEventStaffInstance(occ.event_id, occ.base_start),
+          listEventSlotsInstance(occ.event_id, occ.base_start),
         ]);
         setStaffCandidates(cands || []);
         const mapped = (rows || []).map(r => ({ owner_id: r.owner_id, role: r.role, billing_name: r.billing_name || '', billing_ord: r.billing_ord || null, notes: r.notes || '' }));
@@ -611,14 +678,37 @@ export default function CalendarPanel({ team }) {
           setInstanceStaffSeed(mapped);
           setInstanceSeedFromDefaults(false);
         }
+        if ((slots || []).length === 0) {
+          // Inherit series slots (including staff) when instance has none
+          const seriesSlotsSeed = await listEventSlotsSeries(occ.event_id);
+          setInstanceSlots((seriesSlotsSeed || []).map(s => ({ slot_id: `temp-${Math.random().toString(36).slice(2)}`, name: s.name || '', ord: s.ord || null, info: s.info || {}, offset_sec: s.offset_sec || 0, duration_sec: s.duration_sec || 0, staff: Array.isArray(s.staff) ? s.staff : [] })));
+        } else {
+          setInstanceSlots((slots || []).map(s => ({ slot_id: s.slot_id, name: s.name || '', ord: s.ord || null, info: s.info || {}, offset_sec: s.offset_sec || 0, duration_sec: s.duration_sec || 0, staff: Array.isArray(s.staff) ? s.staff : [] })));
+        }
       } catch(e) { console.warn('load instance staff failed', e); setInstanceStaff([]); }
     })();
   };
   const cancelEditOccurrence = () => { setOEd(null); setMode("list"); };
 
+  // Keep end datetime in sync with Running Order (occurrence) in the UI
+  useEffect(() => {
+    if (!oEd) return;
+    if (!Array.isArray(instanceSlots) || instanceSlots.length === 0) return;
+    if (!oEd._sDate || !oEd._sTime) return;
+    try {
+      const start = new Date(`${oEd._sDate}T${oEd._sTime}:00`);
+      const maxSec = Math.max(0, ...instanceSlots.map(s => Math.max(0, Number(s.offset_sec)||0) + Math.max(0, Number(s.duration_sec)||0)));
+      const end = new Date(start.getTime() + maxSec*1000);
+      const pad = (n)=> String(n).padStart(2,'0');
+      const endDate = `${end.getFullYear()}-${pad(end.getMonth()+1)}-${pad(end.getDate())}`;
+      const endTime = `${pad(end.getHours())}:${pad(end.getMinutes())}`;
+      setOEd(prev => ({ ...prev, _eDate: endDate, _eTime: endTime }));
+    } catch {}
+  }, [instanceSlots, oEd?._sDate, oEd?._sTime]);
+
   const oTimeErrors = useMemo(() => {
     if (!oEd) return [];
-    return validateTimes({ title: oEd.title, startDate: oEd._sDate, startTime: oEd._sTime, endTime: oEd._eTime });
+    return validateTimes({ title: oEd.title, startDate: oEd._sDate, startTime: oEd._sTime, endDate: oEd._eDate, endTime: oEd._eTime });
   }, [oEd]);
   const canSaveOccurrence = useMemo(() => !oEd ? false : oTimeErrors.length === 0, [oEd, oTimeErrors]);
 
@@ -626,7 +716,14 @@ export default function CalendarPanel({ team }) {
     if (!canSaveOccurrence || !oEd) return;
     setBanner(""); setBannerErr("");
     try {
-      const { startIso, endIso } = composeStartEndISO(oEd._sDate, oEd._sTime, oEd._eTime);
+      // Compose start/end; if Running Order slots exist, force end to end-of-last-slot
+      const startIso = combineLocal(oEd._sDate, oEd._sTime);
+      let endIso = combineLocal(oEd._eDate || oEd._sDate, oEd._eTime);
+      if (Array.isArray(instanceSlots) && instanceSlots.length > 0) {
+        const maxEndSec = Math.max(0, ...instanceSlots.map(s => Math.max(0, Number(s.offset_sec)||0) + Math.max(0, Number(s.duration_sec)||0)));
+        const endMs = new Date(startIso).getTime() + maxEndSec * 1000;
+        endIso = new Date(endMs).toISOString();
+      }
       const staffChanged = (() => {
         if (!Array.isArray(instanceStaffSeed) || !instanceSeedFromDefaults) return true; // send if there were existing overrides or no seed
         const a = (instanceStaff || []).map(r => ({ owner_id: r.owner_id, role: r.role, billing_name: r.billing_name || null, billing_ord: r.billing_ord || null })).sort((x,y)=> (x.billing_ord??0)-(y.billing_ord??0));
@@ -648,6 +745,16 @@ export default function CalendarPanel({ team }) {
         ends_at: endIso,
         ...(staffChanged ? { instance_staff: instanceStaff } : {}),
       });
+      // Commit occurrence slots on Save (replace all for this instance)
+      try {
+        await setEventSlotsInstance(oEd.event_id, oEd.base_start, (instanceSlots || [])
+          .slice()
+          .sort((a,b)=> (a.ord??999999)-(b.ord??999999))
+          .map(s => ({ name: s.name || null, info: s.info || {}, offset_sec: Math.max(0, Number(s.offset_sec)||0), duration_sec: Math.max(0, Number(s.duration_sec)||0), staff: Array.isArray(s.staff) ? s.staff : [] }))
+        );
+      } catch (slotErr) {
+        throw new Error(slotErr?.message || 'Failed to save slots');
+      }
       cancelEditOccurrence();
       setBanner("Occurrence updated.");
     } catch (e) { setBannerErr(e.message || "Failed to update occurrence"); }
@@ -670,6 +777,8 @@ export default function CalendarPanel({ team }) {
     try {
       // Clear both the visual override and any staff override so it pulls from series again
       await setEventStaffInstance(oEd.event_id, oEd.base_start, []);
+      // Clear instance-level slots for this occurrence
+      await setEventSlotsInstance(oEd.event_id, oEd.base_start, []);
       await clearOccurrenceOverride(oEd.event_id, oEd.base_start);
       // Stay on edit occurrence; reload and reopen the same occurrence
       await reload();
@@ -850,6 +959,11 @@ export default function CalendarPanel({ team }) {
       {mode === "editSeries" && sEd && (
         <div style={styles.panel}>
           <h4 style={{ margin: "0 0 10px", fontSize: 14 }}>{sRecurrenceMode === 'none' ? 'Manage Event' : 'Manage Series'}</h4>
+          <InfoText>
+            {sRecurrenceMode === 'none'
+              ? 'Editing a single event.'
+              : 'Editing series defaults for a recurring event. Changes here apply by default to all occurrences; individual occurrences may have overrides.'}
+          </InfoText>
 
           {/* Switch: No recurrence / Until / Count */}
           <Row>
@@ -896,10 +1010,53 @@ export default function CalendarPanel({ team }) {
             <Textarea placeholder="Description" value={sEd.description || ""} onChange={(e)=>setSEd({ ...sEd, description: e.target.value })} maxLength={500} rows={3} style={{ minWidth: 500 }} />
           </Row>
 
-          {/* Staff: series defaults */}
+          {/* Production Roster */}
           <div style={{ marginTop: 10, borderTop: '1px solid rgba(255,255,255,0.1)', paddingTop: 10 }}>
-            <div style={{ fontWeight: 600, marginBottom: 6 }}>Staff (series defaults)</div>
+            <div style={{ fontWeight: 600, marginBottom: 6 }}>Production Roster</div>
             <StaffEditor staff={seriesStaff} setStaff={setSeriesStaff} candidates={staffCandidates} />
+          </div>
+
+          {/* Running Order */}
+          <div style={{ marginTop: 10, borderTop: '1px solid rgba(255,255,255,0.1)', paddingTop: 10 }}>
+            <div style={{ fontWeight: 600, marginBottom: 6 }}>Running Order</div>
+          <SlotsEditor
+            slots={seriesSlots}
+            baseStartIso={(function(){ const r = composeStartEndISO(sEd?._s?.date, sEd?._s?.time, sEd?._e?.time); return r.startIso || ''; })()}
+            roster={seriesStaff}
+            rosterFallback={null}
+            onUpdateSlot={(slotId, patch)=>{
+              setSeriesSlots(prev => (prev||[]).map(s => s.slot_id === slotId
+                ? {
+                    ...s,
+                    ...(patch.name !== undefined ? { name: patch.name } : {}),
+                    ...(patch.offset_min !== undefined ? { offset_sec: Math.max(0, Math.round((patch.offset_min||0)*60)) } : {}),
+                    ...(patch.duration_min !== undefined ? { duration_sec: Math.max(0, Math.round((patch.duration_min||0)*60)) } : {}),
+                  }
+                : s
+              ));
+            }}
+            onChangeStaffRole={(slotId, ownerId, oldRole, newRole)=>{
+              setSeriesSlots(prev => (prev||[]).map(s => {
+                if (s.slot_id !== slotId) return s;
+                const staff = Array.isArray(s.staff) ? [...s.staff] : [];
+                const idx = staff.findIndex(a => a.owner_id === ownerId && a.role === oldRole);
+                if (idx === -1) return s;
+                // Avoid duplicates of same owner+role
+                if (staff.some(a => a.owner_id === ownerId && a.role === newRole)) {
+                  staff.splice(idx, 1);
+                } else {
+                  staff[idx] = { ...staff[idx], role: newRole };
+                }
+                return { ...s, staff };
+              }));
+            }}
+            onAdd={(name, offMin, durMin)=>{ if (!sEd) return; const tempId = `temp-${Math.random().toString(36).slice(2)}`; const offset_sec = Math.max(0, Math.round((offMin||0)*60)); const duration_sec = Math.max(0, Math.round((durMin||0)*60)); const nextOrd = (seriesSlots || []).length + 1; setSeriesSlots(prev => [...(prev||[]), { slot_id: tempId, name: name||'', ord: nextOrd, info: {}, offset_sec, duration_sec, staff: [] }]); }}
+            onRemove={(slotId)=>{ if (!sEd) return; setSeriesSlots(prev => (prev||[]).filter(s => s.slot_id !== slotId).map((s, i) => ({ ...s, ord: i+1 }))); }}
+            onReorder={(ids)=>{ if (!sEd) return; const arr = ids.map((id, idx) => ({ ...(seriesSlots.find(s=>s.slot_id===id)||{ slot_id:id, name:'', info:{}, offset_sec:0, duration_sec:0, staff: [] }), slot_id:id, ord: idx+1 })); setSeriesSlots(arr); }}
+            onDropStaff={(slotId, ownerId, role)=>{ setSeriesSlots(prev => (prev||[]).map(s => s.slot_id===slotId ? ({ ...s, staff: Array.isArray(s.staff) ? (s.staff.some(a=>a.owner_id===ownerId && a.role===role) ? s.staff : [...s.staff, { owner_id: ownerId, role }]) : [{ owner_id: ownerId, role }] }) : s)); }}
+            onRemoveStaff={(slotId, ownerId, role)=>{ setSeriesSlots(prev => (prev||[]).map(s => s.slot_id===slotId ? ({ ...s, staff: (s.staff||[]).filter(a => !(a.owner_id===ownerId && a.role===role)) }) : s)); }}
+            candidates={staffCandidates}
+          />
           </div>
 
           <Row>
@@ -926,6 +1083,7 @@ export default function CalendarPanel({ team }) {
               setSEd(next);
             }} />
             <span style={{ alignSelf:"center", opacity:0.7 }}>→</span>
+            <Input type="date" value={sEd._e.date} onChange={(ev)=>{ setSEndTouched(true); setSEd({ ...sEd, _e: { ...sEd._e, date: ev.target.value } }); }} />
             <Input type="time" value={sEd._e.time} onChange={(ev)=>{ setSEndTouched(true); setSEd({ ...sEd, _e: { ...sEd._e, time: ev.target.value } }); }} />
           </Row>
 
@@ -935,7 +1093,7 @@ export default function CalendarPanel({ team }) {
                 <Label>
                   Frequency
                   <select
-                    value={sEd.recur_freq === "none" ? "weekly" : sEd.recur_freq}
+                    value={(sEd.recur_freq && sEd.recur_freq !== "none") ? sEd.recur_freq : "weekly"}
                     onChange={(e2)=>setSEd({ ...sEd, recur_freq: e2.target.value })}
                     style={styles.select}
                   >
@@ -1027,6 +1185,9 @@ export default function CalendarPanel({ team }) {
       {mode === "editOcc" && oEd && (
         <div style={styles.panel}>
           <h4 style={{ margin: "0 0 10px", fontSize: 14 }}>Manage Event</h4>
+          <InfoText>
+            Editing a single occurrence. Series defaults remain unchanged; differences here are stored as an override for this occurrence.
+          </InfoText>
 
           {oTimeErrors.length > 0 && (
             <ErrorText>{oTimeErrors.map((e,i)=><div key={i}>• {e}</div>)}</ErrorText>
@@ -1043,15 +1204,58 @@ export default function CalendarPanel({ team }) {
             <Textarea placeholder="Description" value={oEd.description} onChange={(e)=>setOEd({ ...oEd, description: e.target.value })} maxLength={500} rows={3} style={{ minWidth: 500 }} />
           </Row>
 
-          {/* Staff: occurrence-specific */}
+          {/* Production Roster */}
           <div style={{ marginTop: 10, borderTop: '1px solid rgba(255,255,255,0.1)', paddingTop: 10 }}>
-            <div style={{ fontWeight: 600, marginBottom: 6 }}>Staff (this occurrence)</div>
+            <div style={{ fontWeight: 600, marginBottom: 6 }}>Production Roster</div>
             <StaffEditor staff={instanceStaff} setStaff={setInstanceStaff} candidates={staffCandidates} />
+          </div>
+
+          {/* Running Order */}
+          <div style={{ marginTop: 10, borderTop: '1px solid rgba(255,255,255,0.1)', paddingTop: 10 }}>
+            <div style={{ fontWeight: 600, marginBottom: 6 }}>Running Order</div>
+          <SlotsEditor
+            slots={instanceSlots}
+            baseStartIso={(function(){ const r = composeStartEndISO(oEd?._sDate, oEd?._sTime, oEd?._eTime); return r.startIso || ''; })()}
+            roster={instanceStaff}
+            rosterFallback={seriesStaff}
+            onUpdateSlot={(slotId, patch)=>{
+              setInstanceSlots(prev => (prev||[]).map(s => s.slot_id === slotId
+                ? {
+                    ...s,
+                    ...(patch.name !== undefined ? { name: patch.name } : {}),
+                    ...(patch.offset_min !== undefined ? { offset_sec: Math.max(0, Math.round((patch.offset_min||0)*60)) } : {}),
+                    ...(patch.duration_min !== undefined ? { duration_sec: Math.max(0, Math.round((patch.duration_min||0)*60)) } : {}),
+                  }
+                : s
+              ));
+            }}
+            onChangeStaffRole={(slotId, ownerId, oldRole, newRole)=>{
+              setInstanceSlots(prev => (prev||[]).map(s => {
+                if (s.slot_id !== slotId) return s;
+                const staff = Array.isArray(s.staff) ? [...s.staff] : [];
+                const idx = staff.findIndex(a => a.owner_id === ownerId && a.role === oldRole);
+                if (idx === -1) return s;
+                if (staff.some(a => a.owner_id === ownerId && a.role === newRole)) {
+                  staff.splice(idx, 1);
+                } else {
+                  staff[idx] = { ...staff[idx], role: newRole };
+                }
+                return { ...s, staff };
+              }));
+            }}
+            onAdd={(name, offMin, durMin)=>{ if (!oEd) return; const tempId = `temp-${Math.random().toString(36).slice(2)}`; const offset_sec = Math.max(0, Math.round((offMin||0)*60)); const duration_sec = Math.max(0, Math.round((durMin||0)*60)); const nextOrd = (instanceSlots || []).length + 1; setInstanceSlots(prev => [...(prev||[]), { slot_id: tempId, name: name||'', ord: nextOrd, info: {}, offset_sec, duration_sec, staff: [] }]); }}
+            onRemove={(slotId)=>{ if (!oEd) return; setInstanceSlots(prev => (prev||[]).filter(s => s.slot_id !== slotId).map((s, i) => ({ ...s, ord: i+1 }))); }}
+            onReorder={(ids)=>{ if (!oEd) return; const arr = ids.map((id, idx) => ({ ...(instanceSlots.find(s=>s.slot_id===id)||{ slot_id:id, name:'', info:{}, offset_sec:0, duration_sec:0, staff: [] }), slot_id:id, ord: idx+1 })); setInstanceSlots(arr); }}
+            onDropStaff={(slotId, ownerId, role)=>{ setInstanceSlots(prev => (prev||[]).map(s => s.slot_id===slotId ? ({ ...s, staff: Array.isArray(s.staff) ? (s.staff.some(a=>a.owner_id===ownerId && a.role===role) ? s.staff : [...s.staff, { owner_id: ownerId, role }]) : [{ owner_id: ownerId, role }] }) : s)); }}
+            onRemoveStaff={(slotId, ownerId, role)=>{ setInstanceSlots(prev => (prev||[]).map(s => s.slot_id===slotId ? ({ ...s, staff: (s.staff||[]).filter(a => !(a.owner_id===ownerId && a.role===role)) }) : s)); }}
+            candidates={staffCandidates}
+          />
           </div>
           <Row>
             <Input type="date" value={oEd._sDate} onChange={(e)=>setOEd({ ...oEd, _sDate: e.target.value })} />
             <Input type="time" value={oEd._sTime} onChange={(e)=>setOEd({ ...oEd, _sTime: e.target.value })} />
             <span style={{ alignSelf:"center", opacity:0.7 }}>→</span>
+            <Input type="date" value={oEd._eDate} onChange={(e)=>setOEd({ ...oEd, _eDate: e.target.value })} />
             <Input type="time" value={oEd._eTime} onChange={(e)=>setOEd({ ...oEd, _eTime: e.target.value })} />
           </Row>
 
@@ -1226,6 +1430,232 @@ export default function CalendarPanel({ team }) {
 
 /* ------------------------------ Staff Editor ------------------------------ */
 const ROLE_KINDS = ['performer','producer','host','promoter','crew'];
+function SlotsEditor({ slots, baseStartIso, onAdd, onRemove, onReorder, onDropStaff, onRemoveStaff, onUpdateSlot, onChangeStaffRole, candidates, roster, rosterFallback }) {
+  const [name, setName] = useState("");
+  const [offsetMin, setOffsetMin] = useState(0);
+  const [durationMin, setDurationMin] = useState(60);
+  const [dragIdx, setDragIdx] = useState(null);
+  const [err, setErr] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [adding, setAdding] = useState(false);
+  const [edit, setEdit] = useState({ id: null, field: null }); // inline field editing
+  const idsFrom = (arr) => (arr||[]).map(s => s.slot_id);
+  const nameFor = (owner_id) => {
+    const c = (candidates || []).find(c => c.owner_id === owner_id);
+    return c ? c.display_name : owner_id;
+  };
+  const billingNameFor = (owner_id, role) => {
+    let e = (Array.isArray(roster) ? roster : []).find(x => x.owner_id === owner_id && x.role === role);
+    if (!e && Array.isArray(rosterFallback)) {
+      e = rosterFallback.find(x => x.owner_id === owner_id && x.role === role);
+    }
+    return e && e.billing_name ? e.billing_name : null;
+  };
+  const isEditing = (id, field) => edit.id === id && edit.field === field;
+  const startEdit = (id, field) => setEdit({ id, field });
+  const stopEdit = () => setEdit({ id: null, field: null });
+  return (
+    <div>
+      {err && <ErrorText>{err}</ErrorText>}
+      {(slots||[]).length === 0 ? (
+        <div style={{ opacity: 0.75, marginTop: 8 }}>No slots.</div>
+      ) : (
+        <ul style={{ listStyle: 'none', padding: 0, marginTop: 8 }}>
+          {(slots||[])
+            .slice()
+            .sort((a,b)=> (a.ord??999999) - (b.ord??999999))
+            .map((s, idx) => (
+            <li key={s.slot_id}
+                draggable
+                onDragStart={()=> setDragIdx(idx)}
+                onDragOver={(e)=>{ e.preventDefault(); }}
+                onDrop={async (e)=>{
+                  e.preventDefault();
+                  const payload = e.dataTransfer.getData('application/x-owner');
+                  if (payload) {
+                    try {
+                      const { owner_id, role } = JSON.parse(payload);
+                      onDropStaff && onDropStaff(s.slot_id, owner_id, role || 'crew');
+                    } catch(_) {}
+                    return;
+                  }
+                  if (dragIdx===null || dragIdx===idx) return;
+                  const arr = (slots||[]).slice().sort((a,b)=> (a.ord??999999)-(b.ord??999999));
+                  const [m] = arr.splice(dragIdx,1);
+                  arr.splice(idx,0,m);
+                  setDragIdx(null);
+                  try {
+                    setBusy(true); setErr("");
+                    await onReorder(idsFrom(arr));
+                  } catch (e) {
+                    setErr(e?.message || 'Failed to reorder slots');
+                  } finally {
+                    setBusy(false);
+                  }
+                }}
+                style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8, border: '1px solid rgba(255,255,255,0.1)', borderRadius: 8, padding: '6px 8px', marginBottom: 6 }}>
+              <div style={{ display:'flex', alignItems:'center', gap:8 }}>
+                <span title="Drag to reorder" style={{ cursor: 'grab', opacity: 0.7 }}>↕</span>
+                <div>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                    {/* Editable Name */}
+                    {isEditing(s.slot_id, 'name') ? (
+                      <input
+                        autoFocus
+                        defaultValue={s.name || ''}
+                        onBlur={(e)=>{ onUpdateSlot && onUpdateSlot(s.slot_id, { name: e.target.value }); stopEdit(); }}
+                        onKeyDown={(e)=>{ if (e.key==='Enter'){ e.currentTarget.blur(); } if (e.key==='Escape'){ stopEdit(); }} }
+                        style={{ background: 'transparent', color: 'inherit', border: '1px solid rgba(255,255,255,0.2)', borderRadius: 6, padding: '2px 6px', fontSize: 14 }}
+                      />
+                    ) : (
+                      <div style={{ fontWeight: 600, cursor: 'pointer', textDecoration: 'underline dotted' }} onClick={()=> startEdit(s.slot_id, 'name')}>
+                        {s.name || 'Slot'}
+                      </div>
+                    )}
+                    {/* Editable Offset */}
+                    <div style={{ fontSize: 12, opacity: 0.9, display: 'flex', alignItems: 'center', gap: 6 }}>
+                      <span>+</span>
+                      {isEditing(s.slot_id, 'offset') ? (
+                        <input type="number"
+                               autoFocus
+                               defaultValue={Math.round((s.offset_sec||0)/60)}
+                               onBlur={(e)=>{ onUpdateSlot && onUpdateSlot(s.slot_id, { offset_min: Math.max(0, Number(e.target.value)||0) }); stopEdit(); }}
+                               onKeyDown={(e)=>{ if (e.key==='Enter'){ e.currentTarget.blur(); } if (e.key==='Escape'){ stopEdit(); } }}
+                               style={{ width: 70, background: 'transparent', color: 'inherit', border: '1px solid rgba(255,255,255,0.2)', borderRadius: 6, padding: '2px 6px', fontSize: 12 }} />
+                      ) : (
+                        <span style={{ cursor: 'pointer', textDecoration: 'underline dotted' }} onClick={()=> startEdit(s.slot_id, 'offset')}>
+                          {Math.round((s.offset_sec||0)/60)}m
+                        </span>
+                      )}
+                      <span>·</span>
+                      {/* Editable Duration */}
+                      {isEditing(s.slot_id, 'duration') ? (
+                        <input type="number"
+                               autoFocus
+                               defaultValue={Math.round((s.duration_sec||0)/60)}
+                               onBlur={(e)=>{ onUpdateSlot && onUpdateSlot(s.slot_id, { duration_min: Math.max(0, Number(e.target.value)||0) }); stopEdit(); }}
+                               onKeyDown={(e)=>{ if (e.key==='Enter'){ e.currentTarget.blur(); } if (e.key==='Escape'){ stopEdit(); } }}
+                               style={{ width: 80, background: 'transparent', color: 'inherit', border: '1px solid rgba(255,255,255,0.2)', borderRadius: 6, padding: '2px 6px', fontSize: 12 }} />
+                      ) : (
+                        <span style={{ cursor: 'pointer', textDecoration: 'underline dotted' }} onClick={()=> startEdit(s.slot_id, 'duration')}>
+                          {Math.round((s.duration_sec||0)/60)}m
+                        </span>
+                      )}
+                      {/* Computed local times */}
+                      <span>
+                        {baseStartIso ? (
+                          (()=>{
+                            const startMs = new Date(baseStartIso).getTime() + Math.max(0, Number(s.offset_sec)||0)*1000;
+                            const start = new Date(startMs);
+                            const dur = Math.max(0, Number(s.duration_sec)||0);
+                            const label = dur > 0 ? `${fmtTime(start)}–${fmtTime(new Date(startMs + dur*1000))}` : `${fmtTime(start)}`;
+                            return <span style={{ marginLeft: 6, opacity: 0.9 }}>({label})</span>;
+                          })()
+                        ) : null}
+                      </span>
+                    </div>
+                  </div>
+                  {/* Slot staff list */}
+                  <div style={{ marginTop: 6, paddingLeft: 14 }}>
+                    {(s.staff||[]).length === 0 ? (
+                      <div style={{ opacity: 0.7, fontSize: 12 }}>No staff in this slot.</div>
+                    ) : (
+                      (s.staff||[]).map((a, i) => (
+                        <div key={i} style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 13 }}>
+                          <span>
+                            {nameFor(a.owner_id)}
+                            {(() => { const bn = billingNameFor(a.owner_id, a.role); return bn ? <span style={{ opacity: 0.85 }}> (as {bn})</span> : null; })()}
+                          </span>
+                          {/* Per-slot role override editor */}
+                          <select value={a.role || 'crew'} onChange={(e)=> onChangeStaffRole && onChangeStaffRole(s.slot_id, a.owner_id, a.role, e.target.value)} style={styles.selectSm}>
+                            {ROLE_KINDS.map(r => (<option key={r} value={r}>{cap(r)}</option>))}
+                          </select>
+                          <button type="button" onClick={()=> onRemoveStaff && onRemoveStaff(s.slot_id, a.owner_id, a.role)} style={{ background: 'transparent', color: 'inherit', border: '1px solid rgba(255,255,255,0.2)', borderRadius: 6, padding: '1px 6px', cursor: 'pointer', fontSize: 12 }}>Remove</button>
+                        </div>
+                      ))
+                    )}
+                  </div>
+                </div>
+              </div>
+              <GhostButton onClick={async ()=>{
+                try { setBusy(true); setErr(""); await onRemove(s.slot_id); }
+                catch (e) { setErr(e?.message || 'Failed to remove slot'); }
+                finally { setBusy(false); }
+              }}>Remove</GhostButton>
+            </li>
+          ))}
+        </ul>
+      )}
+      {/* Subtle add-slot UI below the list */}
+      <div style={{ marginTop: 8, paddingLeft: 22 }}>
+        {!adding ? (
+          <GhostButton onClick={()=> setAdding(true)} style={{ padding: '2px 8px', fontSize: 12 }}>+ Add slot</GhostButton>
+        ) : (
+          <div style={{ display: 'flex', gap: 6, alignItems: 'center', flexWrap: 'wrap' }}>
+            <input
+              placeholder="Slot name"
+              value={name}
+              onChange={(e)=> setName(e.target.value)}
+              style={{ background: 'transparent', color: 'inherit', border: '1px solid rgba(255,255,255,0.2)', borderRadius: 6, padding: '4px 8px', fontSize: 12, minWidth: 160 }}
+            />
+            <span style={{ fontSize: 12, opacity: 0.85 }}>Offset (m)</span>
+            <input
+              type="number"
+              value={offsetMin}
+              onChange={(e)=> setOffsetMin(Math.max(0, Number(e.target.value)||0))}
+              style={{ width: 80, background: 'transparent', color: 'inherit', border: '1px solid rgba(255,255,255,0.2)', borderRadius: 6, padding: '4px 8px', fontSize: 12 }}
+            />
+            <span style={{ fontSize: 12, opacity: 0.85 }}>Duration (m)</span>
+            <input
+              type="number"
+              value={durationMin}
+              onChange={(e)=> setDurationMin(Math.max(0, Number(e.target.value)||0))}
+              style={{ width: 100, background: 'transparent', color: 'inherit', border: '1px solid rgba(255,255,255,0.2)', borderRadius: 6, padding: '4px 8px', fontSize: 12 }}
+            />
+            <GhostButton onClick={async ()=>{
+              try {
+                setBusy(true); setErr("");
+                await onAdd(name.trim(), offsetMin, durationMin);
+                setName(""); setAdding(false);
+              } catch (e) {
+                setErr(e?.message || 'Failed to add slot');
+              } finally {
+                setBusy(false);
+              }
+            }} style={{ padding: '2px 8px', fontSize: 12 }}>{busy ? 'Adding…' : 'Add'}</GhostButton>
+            <GhostButton onClick={()=> { setAdding(false); setName(""); }} style={{ padding: '2px 8px', fontSize: 12 }}>Cancel</GhostButton>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function PeoplePalette({ people, candidates }) {
+  const nameFor = (owner_id) => {
+    const c = (candidates || []).find(c => c.owner_id === owner_id);
+    return c ? c.display_name : owner_id;
+  };
+  const dedup = [];
+  const seen = new Set();
+  for (const p of (people || [])) {
+    const key = `${p.owner_id}|${p.role||'crew'}`;
+    if (!seen.has(key)) { seen.add(key); dedup.push(p); }
+  }
+  if (dedup.length === 0) return null;
+  return (
+    <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginBottom: 6 }}>
+      {dedup.map((p, idx) => (
+        <span key={idx}
+              draggable
+              onDragStart={(e)=>{ e.dataTransfer.setData('application/x-owner', JSON.stringify({ owner_id: p.owner_id, role: p.role||'crew' })); }}
+              style={{ border: '1px solid rgba(255,255,255,0.2)', borderRadius: 999, padding: '2px 8px', fontSize: 12, opacity: 0.9, cursor: 'grab' }}>
+          {nameFor(p.owner_id)} · {cap(p.role || 'crew')}
+        </span>
+      ))}
+    </div>
+  );
+}
 function StaffEditor({ staff, setStaff, candidates }) {
   const containerRef = useRef(null);
   const [selOwner, setSelOwner] = useState("");
@@ -1235,8 +1665,10 @@ function StaffEditor({ staff, setStaff, candidates }) {
   const [query, setQuery] = useState("");
   const [err, setErr] = useState("");
   const [showSuggestions, setShowSuggestions] = useState(false);
-  const [dragIndex, setDragIndex] = useState(null);
-  const [roleOpenIdx, setRoleOpenIdx] = useState(null);
+  const [dragIndex, setDragIndex] = useState(null); // legacy per-row drag (unused in grouped)
+  const [groupDragIndex, setGroupDragIndex] = useState(null);
+  const [roleOpenIdx, setRoleOpenIdx] = useState(null); // legacy (no longer used for role change)
+  const [addingRoster, setAddingRoster] = useState(false);
 
   const suggestions = (candidates || []).filter(c => {
     if (!query.trim()) return false;
@@ -1313,131 +1745,171 @@ function StaffEditor({ staff, setStaff, candidates }) {
     return c ? c.display_name : owner_id;
   };
 
+  const grouped = useMemo(() => {
+    const map = new Map();
+    (staff || []).forEach((r, idx) => {
+      let g = map.get(r.owner_id);
+      if (!g) { g = { owner_id: r.owner_id, roles: [], rows: [], billing_name: null }; map.set(r.owner_id, g); }
+      if (!g.roles.includes(r.role)) g.roles.push(r.role);
+      g.rows.push({ ...r, _idx: idx });
+      if (!g.billing_name && r.billing_name) g.billing_name = r.billing_name;
+    });
+    return Array.from(map.values()).sort((a,b)=> (a.rows[0]?._idx||0) - (b.rows[0]?._idx||0));
+  }, [staff]);
+
+  const removeRole = (owner_id, role) => {
+    setStaff((prev) => (prev || []).filter(r => !(r.owner_id === owner_id && r.role === role)).map((r,i)=> ({ ...r, billing_ord: i+1 })));
+  };
+
+  const addRoleForOwner = (owner_id, role, billing_name = null) => {
+    if (!role) return;
+    // Prevent duplicate
+    if ((staff || []).some(r => r.owner_id === owner_id && r.role === role)) return;
+    setStaff((prev) => {
+      const next = [ ...(prev || []), { owner_id, role, billing_name: billing_name || null, billing_ord: null, notes: null } ];
+      return next.map((r,i)=> ({ ...r, billing_ord: i+1 }));
+    });
+  };
+
+  const reorderGroups = async (fromIdx, toIdx) => {
+    if (fromIdx === null || toIdx === null || fromIdx === toIdx) return;
+    const groups = grouped.slice();
+    const [moved] = groups.splice(fromIdx, 1);
+    groups.splice(toIdx, 0, moved);
+    const newStaff = [];
+    groups.forEach(g => {
+      // Preserve current role order as shown
+      g.roles.forEach(role => {
+        const row = g.rows.find(r => r.role === role);
+        newStaff.push({ owner_id: g.owner_id, role, billing_name: row?.billing_name || g.billing_name || null, billing_ord: null, notes: row?.notes || null });
+      });
+    });
+    setStaff(newStaff.map((r,i)=> ({ ...r, billing_ord: i+1 })));
+  };
+
   return (
     <div ref={containerRef}>
-      <div style={{ display: 'flex', gap: 8, alignItems: 'flex-start', flexWrap: 'wrap' }}>
-        <div style={{ position: 'relative', minWidth: 260 }}>
-          <Input
-            placeholder="Type a name to search, or enter an email"
-            value={query}
-            onChange={(e)=>{ setQuery(e.target.value); setSelOwner(""); setErr(""); setShowSuggestions(true); }}
-            onFocus={()=> setShowSuggestions(true)}
-            onBlur={()=> setTimeout(()=> setShowSuggestions(false), 120)}
-            onKeyDown={async (e)=>{
-              if (e.key === 'Enter') {
-                e.preventDefault();
-                e.stopPropagation();
-                await add();
-                setShowSuggestions(false);
-              }
-            }}
-          />
-          {query.trim() && showSuggestions && (
-            <div style={{ position: 'absolute', zIndex: 20, background: '#0f0f14', border: '1px solid rgba(255,255,255,0.2)', borderRadius: 8, marginTop: 4, width: '100%' }}>
-              {suggestions.length === 0 && !/.+@.+\..+/.test(query.trim()) && (
-                <div style={{ padding: '8px 10px', opacity: 0.7 }}>No matches</div>
-              )}
-              {suggestions.map(s => (
-                <div key={s.owner_id || s.user_id}
-                  onClick={async ()=>{
-                    // Always reflect click in the input immediately
-                    setQuery(s.display_name);
-                    setErr(""); setShowSuggestions(false);
-                    try {
-                      if (s.owner_id) {
-                        setSelOwner(s.owner_id);
-                        return;
-                      }
-                      if (s.user_id) {
-                        const oid = await resolveOwnerByUserId(s.user_id);
-                        if (oid) setSelOwner(oid);
-                        // If still no oid, leave selection empty; Add will resolve again and show an error if needed
-                      }
-                    } catch(e){ setErr(e.message || 'Failed to resolve selection'); }
-                  }}
-                  style={{ padding: '6px 10px', cursor: 'pointer', borderBottom: '1px solid rgba(255,255,255,0.08)' }}>
-                  {s.display_name} {s.kind==='group' ? '(group)' : ''}
-                </div>
-              ))}
-            </div>
-          )}
-          {err && <div style={{ color: '#ff6b6b', fontSize: 12, marginTop: 4 }}>{err}</div>}
-        </div>
-        <select value={selRole} onChange={(e) => setSelRole(e.target.value)} style={styles.select}>
-          {ROLE_KINDS.map(r => (
-            <option key={r} value={r}>{cap(r)}</option>
-          ))}
-        </select>
-        <Input placeholder="Billing name (optional)" value={billingName} onChange={(e) => setBillingName(e.target.value)} style={{ minWidth: 200 }} />
-        <Button onClick={() => add()} disabled={!selOwner && !query.trim()}>Add</Button>
-      </div>
 
       {(staff || []).length === 0 ? (
         <div style={{ opacity: 0.75, marginTop: 8 }}>No staff assigned.</div>
       ) : (
         <ul style={{ listStyle: 'none', padding: 0, marginTop: 8 }}>
-          {staff.map((r, idx) => (
-            <li key={idx}
+          {grouped.map((g, idx) => (
+            <li key={g.owner_id}
                 draggable
-                onDragStart={() => setDragIndex(idx)}
+                onDragStart={() => setGroupDragIndex(idx)}
                 onDragOver={(e) => { e.preventDefault(); }}
-                onDrop={() => {
-                  if (dragIndex === null || dragIndex === idx) return;
-                  const arr = [...(staff || [])];
-                  const [moved] = arr.splice(dragIndex, 1);
-                  arr.splice(idx, 0, moved);
-                  setDragIndex(null);
-                  setStaff(reindex(arr));
-                }}
+                onDrop={() => { reorderGroups(groupDragIndex, idx); setGroupDragIndex(null); }}
                 style={{ display: 'flex', gap: 8, alignItems: 'center', justifyContent: 'space-between', border: '1px solid rgba(255,255,255,0.1)', borderRadius: 8, padding: '6px 8px', marginBottom: 6 }}>
-              <div style={{ display: 'flex', alignItems: 'center', gap: 8, position: 'relative', width: '100%', justifyContent: 'space-between' }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 8, position: 'relative', width: '100%', justifyContent: 'space-between' }} draggable onDragStart={(e)=>{ e.dataTransfer.setData('application/x-owner', JSON.stringify({ owner_id: g.owner_id, role: (g.roles[0] || 'crew') })); }}>
                 <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
                   <span title="Drag to reorder" style={{ cursor: 'grab', opacity: 0.7 }}>↕</span>
                   <div>
-                    <div style={{ fontWeight: 600 }}>{nameFor(r.owner_id)}</div>
-                    <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginTop: 2 }}>
-                      <button
-                        type="button"
-                        onClick={() => setRoleOpenIdx(roleOpenIdx === idx ? null : idx)}
-                        style={{
-                          background: 'transparent',
-                          color: 'inherit',
-                          border: '1px solid rgba(255,255,255,0.2)',
-                          borderRadius: 999,
-                          padding: '2px 8px',
-                          fontSize: 12,
-                          cursor: 'pointer'
-                        }}
-                        aria-haspopup="listbox"
-                        aria-expanded={roleOpenIdx === idx}
+                    <div style={{ fontWeight: 600 }}>
+                      {nameFor(g.owner_id)}
+                      {g.billing_name ? <span style={{ opacity: 0.85, fontSize: 12 }}> (as {g.billing_name})</span> : null}
+                    </div>
+                    <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginTop: 2, flexWrap: 'wrap' }}>
+                      {g.roles.map(role => {
+                        const canRemove = g.roles.length > 1;
+                        return (
+                          <span key={role}
+                                onClick={()=> { if (canRemove) removeRole(g.owner_id, role); }}
+                                title={canRemove ? 'Click to remove role' : 'At least one role is required'}
+                                style={{ fontSize: 12, opacity: 0.95, border: '1px solid rgba(255,255,255,0.25)', borderRadius: 999, padding: '2px 8px', cursor: canRemove ? 'pointer' : 'default' }}>
+                            {cap(role)}
+                          </span>
+                        );
+                      })}
+                      {/* '+' to add a role */}
+                      <select
+                        value=""
+                        onChange={(e)=>{ const newRole = e.target.value; if (!newRole) return; addRoleForOwner(g.owner_id, newRole, g.billing_name); }}
+                        style={{ ...styles.selectSm, width: 40, textAlign: 'center' }}
                       >
-                        {cap(r.role)} ▾
-                      </button>
-                      {roleOpenIdx === idx && (
-                        <div style={{ position: 'absolute', zIndex: 25, top: '100%', left: 30, background: '#0f0f14', border: '1px solid rgba(255,255,255,0.2)', borderRadius: 8, marginTop: 6, minWidth: 140 }} role="listbox">
-                          {ROLE_KINDS.map(role => (
-                            <div
-                              key={role}
-                              role="option"
-                              aria-selected={r.role === role}
-                              onClick={() => { changeRoleAt(idx, role); setRoleOpenIdx(null); }}
-                              style={{ padding: '6px 10px', cursor: 'pointer', background: r.role === role ? 'rgba(255,255,255,0.08)' : 'transparent' }}
-                            >
-                              {cap(role)}
-                            </div>
-                          ))}
-                        </div>
-                      )}
-                      {r.billing_name ? <span style={{ opacity: 0.8, fontSize: 12 }}>· {r.billing_name}</span> : null}
+                        <option value="" disabled>+</option>
+                        {ROLE_KINDS.filter(role => !g.roles.includes(role)).map(role => (
+                          <option key={role} value={role}>{cap(role)}</option>
+                        ))}
+                      </select>
                     </div>
                   </div>
                 </div>
-                <GhostButton onClick={() => removeAt(idx)}>Remove</GhostButton>
+                <GhostButton onClick={() => setStaff((prev)=> (prev||[]).filter(r => r.owner_id !== g.owner_id).map((r,i)=> ({ ...r, billing_ord: i+1 })))}>Remove</GhostButton>
               </div>
             </li>
           ))}
         </ul>
       )}
+
+      {/* Subtle add UI below the roster */}
+      <div style={{ marginTop: 8, paddingLeft: 22 }}>
+        {!addingRoster ? (
+          <GhostButton onClick={()=> { setAddingRoster(true); setErr(""); }} style={{ padding: '2px 8px', fontSize: 12 }}>+ Add person</GhostButton>
+        ) : (
+          <div style={{ display: 'flex', gap: 6, alignItems: 'center', flexWrap: 'wrap' }}>
+            <div style={{ position: 'relative', minWidth: 260 }}>
+              <Input
+                placeholder="Type a name to search, or enter an email"
+                value={query}
+                onChange={(e)=>{ setQuery(e.target.value); setSelOwner(""); setErr(""); setShowSuggestions(true); }}
+                onFocus={()=> setShowSuggestions(true)}
+                onBlur={()=> setTimeout(()=> setShowSuggestions(false), 120)}
+                onKeyDown={async (e)=>{
+                  if (e.key === 'Enter') {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    await add();
+                    setShowSuggestions(false);
+                  }
+                }}
+                style={{ minWidth: 260, height: 28 }}
+              />
+              {query.trim() && showSuggestions && (
+                <div style={{ position: 'absolute', zIndex: 20, background: '#0f0f14', border: '1px solid rgba(255,255,255,0.2)', borderRadius: 8, marginTop: 4, width: '100%' }}>
+                  {suggestions.length === 0 && !/.+@.+\..+/.test(query.trim()) && (
+                    <div style={{ padding: '8px 10px', opacity: 0.7 }}>No matches</div>
+                  )}
+                  {suggestions.map(s => (
+                    <div key={s.owner_id || s.user_id}
+                      onClick={async ()=>{
+                        setQuery(s.display_name);
+                        setErr(""); setShowSuggestions(false);
+                        try {
+                          if (s.owner_id) {
+                            setSelOwner(s.owner_id);
+                            return;
+                          }
+                          if (s.user_id) {
+                            const oid = await resolveOwnerByUserId(s.user_id);
+                            if (oid) setSelOwner(oid);
+                          }
+                        } catch(e){ setErr(e.message || 'Failed to resolve selection'); }
+                      }}
+                      style={{ padding: '6px 10px', cursor: 'pointer', borderBottom: '1px solid rgba(255,255,255,0.08)' }}>
+                      {s.display_name} {s.kind==='group' ? '(group)' : ''}
+                    </div>
+                  ))}
+                </div>
+              )}
+              {err && <div style={{ color: '#ff6b6b', fontSize: 12, marginTop: 4 }}>{err}</div>}
+            </div>
+            <select value={selRole} onChange={(e) => setSelRole(e.target.value)} style={styles.selectSm}>
+              {ROLE_KINDS.map(r => (
+                <option key={r} value={r}>{cap(r)}</option>
+              ))}
+            </select>
+            <input
+              placeholder="Billing name (optional)"
+              value={billingName}
+              onChange={(e) => setBillingName(e.target.value)}
+              style={{ background: 'transparent', color: 'inherit', border: '1px solid rgba(255,255,255,0.2)', borderRadius: 6, padding: '4px 8px', fontSize: 12, minWidth: 180, height: 28 }}
+            />
+            <GhostButton onClick={async ()=>{ await add(); }} style={{ padding: '2px 8px', fontSize: 12, height: 28 }}>Add</GhostButton>
+            <GhostButton onClick={()=> { setAddingRoster(false); setSelOwner(""); setQuery(""); setBillingName(""); setErr(""); }} style={{ padding: '2px 8px', fontSize: 12, height: 28 }}>Cancel</GhostButton>
+          </div>
+        )}
+      </div>
     </div>
   );
 }

@@ -182,41 +182,341 @@ CREATE INDEX IF NOT EXISTS esi_owner_idx ON event_staff_instance(owner_id, role)
 
 -- (moved below to ensure event_attendees exists before referencing it)
 
--- =========================
--- SLOT-LEVEL STAFF (ops only)
--- =========================
--- OPTIONAL SLOTS TABLE (lightweight placeholder)
--- Some features reference a generic "slots" resource. Provide a minimal table so
--- foreign keys from event_attendees.slot_id and slot_staff.slot_id can resolve.
-CREATE TABLE IF NOT EXISTS slots (
-  id         uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-  owner_id   uuid REFERENCES owners(id) ON DELETE CASCADE,
-  name       text,
-  info       jsonb NOT NULL DEFAULT '{}'::jsonb,
-  created_at timestamptz NOT NULL DEFAULT now(),
-  updated_at timestamptz NOT NULL DEFAULT now()
+-- EVENT SLOTS (canonical, event-scoped)
+-- A slot belongs to a series (recurrence_id NULL) or a specific occurrence.
+CREATE TABLE IF NOT EXISTS event_slots (
+  id            uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  event_id      uuid NOT NULL REFERENCES events(id) ON DELETE CASCADE,
+  recurrence_id timestamptz, -- NULL => series-level
+  name          text,
+  info          jsonb NOT NULL DEFAULT '{}'::jsonb,
+  offset_sec    int NOT NULL DEFAULT 0,   -- seconds from event start
+  duration_sec  int NOT NULL DEFAULT 0,   -- seconds duration (0 means unspecified)
+  ord           int,
+  created_at    timestamptz NOT NULL DEFAULT now(),
+  updated_at    timestamptz NOT NULL DEFAULT now()
 );
+CREATE INDEX IF NOT EXISTS idx_event_slots_scope ON event_slots(event_id, recurrence_id, ord);
 do $$ begin
-  create trigger trg_slots_touch
-  before update on slots
+  create trigger trg_event_slots_touch
+  before update on event_slots
   for each row execute function _touch_updated_at();
 exception when duplicate_object then null; end $$;
 
--- Uses role_kind (e.g., 'crew','host') but does NOT gate invites.
-CREATE TABLE IF NOT EXISTS slot_staff (
-  slot_id uuid NOT NULL REFERENCES slots(id) ON DELETE CASCADE,
-  owner_id uuid NOT NULL REFERENCES owners(id) ON DELETE CASCADE,
-  role    role_kind NOT NULL DEFAULT 'crew',
-  notes   text,
-  PRIMARY KEY (slot_id, owner_id, role)
+-- Migration-safe shims: if this table was created in an earlier form with slot_id, add the new columns
+do $$ begin
+  if exists (
+    select 1 from information_schema.columns
+    where table_schema='public' and table_name='event_slots' and column_name='slot_id'
+  ) then
+    -- Add projected columns if missing
+    begin alter table event_slots add column if not exists name text; exception when duplicate_column then null; end;
+    begin alter table event_slots add column if not exists info jsonb not null default '{}'::jsonb; exception when duplicate_column then null; end;
+  end if;
+  -- Add offset/duration columns if missing
+  begin alter table event_slots add column if not exists offset_sec int not null default 0; exception when duplicate_column then null; end;
+  begin alter table event_slots add column if not exists duration_sec int not null default 0; exception when duplicate_column then null; end;
+exception when undefined_table then null; end $$;
+
+-- Slot-level staff for an event slot (does NOT gate invites)
+CREATE TABLE IF NOT EXISTS event_slot_staff (
+  event_slot_id uuid NOT NULL REFERENCES event_slots(id) ON DELETE CASCADE,
+  owner_id      uuid NOT NULL REFERENCES owners(id) ON DELETE CASCADE,
+  role          role_kind NOT NULL DEFAULT 'crew',
+  notes         text,
+  PRIMARY KEY (event_slot_id, owner_id, role)
 );
-CREATE INDEX IF NOT EXISTS idx_slot_staff_slot_role  ON slot_staff(slot_id, role);
-CREATE INDEX IF NOT EXISTS idx_slot_staff_owner_role ON slot_staff(owner_id, role);
+CREATE INDEX IF NOT EXISTS idx_event_slot_staff_slot_role  ON event_slot_staff(event_slot_id, role);
+CREATE INDEX IF NOT EXISTS idx_event_slot_staff_owner_role ON event_slot_staff(owner_id, role);
 
 -- Helper view: owners present on a slot (role-agnostic)
 CREATE OR REPLACE VIEW v_slot_owners AS
-SELECT DISTINCT slot_id, owner_id
-FROM slot_staff;
+SELECT DISTINCT event_slot_id AS slot_id, owner_id
+FROM event_slot_staff;
+
+-- NOTE: canonical definition moved above; see EVENT SLOTS section.
+
+-- List series-level slots for an event
+drop function if exists get_event_slots_series(p_event_id uuid);
+create or replace function get_event_slots_series(p_event_id uuid)
+returns table(slot_id uuid, name text, info jsonb, ord int, offset_sec int, duration_sec int)
+language sql stable security definer set search_path = public as $$
+  select es.id as slot_id, es.name, es.info, es.ord as ord, es.offset_sec, es.duration_sec
+  from event_slots es
+  join events e on e.id = es.event_id
+  where es.event_id = p_event_id and es.recurrence_id is null
+    and can_read_calendar(e.calendar_id)
+  order by coalesce(es.ord, 999999), es.name nulls last;
+$$;
+grant execute on function get_event_slots_series(uuid) to authenticated;
+
+-- List instance-level slots for an event occurrence (does not implicitly include series slots)
+drop function if exists get_event_slots_instance(p_event_id uuid, p_recurrence_id timestamptz);
+create or replace function get_event_slots_instance(p_event_id uuid, p_recurrence_id timestamptz)
+returns table(slot_id uuid, name text, info jsonb, ord int, offset_sec int, duration_sec int)
+language sql stable security definer set search_path = public as $$
+  select es.id as slot_id, es.name, es.info, es.ord as ord, es.offset_sec, es.duration_sec
+  from event_slots es
+  join events e on e.id = es.event_id
+  where es.event_id = p_event_id and es.recurrence_id = p_recurrence_id
+    and can_read_calendar(e.calendar_id)
+  order by coalesce(es.ord, 999999), es.name nulls last;
+$$;
+grant execute on function get_event_slots_instance(uuid, timestamptz) to authenticated;
+
+-- Add a slot to a series scope; creates slots row and links to event
+drop function if exists add_event_slot_series(p_event_id uuid, p_name text, p_info jsonb, p_offset_sec int, p_duration_sec int);
+create or replace function add_event_slot_series(p_event_id uuid, p_name text, p_info jsonb, p_offset_sec int, p_duration_sec int)
+returns table(slot_id uuid, name text, info jsonb, ord int, offset_sec int, duration_sec int)
+language plpgsql security definer set search_path = public as $$
+declare v_cal uuid; v_ord int; v_id uuid;
+begin
+  select calendar_id into v_cal from events where id = p_event_id;
+  if v_cal is null then raise exception 'not found' using errcode = 'P0002'; end if;
+  if not can_write_calendar(v_cal) then raise exception 'not allowed' using errcode = '42501'; end if;
+
+  -- Qualify ord to avoid ambiguity in some planner contexts
+  select coalesce(max(es.ord),0)+1 into v_ord
+  from event_slots es
+  where es.event_id = p_event_id and es.recurrence_id is null;
+  insert into event_slots(event_id, recurrence_id, name, info, offset_sec, duration_sec, ord)
+  values (p_event_id, null, nullif(p_name,''), coalesce(p_info, '{}'::jsonb), coalesce(p_offset_sec,0), coalesce(p_duration_sec,0), v_ord)
+  returning id into v_id;
+
+  return query select es.id as slot_id, es.name, es.info, es.ord as ord, es.offset_sec, es.duration_sec from event_slots es where es.id = v_id;
+end $$;
+grant execute on function add_event_slot_series(uuid, text, jsonb, int, int) to authenticated;
+
+-- Add a slot to an occurrence scope
+drop function if exists add_event_slot_instance(p_event_id uuid, p_recurrence_id timestamptz, p_name text, p_info jsonb, p_offset_sec int, p_duration_sec int);
+create or replace function add_event_slot_instance(p_event_id uuid, p_recurrence_id timestamptz, p_name text, p_info jsonb, p_offset_sec int, p_duration_sec int)
+returns table(slot_id uuid, name text, info jsonb, ord int, offset_sec int, duration_sec int)
+language plpgsql security definer set search_path = public as $$
+declare v_cal uuid; v_ord int; v_id uuid;
+begin
+  select calendar_id into v_cal from events where id = p_event_id;
+  if v_cal is null then raise exception 'not found' using errcode = 'P0002'; end if;
+  if not can_write_calendar(v_cal) then raise exception 'not allowed' using errcode = '42501'; end if;
+
+  -- Qualify ord to avoid ambiguity in some planner contexts
+  select coalesce(max(es.ord),0)+1 into v_ord
+  from event_slots es
+  where es.event_id = p_event_id and es.recurrence_id = p_recurrence_id;
+  insert into event_slots(event_id, recurrence_id, name, info, offset_sec, duration_sec, ord)
+  values (p_event_id, p_recurrence_id, nullif(p_name,''), coalesce(p_info, '{}'::jsonb), coalesce(p_offset_sec,0), coalesce(p_duration_sec,0), v_ord)
+  returning id into v_id;
+
+  return query select es.id as slot_id, es.name, es.info, es.ord as ord, es.offset_sec, es.duration_sec from event_slots es where es.id = v_id;
+end $$;
+grant execute on function add_event_slot_instance(uuid, timestamptz, text, jsonb, int, int) to authenticated;
+
+-- Remove a slot from series scope (does not delete the slot resource itself)
+drop function if exists remove_event_slot_series(p_event_id uuid, p_slot_id uuid);
+create or replace function remove_event_slot_series(p_event_id uuid, p_slot_id uuid)
+returns void language plpgsql security definer set search_path = public as $$
+declare v_cal uuid;
+begin
+  select calendar_id into v_cal from events where id = p_event_id;
+  if v_cal is null then return; end if;
+  if not can_write_calendar(v_cal) then raise exception 'not allowed' using errcode = '42501'; end if;
+  delete from event_slots where event_id = p_event_id and recurrence_id is null and id = p_slot_id;
+end $$;
+grant execute on function remove_event_slot_series(uuid, uuid) to authenticated;
+
+-- Remove a slot from occurrence scope
+drop function if exists remove_event_slot_instance(p_event_id uuid, p_recurrence_id timestamptz, p_slot_id uuid);
+create or replace function remove_event_slot_instance(p_event_id uuid, p_recurrence_id timestamptz, p_slot_id uuid)
+returns void language plpgsql security definer set search_path = public as $$
+declare v_cal uuid;
+begin
+  select calendar_id into v_cal from events where id = p_event_id;
+  if v_cal is null then return; end if;
+  if not can_write_calendar(v_cal) then raise exception 'not allowed' using errcode = '42501'; end if;
+  delete from event_slots where event_id = p_event_id and recurrence_id = p_recurrence_id and id = p_slot_id;
+end $$;
+grant execute on function remove_event_slot_instance(uuid, timestamptz, uuid) to authenticated;
+
+-- Reorder slots for series scope according to provided list
+drop function if exists reorder_event_slots_series(p_event_id uuid, p_slot_ids uuid[]);
+create or replace function reorder_event_slots_series(p_event_id uuid, p_slot_ids uuid[])
+returns void language plpgsql security definer set search_path = public as $$
+declare v_cal uuid; i int := 1; sid uuid;
+begin
+  select calendar_id into v_cal from events where id = p_event_id;
+  if v_cal is null then return; end if;
+  if not can_write_calendar(v_cal) then raise exception 'not allowed' using errcode = '42501'; end if;
+  foreach sid in array coalesce(p_slot_ids, '{}'::uuid[]) loop
+    update event_slots es set ord = i, updated_at = now()
+    where es.event_id = p_event_id and es.recurrence_id is null and es.id = sid;
+    i := i + 1;
+  end loop;
+end $$;
+grant execute on function reorder_event_slots_series(uuid, uuid[]) to authenticated;
+
+-- Reorder slots for occurrence scope
+drop function if exists reorder_event_slots_instance(p_event_id uuid, p_recurrence_id timestamptz, p_slot_ids uuid[]);
+create or replace function reorder_event_slots_instance(p_event_id uuid, p_recurrence_id timestamptz, p_slot_ids uuid[])
+returns void language plpgsql security definer set search_path = public as $$
+declare v_cal uuid; i int := 1; sid uuid;
+begin
+  select calendar_id into v_cal from events where id = p_event_id;
+  if v_cal is null then return; end if;
+  if not can_write_calendar(v_cal) then raise exception 'not allowed' using errcode = '42501'; end if;
+  foreach sid in array coalesce(p_slot_ids, '{}'::uuid[]) loop
+    update event_slots es set ord = i, updated_at = now()
+    where es.event_id = p_event_id and es.recurrence_id = p_recurrence_id and es.id = sid;
+    i := i + 1;
+  end loop;
+end $$;
+grant execute on function reorder_event_slots_instance(uuid, timestamptz, uuid[]) to authenticated;
+
+-- Replace all series-level slots in one go (commit on save)
+drop function if exists set_event_slots_series(p_event_id uuid, p_slots jsonb);
+create or replace function set_event_slots_series(p_event_id uuid, p_slots jsonb)
+returns table(slot_id uuid, name text, info jsonb, ord int, offset_sec int, duration_sec int)
+language plpgsql security definer set search_path = public as $$
+declare v_cal uuid;
+begin
+  select calendar_id into v_cal from events where id = p_event_id;
+  if v_cal is null then raise exception 'not found' using errcode = 'P0002'; end if;
+  if not can_write_calendar(v_cal) then raise exception 'not allowed' using errcode = '42501'; end if;
+
+  -- Clear existing series-level slots
+  delete from event_slots where event_id = p_event_id and recurrence_id is null;
+
+  -- Insert new slots preserving provided order (1-based), then attach staff to each slot
+  with j as (
+    select value as slot, idx::int as row_idx
+    from jsonb_array_elements(coalesce(p_slots, '[]'::jsonb)) with ordinality as t(value, idx)
+  ), ins as (
+    insert into event_slots as es (event_id, recurrence_id, name, info, offset_sec, duration_sec, ord)
+    select p_event_id,
+           null,
+           nullif(j.slot->>'name',''),
+           coalesce(j.slot->'info','{}'::jsonb),
+           greatest(0, coalesce((j.slot->>'offset_sec')::int, 0)),
+           greatest(0, coalesce((j.slot->>'duration_sec')::int, 0)),
+           j.row_idx
+    from j
+    returning es.id, es.ord as row_idx
+  )
+  insert into event_slot_staff (event_slot_id, owner_id, role, notes)
+  select ins.id,
+         (s.staff->>'owner_id')::uuid,
+         coalesce(nullif(s.staff->>'role',''), 'crew')::role_kind,
+         nullif(s.staff->>'notes','')
+  from j
+  join ins on ins.row_idx = j.row_idx
+  join lateral jsonb_array_elements(coalesce(j.slot->'staff','[]'::jsonb)) as s(staff) on true;
+
+  return query
+  select es.id as slot_id, es.name, es.info, es.ord as ord, es.offset_sec, es.duration_sec
+  from event_slots es
+  where es.event_id = p_event_id and es.recurrence_id is null
+  order by coalesce(es.ord, 999999), es.name nulls last;
+end $$;
+grant execute on function set_event_slots_series(uuid, jsonb) to authenticated;
+
+-- Replace all instance-level slots for a specific occurrence
+drop function if exists set_event_slots_instance(p_event_id uuid, p_recurrence_id timestamptz, p_slots jsonb);
+create or replace function set_event_slots_instance(p_event_id uuid, p_recurrence_id timestamptz, p_slots jsonb)
+returns table(slot_id uuid, name text, info jsonb, ord int, offset_sec int, duration_sec int)
+language plpgsql security definer set search_path = public as $$
+declare v_cal uuid;
+begin
+  select calendar_id into v_cal from events where id = p_event_id;
+  if v_cal is null then raise exception 'not found' using errcode = 'P0002'; end if;
+  if not can_write_calendar(v_cal) then raise exception 'not allowed' using errcode = '42501'; end if;
+
+  delete from event_slots where event_id = p_event_id and recurrence_id = p_recurrence_id;
+
+  with j as (
+    select value as slot, idx::int as row_idx
+    from jsonb_array_elements(coalesce(p_slots, '[]'::jsonb)) with ordinality as t(value, idx)
+  ), ins as (
+    insert into event_slots as es (event_id, recurrence_id, name, info, offset_sec, duration_sec, ord)
+    select p_event_id,
+           p_recurrence_id,
+           nullif(j.slot->>'name',''),
+           coalesce(j.slot->'info','{}'::jsonb),
+           greatest(0, coalesce((j.slot->>'offset_sec')::int, 0)),
+           greatest(0, coalesce((j.slot->>'duration_sec')::int, 0)),
+           j.row_idx
+    from j
+    returning es.id, es.ord as row_idx
+  )
+  insert into event_slot_staff (event_slot_id, owner_id, role, notes)
+  select ins.id,
+         (s.staff->>'owner_id')::uuid,
+         coalesce(nullif(s.staff->>'role',''), 'crew')::role_kind,
+         nullif(s.staff->>'notes','')
+  from j
+  join ins on ins.row_idx = j.row_idx
+  join lateral jsonb_array_elements(coalesce(j.slot->'staff','[]'::jsonb)) as s(staff) on true;
+
+  return query
+  select es.id as slot_id, es.name, es.info, es.ord as ord, es.offset_sec, es.duration_sec
+  from event_slots es
+  where es.event_id = p_event_id and es.recurrence_id = p_recurrence_id
+  order by coalesce(es.ord, 999999), es.name nulls last;
+end $$;
+grant execute on function set_event_slots_instance(uuid, timestamptz, jsonb) to authenticated;
+
+-- Read slots with aggregated staff (series scope)
+drop function if exists get_event_slots_series_with_staff(p_event_id uuid);
+create or replace function get_event_slots_series_with_staff(p_event_id uuid)
+returns table(slot_id uuid, name text, info jsonb, ord int, offset_sec int, duration_sec int, staff jsonb)
+language sql stable security definer set search_path = public as $$
+  select es.id as slot_id,
+         es.name,
+         es.info,
+         es.ord as ord,
+         es.offset_sec,
+         es.duration_sec,
+         (
+           select coalesce(jsonb_agg(jsonb_build_object(
+             'owner_id', ess.owner_id,
+             'role', ess.role,
+             'notes', ess.notes
+           ) order by ess.owner_id), '[]'::jsonb)
+           from event_slot_staff ess
+           where ess.event_slot_id = es.id
+         ) as staff
+  from event_slots es
+  join events e on e.id = es.event_id
+  where es.event_id = p_event_id and es.recurrence_id is null
+    and can_read_calendar(e.calendar_id)
+  order by coalesce(es.ord, 999999), es.name nulls last;
+$$;
+grant execute on function get_event_slots_series_with_staff(uuid) to authenticated;
+
+-- Read slots with aggregated staff (instance scope)
+drop function if exists get_event_slots_instance_with_staff(p_event_id uuid, p_recurrence_id timestamptz);
+create or replace function get_event_slots_instance_with_staff(p_event_id uuid, p_recurrence_id timestamptz)
+returns table(slot_id uuid, name text, info jsonb, ord int, offset_sec int, duration_sec int, staff jsonb)
+language sql stable security definer set search_path = public as $$
+  select es.id as slot_id,
+         es.name,
+         es.info,
+         es.ord as ord,
+         es.offset_sec,
+         es.duration_sec,
+         (
+           select coalesce(jsonb_agg(jsonb_build_object(
+             'owner_id', ess.owner_id,
+             'role', ess.role,
+             'notes', ess.notes
+           ) order by ess.owner_id), '[]'::jsonb)
+           from event_slot_staff ess
+           where ess.event_slot_id = es.id
+         ) as staff
+  from event_slots es
+  join events e on e.id = es.event_id
+  where es.event_id = p_event_id and es.recurrence_id = p_recurrence_id
+    and can_read_calendar(e.calendar_id)
+  order by coalesce(es.ord, 999999), es.name nulls last;
+$$;
+grant execute on function get_event_slots_instance_with_staff(uuid, timestamptz) to authenticated;
 
 -- =========================
 -- ATTENDEES
@@ -229,7 +529,7 @@ CREATE TABLE IF NOT EXISTS event_attendees (
   id                 uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   event_id           uuid NOT NULL REFERENCES events(id) ON DELETE CASCADE,
   override_id        uuid REFERENCES event_overrides(id) ON DELETE CASCADE,  -- NULL => series-level
-  slot_id            uuid REFERENCES slots(id),                               -- alternative slot scope
+  event_slot_id      uuid REFERENCES event_slots(id),                         -- alternative slot scope
 
   -- Canonical identity for attendee (internal owner or external email)
   owner_id           uuid REFERENCES owners(id),
@@ -257,14 +557,39 @@ CREATE TABLE IF NOT EXISTS event_attendees (
 
   -- Either slot-scoped OR (event/override)-scoped
   CONSTRAINT attendees_scope_ck CHECK (
-    (slot_id IS NOT NULL AND override_id IS NULL)
+    (event_slot_id IS NOT NULL AND override_id IS NULL)
     OR
-    (slot_id IS NULL)
+    (event_slot_id IS NULL)
   ),
 
   -- Require at least one identity
   CONSTRAINT attendees_identity_ck CHECK (owner_id IS NOT NULL OR email IS NOT NULL)
 );
+
+-- Migration-safe shim: if old column slot_id exists, rename to event_slot_id
+do $$ begin
+  if exists (
+    select 1 from information_schema.columns
+    where table_schema = 'public' and table_name = 'event_attendees' and column_name = 'slot_id'
+  ) and not exists (
+    select 1 from information_schema.columns
+    where table_schema = 'public' and table_name = 'event_attendees' and column_name = 'event_slot_id'
+  ) then
+    alter table event_attendees rename column slot_id to event_slot_id;
+  end if;
+exception when undefined_table then null; end $$;
+
+-- Recreate scope check to reference event_slot_id (drop if exists then add)
+do $$ begin
+  begin
+    alter table event_attendees drop constraint if exists attendees_scope_ck;
+  exception when undefined_table then null; end;
+  begin
+    alter table event_attendees add constraint attendees_scope_ck check (
+      (event_slot_id IS NOT NULL AND override_id IS NULL) OR (event_slot_id IS NULL)
+    );
+  exception when duplicate_object then null; end;
+end $$;
 
 CREATE INDEX IF NOT EXISTS idx_attendees_event    ON event_attendees (event_id);
 CREATE INDEX IF NOT EXISTS idx_attendees_override ON event_attendees (override_id);
@@ -272,15 +597,26 @@ CREATE INDEX IF NOT EXISTS idx_attendees_owner    ON event_attendees (owner_id);
 CREATE INDEX IF NOT EXISTS idx_attendees_email    ON event_attendees (email);
 
 -- Unique per (scope, identity). Treat NULL override_id as equal across rows.
-CREATE UNIQUE INDEX IF NOT EXISTS uq_attendees_scope_owner ON event_attendees (
-  COALESCE(slot_id,     '00000000-0000-0000-0000-000000000000'::uuid),
-  COALESCE(override_id, '00000000-0000-0000-0000-000000000000'::uuid),
-  COALESCE(owner_id,    '00000000-0000-0000-0000-000000000000'::uuid)
+-- Drop and recreate to ensure definition matches new column
+do $$ begin
+  begin
+    drop index if exists uq_attendees_scope_owner;
+  exception when undefined_object then null; end;
+end $$;
+CREATE UNIQUE INDEX uq_attendees_scope_owner ON event_attendees (
+  COALESCE(event_slot_id, '00000000-0000-0000-0000-000000000000'::uuid),
+  COALESCE(override_id,   '00000000-0000-0000-0000-000000000000'::uuid),
+  COALESCE(owner_id,      '00000000-0000-0000-0000-000000000000'::uuid)
 ) WHERE owner_id IS NOT NULL;
 
-CREATE UNIQUE INDEX IF NOT EXISTS uq_attendees_scope_email ON event_attendees (
-  COALESCE(slot_id,     '00000000-0000-0000-0000-000000000000'::uuid),
-  COALESCE(override_id, '00000000-0000-0000-0000-000000000000'::uuid),
+do $$ begin
+  begin
+    drop index if exists uq_attendees_scope_email;
+  exception when undefined_object then null; end;
+end $$;
+CREATE UNIQUE INDEX uq_attendees_scope_email ON event_attendees (
+  COALESCE(event_slot_id, '00000000-0000-0000-0000-000000000000'::uuid),
+  COALESCE(override_id,   '00000000-0000-0000-0000-000000000000'::uuid),
   lower(email)
 ) WHERE owner_id IS NULL AND email IS NOT NULL;
 
@@ -386,12 +722,12 @@ BEGIN
   RETURN NEW;
 END $$;
 
--- (B2) For series-scoped rows (override_id NULL & slot_id NULL): member_of ⊆ series defaults.
+-- (B2) For series-scoped rows (override_id NULL & event_slot_id NULL): member_of ⊆ series defaults.
 CREATE OR REPLACE FUNCTION _chk_member_of_series_staff()
 RETURNS trigger LANGUAGE plpgsql AS $$
 DECLARE missing uuid[];
 BEGIN
-  IF NEW.override_id IS NOT NULL OR NEW.slot_id IS NOT NULL
+  IF NEW.override_id IS NOT NULL OR NEW.event_slot_id IS NOT NULL
      OR NEW.member_of_owner_ids IS NULL OR array_length(NEW.member_of_owner_ids,1) IS NULL THEN
     RETURN NEW;
   END IF;
@@ -417,14 +753,14 @@ CREATE OR REPLACE FUNCTION _chk_member_of_slot_staff()
 RETURNS trigger LANGUAGE plpgsql AS $$
 DECLARE missing uuid[];
 BEGIN
-  IF NEW.slot_id IS NULL OR NEW.member_of_owner_ids IS NULL OR array_length(NEW.member_of_owner_ids,1) IS NULL THEN
+  IF NEW.event_slot_id IS NULL OR NEW.member_of_owner_ids IS NULL OR array_length(NEW.member_of_owner_ids,1) IS NULL THEN
     RETURN NEW;
   END IF;
 
   SELECT COALESCE(array_agg(z.owner_id), '{}'::uuid[])
     INTO missing
   FROM unnest(NEW.member_of_owner_ids) AS z(owner_id)
-  LEFT JOIN v_slot_owners so ON so.slot_id = NEW.slot_id AND so.owner_id = z.owner_id
+  LEFT JOIN v_slot_owners so ON so.slot_id = NEW.event_slot_id AND so.owner_id = z.owner_id
   WHERE so.owner_id IS NULL;
 
   IF array_length(missing,1) IS NOT NULL THEN

@@ -253,6 +253,96 @@ export async function resolveOwnerByUserId(userId) {
   return data ?? null;
 }
 
+/* ------------------------------ Event slots API ---------------------------- */
+export async function listEventSlotsSeries(eventId) {
+  const { data, error } = await supabase.rpc('get_event_slots_series_with_staff', { p_event_id: eventId });
+  if (error) throw new Error(error.message);
+  return data || [];
+}
+
+export async function listEventSlotsInstance(eventId, recurrenceIdIso) {
+  const { data, error } = await supabase.rpc('get_event_slots_instance_with_staff', { p_event_id: eventId, p_recurrence_id: recurrenceIdIso });
+  if (error) throw new Error(error.message);
+  return data || [];
+}
+
+export async function addEventSlotSeries(eventId, name, offsetMinutes = 0, durationMinutes = 30, info = {}) {
+  const { data, error } = await supabase.rpc('add_event_slot_series', {
+    p_event_id: eventId,
+    p_name: name,
+    p_info: info,
+    p_offset_sec: Math.max(0, Math.round(offsetMinutes * 60)),
+    p_duration_sec: Math.max(0, Math.round(durationMinutes * 60)),
+  });
+  if (error) throw new Error(error.message || 'Add slot failed');
+  const row = Array.isArray(data) ? data?.[0] : data;
+  if (!row || !row.slot_id) throw new Error('Add slot failed (no row returned)');
+  return row;
+}
+
+export async function addEventSlotInstance(eventId, recurrenceIdIso, name, offsetMinutes = 0, durationMinutes = 30, info = {}) {
+  const { data, error } = await supabase.rpc('add_event_slot_instance', {
+    p_event_id: eventId,
+    p_recurrence_id: recurrenceIdIso,
+    p_name: name,
+    p_info: info,
+    p_offset_sec: Math.max(0, Math.round(offsetMinutes * 60)),
+    p_duration_sec: Math.max(0, Math.round(durationMinutes * 60)),
+  });
+  if (error) throw new Error(error.message || 'Add slot failed');
+  const row = Array.isArray(data) ? data?.[0] : data;
+  if (!row || !row.slot_id) throw new Error('Add slot failed (no row returned)');
+  return row;
+}
+
+export async function removeEventSlotSeries(eventId, slotId) {
+  const { error } = await supabase.rpc('remove_event_slot_series', { p_event_id: eventId, p_slot_id: slotId });
+  if (error) throw new Error(error.message);
+}
+
+export async function removeEventSlotInstance(eventId, recurrenceIdIso, slotId) {
+  const { error } = await supabase.rpc('remove_event_slot_instance', { p_event_id: eventId, p_recurrence_id: recurrenceIdIso, p_slot_id: slotId });
+  if (error) throw new Error(error.message);
+}
+
+export async function reorderEventSlotsSeries(eventId, slotIds) {
+  const { error } = await supabase.rpc('reorder_event_slots_series', { p_event_id: eventId, p_slot_ids: slotIds });
+  if (error) throw new Error(error.message);
+}
+
+export async function reorderEventSlotsInstance(eventId, recurrenceIdIso, slotIds) {
+  const { error } = await supabase.rpc('reorder_event_slots_instance', { p_event_id: eventId, p_recurrence_id: recurrenceIdIso, p_slot_ids: slotIds });
+  if (error) throw new Error(error.message);
+}
+
+// Commit slots only on Save: replace all slots for series
+export async function setEventSlotsSeries(eventId, slots) {
+  const payload = Array.isArray(slots) ? slots.map(s => ({
+    name: s.name || null,
+    info: s.info || {},
+    offset_sec: Math.max(0, Number(s.offset_sec) || 0),
+    duration_sec: Math.max(0, Number(s.duration_sec) || 0),
+    staff: Array.isArray(s.staff) ? s.staff : [],
+  })) : [];
+  const { data, error } = await supabase.rpc('set_event_slots_series', { p_event_id: eventId, p_slots: payload });
+  if (error) throw new Error(error.message || 'Failed to save slots');
+  return data || [];
+}
+
+// Commit slots only on Save: replace all slots for an occurrence
+export async function setEventSlotsInstance(eventId, recurrenceIdIso, slots) {
+  const payload = Array.isArray(slots) ? slots.map(s => ({
+    name: s.name || null,
+    info: s.info || {},
+    offset_sec: Math.max(0, Number(s.offset_sec) || 0),
+    duration_sec: Math.max(0, Number(s.duration_sec) || 0),
+    staff: Array.isArray(s.staff) ? s.staff : [],
+  })) : [];
+  const { data, error } = await supabase.rpc('set_event_slots_instance', { p_event_id: eventId, p_recurrence_id: recurrenceIdIso, p_slots: payload });
+  if (error) throw new Error(error.message || 'Failed to save slots');
+  return data || [];
+}
+
 /* ----------------------------- Team calendar API --------------------------- */
 /** Base events (series). */
 export async function fetchTeamEvents(teamId) {
