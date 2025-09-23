@@ -343,6 +343,7 @@ export default function CalendarPanel({ team }) {
 
   /* ------------------------------ Edit Series ------------------------------ */
   const [sEd, setSEd] = useState(null);
+  const [sTab, setSTab] = useState('schedule'); // 'schedule' | 'production'
   const [sEndTouched, setSEndTouched] = useState(false);
   const [sRecurrenceMode, setSRecurrenceMode] = useState("none"); // 'none'|'until'|'count'
   const [seriesStaff, setSeriesStaff] = useState([]);
@@ -428,6 +429,7 @@ export default function CalendarPanel({ team }) {
     });
     setSEndTouched(false);
     setSRecurrenceMode(mode);
+    setSTab('schedule');
     setBanner(""); setBannerErr("");
     setMode("editSeries");
     // Load staff + candidates for this group/event
@@ -500,12 +502,32 @@ export default function CalendarPanel({ team }) {
     });
   }, [sEd, sRecurrenceMode, sUntilEstimate]);
 
+  // Last slot end (series) vs user end entry
+  const sLastSlotEndIso = useMemo(() => {
+    if (!sEd || !Array.isArray(seriesSlots) || seriesSlots.length === 0) return null;
+    if (!sEd._s?.date || !sEd._s?.time) return null;
+    const startIso = combineLocal(sEd._s.date, sEd._s.time);
+    const maxSec = Math.max(0, ...seriesSlots.map(s => Math.max(0, Number(s.offset_sec)||0) + Math.max(0, Number(s.duration_sec)||0)));
+    return new Date(new Date(startIso).getTime() + maxSec*1000).toISOString();
+  }, [seriesSlots, sEd?._s?.date, sEd?._s?.time]);
+  const sEndUserIso = useMemo(() => {
+    if (!sEd || !sEd._e?.time) return null;
+    const endDate = sEd._e?.date || sEd._s?.date;
+    if (!endDate) return null;
+    return combineLocal(endDate, sEd._e.time);
+  }, [sEd]);
+  const sEndBeforeSlots = useMemo(() => {
+    if (!sLastSlotEndIso || !sEndUserIso) return false;
+    return new Date(sEndUserIso) < new Date(sLastSlotEndIso);
+  }, [sLastSlotEndIso, sEndUserIso]);
+
   const canSaveSeries = useMemo(() => {
     if (!sEd) return false;
     if (sTimeErrors.length) return false;
     if (sRecurrenceMode !== "none" && sRecurrenceErrors.length) return false;
+    if (sEndBeforeSlots) return false;
     return true;
-  }, [sEd, sTimeErrors, sRecurrenceMode, sRecurrenceErrors]);
+  }, [sEd, sTimeErrors, sRecurrenceMode, sRecurrenceErrors, sEndBeforeSlots]);
 
   const saveEditSeries = async () => {
     if (!canSaveSeries || !sEd) return;
@@ -630,6 +652,7 @@ export default function CalendarPanel({ team }) {
 
   /* ----------------------------- Edit Occurrence ---------------------------- */
   const [oEd, setOEd] = useState(null);
+  const [oTab, setOTab] = useState('schedule'); // 'schedule' | 'production'
   const [instanceStaff, setInstanceStaff] = useState([]);
   const [instanceStaffSeed, setInstanceStaffSeed] = useState(null); // for change detection
   const [instanceSeedFromDefaults, setInstanceSeedFromDefaults] = useState(false);
@@ -652,6 +675,7 @@ export default function CalendarPanel({ team }) {
     });
     setBanner(""); setBannerErr("");
     setMode("editOcc");
+    setOTab('schedule');
     // Load instance-level staff rows; if none, seed from series defaults
     (async()=>{
       try {
@@ -710,7 +734,25 @@ export default function CalendarPanel({ team }) {
     if (!oEd) return [];
     return validateTimes({ title: oEd.title, startDate: oEd._sDate, startTime: oEd._sTime, endDate: oEd._eDate, endTime: oEd._eTime });
   }, [oEd]);
-  const canSaveOccurrence = useMemo(() => !oEd ? false : oTimeErrors.length === 0, [oEd, oTimeErrors]);
+  // Last slot end vs user end (occurrence)
+  const oLastSlotEndIso = useMemo(() => {
+    if (!oEd || !Array.isArray(instanceSlots) || instanceSlots.length === 0) return null;
+    if (!oEd._sDate || !oEd._sTime) return null;
+    const startIso = combineLocal(oEd._sDate, oEd._sTime);
+    const maxSec = Math.max(0, ...instanceSlots.map(s => Math.max(0, Number(s.offset_sec)||0) + Math.max(0, Number(s.duration_sec)||0)));
+    return new Date(new Date(startIso).getTime() + maxSec*1000).toISOString();
+  }, [instanceSlots, oEd?._sDate, oEd?._sTime]);
+  const oEndUserIso = useMemo(() => {
+    if (!oEd || !oEd._eTime) return null;
+    const endDate = oEd._eDate || oEd._sDate;
+    if (!endDate) return null;
+    return combineLocal(endDate, oEd._eTime);
+  }, [oEd]);
+  const oEndBeforeSlots = useMemo(() => {
+    if (!oLastSlotEndIso || !oEndUserIso) return false;
+    return new Date(oEndUserIso) < new Date(oLastSlotEndIso);
+  }, [oLastSlotEndIso, oEndUserIso]);
+  const canSaveOccurrence = useMemo(() => !oEd ? false : (oTimeErrors.length === 0 && !oEndBeforeSlots), [oEd, oTimeErrors, oEndBeforeSlots]);
 
   const saveEditOccurrence = async () => {
     if (!canSaveOccurrence || !oEd) return;
@@ -965,7 +1007,14 @@ export default function CalendarPanel({ team }) {
               : 'Editing series defaults for a recurring event. Changes here apply by default to all occurrences; individual occurrences may have overrides.'}
           </InfoText>
 
-          {/* Switch: No recurrence / Until / Count */}
+          {/* Tabs */}
+          <Row>
+            <GhostButton onClick={()=>setSTab('schedule')} style={{ padding: '4px 8px', fontWeight: sTab==='schedule'?600:400, textDecoration: sTab==='schedule'?'underline':'none' }}>Scheduling</GhostButton>
+            <GhostButton onClick={()=>setSTab('production')} style={{ padding: '4px 8px', fontWeight: sTab==='production'?600:400, textDecoration: sTab==='production'?'underline':'none' }}>Production</GhostButton>
+          </Row>
+
+          {/* Switch: No recurrence / Until / Count (Scheduling tab) */}
+          {sTab==='schedule' && (
           <Row>
             <label style={{ display:"inline-flex", gap:8, alignItems:"center" }}>
               <input type="radio" name="s_recmod" checked={sRecurrenceMode==="none"} onChange={()=>setSRecurrenceMode("none")} />
@@ -980,45 +1029,51 @@ export default function CalendarPanel({ team }) {
               <span>Recurring · Count</span>
             </label>
           </Row>
-
-          {/* Validation */}
-          { (sTimeErrors.length || (sRecurrenceMode!=="none" && sRecurrenceErrors.length)) > 0 && (
-            <ErrorText>
-              {[...sTimeErrors, ...(sRecurrenceMode!=="none" ? sRecurrenceErrors : [])].map((e,i)=><div key={i}>• {e}</div>)}
-            </ErrorText>
           )}
 
-          <Row>
-            {sEd.recur_freq !== 'none' && (
-              <Label>
-                Every
-                <Input type="number" min={1} max={12} value={sEd.recur_interval || 1}
-                       onChange={(e)=> setSEd({ ...sEd, recur_interval: Math.max(1, Math.min(12, Number(e.target.value) || 1)) })}
-                       style={{ width: 90 }} />
-                <span style={{ marginLeft: 6 }}>
-                  {sEd.recur_freq === 'weekly' ? ((sEd.recur_interval||1) === 1 ? 'week' : 'weeks') : (sEd.recur_freq === 'monthly' ? ((sEd.recur_interval||1) === 1 ? 'month' : 'months') : 'intervals')}
-                </span>
-              </Label>
+          {sTab==='schedule' && (
+          <div style={{ border: '1px solid rgba(255,255,255,0.1)', borderRadius: 8, padding: 10, marginTop: 10 }}>
+            <div style={{ fontWeight: 600, marginBottom: 6 }}>Scheduling & Details</div>
+
+            {/* Validation */}
+            { (sTimeErrors.length || (sRecurrenceMode!=="none" && sRecurrenceErrors.length) || sEndBeforeSlots) > 0 && (
+              <ErrorText>
+                {[...sTimeErrors, ...(sRecurrenceMode!=="none" ? sRecurrenceErrors : []), ...(sEndBeforeSlots ? ["End time is before the last slot ends."] : [])].map((e,i)=><div key={i}>• {e}</div>)}
+              </ErrorText>
             )}
-            <Input value={sEd.title || ""} onChange={(e)=>setSEd({ ...sEd, title: e.target.value })} />
-            <Input placeholder="Location" value={sEd.location || ""} onChange={(e)=>setSEd({ ...sEd, location: e.target.value })} />
-            <select value={sEd.category || "rehearsal"} onChange={(e)=>setSEd({ ...sEd, category: e.target.value })} style={styles.select}>
-              {CATEGORIES.map((c)=> <option key={c} value={c}>{cap(c)}</option>)}
-            </select>
-          </Row>
-          <Row>
-            <Textarea placeholder="Description" value={sEd.description || ""} onChange={(e)=>setSEd({ ...sEd, description: e.target.value })} maxLength={500} rows={3} style={{ minWidth: 500 }} />
-          </Row>
 
-          {/* Production Roster */}
-          <div style={{ marginTop: 10, borderTop: '1px solid rgba(255,255,255,0.1)', paddingTop: 10 }}>
-            <div style={{ fontWeight: 600, marginBottom: 6 }}>Production Roster</div>
-            <StaffEditor staff={seriesStaff} setStaff={setSeriesStaff} candidates={staffCandidates} />
+            <Row>
+              {sEd.recur_freq !== 'none' && (
+                <Label>
+                  Every
+                  <Input type="number" min={1} max={12} value={sEd.recur_interval || 1}
+                         onChange={(e)=> setSEd({ ...sEd, recur_interval: Math.max(1, Math.min(12, Number(e.target.value) || 1)) })}
+                         style={{ width: 90 }} />
+                  <span style={{ marginLeft: 6 }}>
+                    {sEd.recur_freq === 'weekly' ? ((sEd.recur_interval||1) === 1 ? 'week' : 'weeks') : (sEd.recur_freq === 'monthly' ? ((sEd.recur_interval||1) === 1 ? 'month' : 'months') : 'intervals')}
+                  </span>
+                </Label>
+              )}
+              <Input value={sEd.title || ""} onChange={(e)=>setSEd({ ...sEd, title: e.target.value })} />
+              <Input placeholder="Location" value={sEd.location || ""} onChange={(e)=>setSEd({ ...sEd, location: e.target.value })} />
+              <select value={sEd.category || "rehearsal"} onChange={(e)=>setSEd({ ...sEd, category: e.target.value })} style={styles.select}>
+                {CATEGORIES.map((c)=> <option key={c} value={c}>{cap(c)}</option>)}
+              </select>
+            </Row>
+            <Row>
+              <Textarea placeholder="Description" value={sEd.description || ""} onChange={(e)=>setSEd({ ...sEd, description: e.target.value })} maxLength={500} rows={3} style={{ minWidth: 500 }} />
+            </Row>
           </div>
+          )}
 
-          {/* Running Order */}
+          {sTab==='production' && (
           <div style={{ marginTop: 10, borderTop: '1px solid rgba(255,255,255,0.1)', paddingTop: 10 }}>
-            <div style={{ fontWeight: 600, marginBottom: 6 }}>Running Order</div>
+            <div style={{ marginBottom: 16 }}>
+              <div style={{ fontWeight: 600, marginBottom: 6 }}>Production Roster</div>
+            <StaffEditor staff={seriesStaff} setStaff={setSeriesStaff} candidates={staffCandidates} />
+            </div>
+
+            <div style={{ fontWeight: 600, marginBottom: 6, marginTop: 16 }}>Running Order</div>
           <SlotsEditor
             slots={seriesSlots}
             baseStartIso={(function(){ const r = composeStartEndISO(sEd?._s?.date, sEd?._s?.time, sEd?._e?.time); return r.startIso || ''; })()}
@@ -1058,6 +1113,7 @@ export default function CalendarPanel({ team }) {
             candidates={staffCandidates}
           />
           </div>
+          )}
 
           <Row>
             <Input type="date" value={sEd._s.date} onChange={(ev)=>{
@@ -1087,7 +1143,7 @@ export default function CalendarPanel({ team }) {
             <Input type="time" value={sEd._e.time} onChange={(ev)=>{ setSEndTouched(true); setSEd({ ...sEd, _e: { ...sEd._e, time: ev.target.value } }); }} />
           </Row>
 
-          {sRecurrenceMode !== "none" && (
+          {sTab==='schedule' && sRecurrenceMode !== "none" && (
             <>
               <Row>
                 <Label>
@@ -1185,14 +1241,22 @@ export default function CalendarPanel({ team }) {
       {mode === "editOcc" && oEd && (
         <div style={styles.panel}>
           <h4 style={{ margin: "0 0 10px", fontSize: 14 }}>Manage Event</h4>
+          <Row>
+            <GhostButton onClick={()=>setOTab('schedule')} style={{ padding: '4px 8px', fontWeight: oTab==='schedule'?600:400, textDecoration: oTab==='schedule'?'underline':'none' }}>Scheduling</GhostButton>
+            <GhostButton onClick={()=>setOTab('production')} style={{ padding: '4px 8px', fontWeight: oTab==='production'?600:400, textDecoration: oTab==='production'?'underline':'none' }}>Production</GhostButton>
+          </Row>
           <InfoText>
             Editing a single occurrence. Series defaults remain unchanged; differences here are stored as an override for this occurrence.
           </InfoText>
 
-          {oTimeErrors.length > 0 && (
-            <ErrorText>{oTimeErrors.map((e,i)=><div key={i}>• {e}</div>)}</ErrorText>
+          {oTab==='schedule' && (oTimeErrors.length > 0 || oEndBeforeSlots) && (
+            <ErrorText>
+              {oTimeErrors.map((e,i)=><div key={i}>• {e}</div>)}
+              {oEndBeforeSlots && <div>• End time is before the last slot ends.</div>}
+            </ErrorText>
           )}
 
+          {oTab==='schedule' && (
           <Row>
             <Input value={oEd.title} onChange={(e)=>setOEd({ ...oEd, title: e.target.value })} />
             <Input placeholder="Location" value={oEd.location} onChange={(e)=>setOEd({ ...oEd, location: e.target.value })} />
@@ -1200,17 +1264,21 @@ export default function CalendarPanel({ team }) {
               {CATEGORIES.map((c)=> <option key={c} value={c}>{cap(c)}</option>)}
             </select>
           </Row>
+          )}
+          {oTab==='schedule' && (
           <Row>
             <Textarea placeholder="Description" value={oEd.description} onChange={(e)=>setOEd({ ...oEd, description: e.target.value })} maxLength={500} rows={3} style={{ minWidth: 500 }} />
           </Row>
+          )}
 
-          {/* Production Roster */}
+          {oTab==='production' && (
           <div style={{ marginTop: 10, borderTop: '1px solid rgba(255,255,255,0.1)', paddingTop: 10 }}>
             <div style={{ fontWeight: 600, marginBottom: 6 }}>Production Roster</div>
             <StaffEditor staff={instanceStaff} setStaff={setInstanceStaff} candidates={staffCandidates} />
           </div>
+          )}
 
-          {/* Running Order */}
+          {oTab==='production' && (
           <div style={{ marginTop: 10, borderTop: '1px solid rgba(255,255,255,0.1)', paddingTop: 10 }}>
             <div style={{ fontWeight: 600, marginBottom: 6 }}>Running Order</div>
           <SlotsEditor
@@ -1251,6 +1319,7 @@ export default function CalendarPanel({ team }) {
             candidates={staffCandidates}
           />
           </div>
+          )}
           <Row>
             <Input type="date" value={oEd._sDate} onChange={(e)=>setOEd({ ...oEd, _sDate: e.target.value })} />
             <Input type="time" value={oEd._sTime} onChange={(e)=>setOEd({ ...oEd, _sTime: e.target.value })} />
